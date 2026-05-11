@@ -6,13 +6,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from conformance.implementations import resolve_required_repo_path
+from conformance.paths import repo_root
 from conformance.toolchains import find_java
 
 
 def _jar_path() -> Path:
-    repo = resolve_required_repo_path("sendspin-jvm")
-    return repo / "conformance-client" / "build" / "libs" / "conformance-client.jar"
+    return repo_root() / "adapters" / "sendspin-jvm" / "client" / "build" / "libs" / "conformance-client.jar"
 
 
 def main() -> None:
@@ -20,7 +19,7 @@ def main() -> None:
     if not jar.exists():
         print(
             f"conformance-client.jar not found at {jar}\n"
-            "Build it first: ./gradlew :conformance-client:jar",
+            "Build it first: conformance build",
             file=sys.stderr,
         )
         sys.exit(1)

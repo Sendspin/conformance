@@ -293,8 +293,12 @@ def _gradle_build_result() -> BuildResult:
         }
 
     gradlew = repo / ("gradlew.bat" if os.name == "nt" else "gradlew")
-    jar = repo / "conformance-client" / "build" / "libs" / "conformance-client.jar"
-    completed = _run_command([str(gradlew), ":conformance-client:jar"], cwd=repo)
+    adapter_dir = repo_root() / "adapters" / "sendspin-jvm" / "client"
+    jar = adapter_dir / "build" / "libs" / "conformance-client.jar"
+    completed = _run_command(
+        [str(gradlew), "--project-dir", str(adapter_dir), "jar"],
+        cwd=repo,
+    )
     runtime_command_prefix = None
     if completed.returncode == 0 and jar.exists():
         runtime_command_prefix = [java, "-jar", str(jar)]
