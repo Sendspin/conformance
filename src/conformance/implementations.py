@@ -9,6 +9,30 @@ from .paths import candidate_repo_paths, first_existing_path, repo_root
 
 
 IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
+    "sendspin-jvm": ImplementationSpec(
+        name="sendspin-jvm",
+        display_name="sendspin-jvm",
+        repo_dirname="sendspin-jvm",
+        remote_url="https://github.com/OnFreund/sendspin-jvm.git",
+        client=RoleSpec(
+            supported=True,
+            adapter_kind="python",
+            build_adapter="sendspin-jvm-client",
+            entrypoint="conformance.adapters.sendspin_jvm_client",
+            supports_server_initiated=True,
+            supports_client_initiated=True,
+            supports_flac=True,
+            supports_opus=False,
+            supports_discovery=False,
+            supported_role_families=("player", "metadata", "controller", "artwork"),
+        ),
+        server=RoleSpec(
+            supported=False,
+            adapter_kind="placeholder",
+            entrypoint="conformance.adapters.placeholder",
+            reason="sendspin-jvm is a client-only implementation.",
+        ),
+    ),
     "aiosendspin": ImplementationSpec(
         name="aiosendspin",
         display_name="aiosendspin",

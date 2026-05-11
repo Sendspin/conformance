@@ -16,7 +16,7 @@ from .environment import build_log_filename, resolve_environment
 from .implementations import ensure_repo_checkout, resolve_repo_path
 from .io import write_json
 from .paths import repo_root
-from .toolchains import find_cargo, find_cmake, find_dotnet, find_go, find_swift
+from .toolchains import find_cargo, find_cmake, find_dotnet, find_go, find_java, find_swift
 
 
 BuildResult = dict[str, Any]
@@ -274,6 +274,41 @@ def _swift_build_result() -> BuildResult:
     )
 
 
+def _gradle_build_result() -> BuildResult:
+    try:
+        repo = ensure_repo_checkout("sendspin-jvm")
+    except FileNotFoundError as err:
+        return {
+            "adapter": "sendspin-jvm-client",
+            "status": "failed",
+            "detail": str(err),
+        }
+
+    java = find_java()
+    if java is None:
+        return {
+            "adapter": "sendspin-jvm-client",
+            "status": "failed",
+            "detail": "java executable is not available",
+        }
+
+    gradlew = repo / ("gradlew.bat" if os.name == "nt" else "gradlew")
+    adapter_dir = repo_root() / "adapters" / "sendspin-jvm" / "client"
+    jar = adapter_dir / "build" / "libs" / "conformance-client.jar"
+    completed = _run_command(
+        [str(gradlew), "--project-dir", str(adapter_dir), "jar"],
+        cwd=repo,
+    )
+    runtime_command_prefix = None
+    if completed.returncode == 0 and jar.exists():
+        runtime_command_prefix = [java, "-jar", str(jar)]
+    return _built_result(
+        adapter="sendspin-jvm-client",
+        completed=completed,
+        runtime_command_prefix=runtime_command_prefix,
+    )
+
+
 def _cmake_build_result() -> BuildResult:
     cmake = find_cmake()
     if cmake is None:
@@ -367,6 +402,7 @@ def build_adapters(report_path: Path | None = None) -> list[BuildResult]:
 def _build_plan() -> BuildPlan:
     return (
         ("python-adapters", _python_build_result),
+        ("sendspin-jvm-client", _gradle_build_result),
         ("sendspin-dotnet-client", _dotnet_build_result),
         ("sendspin-rs-client", _cargo_build_result),
         ("SendspinKit-client", _swift_build_result),
