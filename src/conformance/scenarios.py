@@ -196,6 +196,26 @@ SERVER_INITIATED_PCM_24BIT = ScenarioSpec(
 )
 
 
+SERVER_INITIATED_VOLUME_CURVE = ScenarioSpec(
+    id="server-initiated-volume-curve",
+    display_name="Server calibrates client volume curve",
+    description=(
+        "Start the server first, then the client. The server sets `volume = 50`, "
+        "the client plays a known fixture, and the harness measures the peak "
+        "amplitude of the recorded output and asserts it matches the spec's "
+        "perceptual curve (`0.5^1.5 ≈ 0.354` × original, ≈ −9 dB). A "
+        "non-conformant linear-gain client outputs ≈ `0.5` × original (≈ −6 dB). "
+        "Per the audit, sendspin-go and sendspin-js apply linear `vol/100` gain "
+        "today; sendspin-jvm and sendspin-dotnet need follow-up audits."
+    ),
+    initiator_role="server",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="capability-only",
+    required_capability="volume-perceptual-curve",
+)
+
+
 SERVER_INITIATED_STATIC_DELAY = ScenarioSpec(
     id="server-initiated-static-delay",
     display_name="Client applies configured `static_delay_ms`",
@@ -290,6 +310,7 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_EXTERNAL_SOURCE,
     SERVER_INITIATED_MULTI_SERVER_ARBITRATION,
     SERVER_INITIATED_STATIC_DELAY,
+    SERVER_INITIATED_VOLUME_CURVE,
 )
 
 SCENARIOS: dict[str, ScenarioSpec] = {scenario.id: scenario for scenario in SCENARIO_LIST}

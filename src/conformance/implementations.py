@@ -69,6 +69,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
                 "external-source-client-api",
                 "multi-server-arbitration",
                 "static-delay-applied",
+                "volume-perceptual-curve",
             ),
         ),
     ),
