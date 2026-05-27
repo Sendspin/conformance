@@ -124,6 +124,24 @@ async def _wait_for_incoming_client(
     raise TimeoutError(f"Timed out waiting for client {client_name!r}")
 
 
+def _expand_pcm_16_to_32(pcm_16_bytes: bytes) -> bytes:
+    """Re-pack signed 16-bit little-endian PCM as signed 32-bit little-endian.
+
+    Each 16-bit sample becomes a 32-bit sample of equal float value by
+    left-shifting 16 bits — the original two bytes become the high half of the
+    32-bit sample and two zero bytes fill the low half. ``FloatPcmHasher``
+    produces identical float-domain hashes for the two representations, so
+    existing PCM verification still works. The aiosendspin SDK ingests 32-bit
+    PCM as the PyAV-compatible source for any non-16-bit wire format,
+    including the 24-bit packed wire format the SDK then writes on the wire.
+    """
+    sample_count = len(pcm_16_bytes) // 2
+    out = bytearray(sample_count * 4)
+    out[2::4] = pcm_16_bytes[0::2]
+    out[3::4] = pcm_16_bytes[1::2]
+    return bytes(out)
+
+
 def _iter_pcm_blocks(
     pcm_bytes: bytes,
     *,
@@ -317,6 +335,17 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
             fixture,
             frame_samples=frame_alignment_samples,
         )
+    wire_bit_depth = fixture.bit_depth
+    source_bit_depth = fixture.bit_depth
+    source_pcm_bytes = fixture.pcm_bytes
+    if args.scenario_id == "server-initiated-pcm-24bit":
+        # The SDK ingests source PCM as s32 (PyAV-compatible) and emits the
+        # negotiated 24-bit packed format on the wire. Feed 32-bit source
+        # bytes here and declare bit_depth=32 as the source format; the
+        # negotiated wire bit depth is reported via stream/start.
+        source_pcm_bytes = _expand_pcm_16_to_32(fixture.pcm_bytes)
+        source_bit_depth = 32
+        wire_bit_depth = 24
     stream_state: dict[str, Any] | None = None
     sent_codec_header_sha256: str | None = None
     sent_audio_hasher = sha256()
@@ -388,16 +417,16 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
         stream = client.group.start_stream()
         audio_format = AudioFormat(
             sample_rate=fixture.sample_rate,
-            bit_depth=fixture.bit_depth,
+            bit_depth=source_bit_depth,
             channels=fixture.channels,
         )
         next_play_start_us = server.clock.now_us() + 250_000
         total_duration_us = 0
         for chunk, duration_us in _iter_pcm_blocks(
-            fixture.pcm_bytes,
+            source_pcm_bytes,
             sample_rate=fixture.sample_rate,
             channels=fixture.channels,
-            bit_depth=fixture.bit_depth,
+            bit_depth=source_bit_depth,
         ):
             stream.prepare_audio(chunk, audio_format)
             play_start_us = await stream.commit_audio(play_start_us=next_play_start_us)
@@ -425,7 +454,7 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
             "clip_seconds": args.clip_seconds,
             "sample_rate": fixture.sample_rate,
             "channels": fixture.channels,
-            "bit_depth": fixture.bit_depth,
+            "bit_depth": wire_bit_depth,
             "frame_count": fixture.frame_count,
             "duration_seconds": fixture.duration_seconds,
             "frame_alignment_samples": frame_alignment_samples,
@@ -542,6 +571,7 @@ async def _scenario_payload(
     if args.scenario_id in {
         "client-initiated-pcm",
         "server-initiated-pcm",
+        "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
     }:
