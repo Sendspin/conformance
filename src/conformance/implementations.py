@@ -67,6 +67,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
                 "stream-request-format-emit",
                 "pcm-24bit-decode",
                 "external-source-client-api",
+                "multi-server-arbitration",
             ),
         ),
     ),

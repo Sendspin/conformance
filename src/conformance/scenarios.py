@@ -196,6 +196,27 @@ SERVER_INITIATED_PCM_24BIT = ScenarioSpec(
 )
 
 
+SERVER_INITIATED_MULTI_SERVER_ARBITRATION = ScenarioSpec(
+    id="server-initiated-multi-server-arbitration",
+    display_name="Client arbitrates between two connected servers",
+    description=(
+        "Two servers connect to one client (one with "
+        "`connection_reason: 'discovery'`, one with `'playback'`). The harness "
+        "asserts the client sends `client/goodbye` with the right reason "
+        "(`'another_server'`) on the right socket and ends up speaking to the "
+        "right server per the spec's decision table. Per the audit, only "
+        "sendspin-cpp and sendspin-cli (via aiosendspin) implement these rules; "
+        "every other client SDK collapses to \"whichever connection happened "
+        "first\" and defaults to the wrong goodbye reason on switch."
+    ),
+    initiator_role="server",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="capability-only",
+    required_capability="multi-server-arbitration",
+)
+
+
 SERVER_INITIATED_EXTERNAL_SOURCE = ScenarioSpec(
     id="server-initiated-external-source",
     display_name="Client enters and leaves `external_source` mid-stream",
@@ -247,6 +268,7 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_REQUEST_FORMAT,
     SERVER_INITIATED_PCM_24BIT,
     SERVER_INITIATED_EXTERNAL_SOURCE,
+    SERVER_INITIATED_MULTI_SERVER_ARBITRATION,
 )
 
 SCENARIOS: dict[str, ScenarioSpec] = {scenario.id: scenario for scenario in SCENARIO_LIST}
