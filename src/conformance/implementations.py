@@ -64,6 +64,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supported_capabilities=(
                 "stream-sync-drift-correction",
                 "client-time-burst-cadence",
+                "stream-request-format-emit",
             ),
         ),
     ),

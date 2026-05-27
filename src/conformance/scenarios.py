@@ -177,6 +177,25 @@ SERVER_INITIATED_BURST_CADENCE = ScenarioSpec(
 )
 
 
+SERVER_INITIATED_REQUEST_FORMAT = ScenarioSpec(
+    id="server-initiated-request-format",
+    display_name="Client requests a mid-stream codec switch",
+    description=(
+        "Start the server first, then the client. The server begins streaming in Opus; "
+        "the client is instructed to emit `stream/request-format` with FLAC at a fixed "
+        "timestamp; the server responds with a fresh `stream/start` in FLAC and the "
+        "client decodes both halves. No SDK currently emits `stream/request-format`, so "
+        "this scenario surfaces dead protocol surface across the matrix until a client "
+        "SDK exposes the API."
+    ),
+    initiator_role="server",
+    preferred_codec="opus",
+    required_role_families=("player",),
+    verification_mode="capability-only",
+    required_capability="stream-request-format-emit",
+)
+
+
 SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     CLIENT_INITIATED_PCM,
     SERVER_INITIATED_PCM,
@@ -187,6 +206,7 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_OPUS,
     SERVER_INITIATED_DRIFT_INJECTION,
     SERVER_INITIATED_BURST_CADENCE,
+    SERVER_INITIATED_REQUEST_FORMAT,
 )
 
 SCENARIOS: dict[str, ScenarioSpec] = {scenario.id: scenario for scenario in SCENARIO_LIST}
