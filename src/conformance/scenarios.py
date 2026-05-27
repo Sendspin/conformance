@@ -141,6 +141,24 @@ SERVER_INITIATED_ARTWORK = ScenarioSpec(
 )
 
 
+SERVER_INITIATED_DRIFT_INJECTION = ScenarioSpec(
+    id="server-initiated-drift-injection",
+    display_name="Server injects timestamp drift mid-stream",
+    description=(
+        "Start the server first, then the client. The server deliberately skews its "
+        "audio chunk timestamps by a known amount partway through the stream. A "
+        "conformant client recovers the original audio within the spec's soft/hard "
+        "correction thresholds; a non-conformant client either drops audio or "
+        "produces a hash that diverges from the fixture by more than tolerance."
+    ),
+    initiator_role="server",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="capability-only",
+    required_capability="stream-sync-drift-correction",
+)
+
+
 SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     CLIENT_INITIATED_PCM,
     SERVER_INITIATED_PCM,
@@ -149,6 +167,7 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_CONTROLLER,
     SERVER_INITIATED_FLAC,
     SERVER_INITIATED_OPUS,
+    SERVER_INITIATED_DRIFT_INJECTION,
 )
 
 SCENARIOS: dict[str, ScenarioSpec] = {scenario.id: scenario for scenario in SCENARIO_LIST}

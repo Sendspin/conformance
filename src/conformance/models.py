@@ -11,7 +11,14 @@ CaseStatus = Literal["passed", "failed", "skipped"]
 InitiatorRole = Literal["server", "client"]
 RoleName = Literal["server", "client"]
 RoleFamily = Literal["player", "metadata", "controller", "artwork"]
-VerificationMode = Literal["audio-pcm", "audio-encoded-bytes", "metadata", "controller", "artwork"]
+VerificationMode = Literal[
+    "audio-pcm",
+    "audio-encoded-bytes",
+    "metadata",
+    "controller",
+    "artwork",
+    "capability-only",
+]
 
 
 @dataclass(frozen=True)
@@ -28,6 +35,7 @@ class RoleSpec:
     supports_opus: bool = False
     supports_discovery: bool = False
     supported_role_families: tuple[RoleFamily, ...] = ()
+    supported_capabilities: tuple[str, ...] = ()
     reason: str | None = None
 
     def supports_initiator(self, initiator_role: InitiatorRole) -> bool:
@@ -49,6 +57,12 @@ class RoleSpec:
         supported = set(self.supported_role_families)
         return all(role_family in supported for role_family in role_families)
 
+    def supports_capability(self, capability: str | None) -> bool:
+        """Return whether this role exposes the SDK surface a scenario requires."""
+        if capability is None:
+            return True
+        return capability in self.supported_capabilities
+
     def unsupported_reason(
         self,
         *,
@@ -57,9 +71,12 @@ class RoleSpec:
         scenario: "ScenarioSpec",
     ) -> str | None:
         """Explain why this role cannot execute the scenario."""
-        if self.supports_initiator(scenario.initiator_role) and self.supports_codec(
-            scenario.preferred_codec
-        ) and self.supports_role_families(scenario.required_role_families):
+        if (
+            self.supports_initiator(scenario.initiator_role)
+            and self.supports_codec(scenario.preferred_codec)
+            and self.supports_role_families(scenario.required_role_families)
+            and self.supports_capability(scenario.required_capability)
+        ):
             return None
 
         if scenario.initiator_role == "server":
@@ -83,6 +100,12 @@ class RoleSpec:
             return (
                 f"{implementation} {role} adapter does not support role family/families "
                 f"{missing_display} required by {scenario.id}."
+            )
+
+        if not self.supports_capability(scenario.required_capability):
+            return (
+                f"{implementation} {role} adapter does not expose the "
+                f"{scenario.required_capability!r} capability required by {scenario.id}."
             )
 
         return (
@@ -115,6 +138,7 @@ class ScenarioSpec:
     required_role_families: tuple[RoleFamily, ...]
     verification_mode: VerificationMode
     extra_cli_args: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    required_capability: str | None = None
 
     def cli_args(self) -> dict[str, str]:
         """Return scenario-wide CLI arguments passed to both roles."""

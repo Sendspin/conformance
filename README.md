@@ -11,6 +11,7 @@ Current scenarios:
 - `server-initiated-controller` (Server initiates connection and client wants Controller): start the server first, let the client advertise a listener, let the server connect in, observe controller state, send a control command, and verify the server recorded it
 - `server-initiated-flac` (Server initiates connection and client wants FLAC): start the server first with PCM audio decoded from `almost_silent.flac`, let the client advertise a listener and FLAC as its only supported audio format, let the server connect in, encode the PCM to FLAC using the SDK, stream it to the client, and compare the transported FLAC bytes
 - `server-initiated-opus` (Server initiates connection and client wants OPUS): start the server first with PCM audio decoded from `almost_silent.flac`, let the client advertise a listener and OPUS as its only supported audio format, let the server connect in, encode the PCM to OPUS using the SDK, stream it to the client, and compare the transported OPUS bytes
+- `server-initiated-drift-injection` (Server injects timestamp drift mid-stream): start the server first, then the client. The server deliberately skews audio chunk timestamps partway through the stream; a conformant client recovers the original audio within the spec's soft/hard correction thresholds. No SDK in the matrix declares the `stream-sync-drift-correction` capability yet, so every case currently fails fast and the matrix surfaces the gap
 
 ## Current coverage
 

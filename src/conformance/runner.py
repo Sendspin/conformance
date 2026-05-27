@@ -742,6 +742,11 @@ def _compare_summaries(
         return _compare_controller_summaries(server_summary, client_summary)
     if scenario.verification_mode == "artwork":
         return _compare_artwork_summaries(server_summary, client_summary)
+    if scenario.verification_mode == "capability-only":
+        # Reserved for scenarios whose only purpose today is to surface SDK capability
+        # gaps. No SDK in the matrix supports them yet, so every case fails fast via
+        # the capability check before reaching this comparison.
+        return False, "No SDK in the matrix supports this scenario yet"
     raise ValueError(f"Unsupported verification mode: {scenario.verification_mode}")
 
 
