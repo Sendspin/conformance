@@ -159,6 +159,24 @@ SERVER_INITIATED_DRIFT_INJECTION = ScenarioSpec(
 )
 
 
+SERVER_INITIATED_BURST_CADENCE = ScenarioSpec(
+    id="server-initiated-burst-cadence",
+    display_name="Server observes client/time burst cadence",
+    description=(
+        "Start the server first, then the client. The server counts `client/time` "
+        "messages over a fixed observation window and asserts the distribution matches "
+        "the recommended cadence — bursts of 8 messages, ~10 s apart — within tolerance. "
+        "A conformant client sends bursts inside the SDK; a non-conformant client leaves "
+        "cadence to the embedder and produces a flat single-message cadence."
+    ),
+    initiator_role="server",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="capability-only",
+    required_capability="client-time-burst-cadence",
+)
+
+
 SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     CLIENT_INITIATED_PCM,
     SERVER_INITIATED_PCM,
@@ -168,6 +186,7 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_FLAC,
     SERVER_INITIATED_OPUS,
     SERVER_INITIATED_DRIFT_INJECTION,
+    SERVER_INITIATED_BURST_CADENCE,
 )
 
 SCENARIOS: dict[str, ScenarioSpec] = {scenario.id: scenario for scenario in SCENARIO_LIST}

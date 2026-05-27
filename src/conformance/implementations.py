@@ -61,7 +61,10 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_opus=True,
             supports_discovery=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
-            supported_capabilities=("stream-sync-drift-correction",),
+            supported_capabilities=(
+                "stream-sync-drift-correction",
+                "client-time-burst-cadence",
+            ),
         ),
     ),
     "sendspin-dotnet": ImplementationSpec(
