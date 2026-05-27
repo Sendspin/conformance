@@ -65,6 +65,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
                 "stream-sync-drift-correction",
                 "client-time-burst-cadence",
                 "stream-request-format-emit",
+                "pcm-24bit-decode",
             ),
         ),
     ),
