@@ -49,6 +49,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_opus=True,
             supports_discovery=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
+            supported_capabilities=("pcm-24bit-decode",),
         ),
         server=RoleSpec(
             supported=True,

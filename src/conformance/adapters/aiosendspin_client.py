@@ -63,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _supported_formats(preferred_codec: str) -> list[Any]:
+def _supported_formats(preferred_codec: str, *, scenario_id: str = "") -> list[Any]:
     from aiosendspin.models.player import SupportedAudioFormat
     from aiosendspin.models.types import AudioCodec
 
@@ -88,6 +88,18 @@ def _supported_formats(preferred_codec: str) -> list[Any]:
                 channels=2,
                 sample_rate=48_000,
                 bit_depth=16,
+            ),
+        ]
+    if scenario_id == "server-initiated-pcm-24bit":
+        # Match the fixture's native rate/channels so the SDK doesn't resample
+        # — only the bit depth changes — making the float-domain PCM hash
+        # round-trip identically through the 16→32→24 conversion.
+        return [
+            SupportedAudioFormat(
+                codec=codec,
+                channels=1,
+                sample_rate=8_000,
+                bit_depth=24,
             ),
         ]
     return [
@@ -301,11 +313,14 @@ async def _run(args: argparse.Namespace) -> int:
     if args.scenario_id in {
         "client-initiated-pcm",
         "server-initiated-pcm",
+        "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
     }:
         player_support = ClientHelloPlayerSupport(
-            supported_formats=_supported_formats(args.preferred_codec),
+            supported_formats=_supported_formats(
+                args.preferred_codec, scenario_id=args.scenario_id
+            ),
             buffer_capacity=2_000_000,
             supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
         )
@@ -351,6 +366,7 @@ async def _run(args: argparse.Namespace) -> int:
     if args.scenario_id in {
         "client-initiated-pcm",
         "server-initiated-pcm",
+        "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
     }:
@@ -468,6 +484,7 @@ async def _run(args: argparse.Namespace) -> int:
     if args.scenario_id in {
         "client-initiated-pcm",
         "server-initiated-pcm",
+        "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
     }:

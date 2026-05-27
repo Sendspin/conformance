@@ -191,7 +191,7 @@ SERVER_INITIATED_PCM_24BIT = ScenarioSpec(
     initiator_role="server",
     preferred_codec="pcm",
     required_role_families=("player",),
-    verification_mode="capability-only",
+    verification_mode="audio-pcm",
     required_capability="pcm-24bit-decode",
 )
 
