@@ -68,6 +68,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
                 "pcm-24bit-decode",
                 "external-source-client-api",
                 "multi-server-arbitration",
+                "static-delay-applied",
             ),
         ),
     ),

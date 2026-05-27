@@ -196,6 +196,26 @@ SERVER_INITIATED_PCM_24BIT = ScenarioSpec(
 )
 
 
+SERVER_INITIATED_STATIC_DELAY = ScenarioSpec(
+    id="server-initiated-static-delay",
+    display_name="Client applies configured `static_delay_ms`",
+    description=(
+        "Start the server first, then the client. The client is configured with a "
+        "non-zero `static_delay_ms`; the server pre-compensates and the harness "
+        "asserts the client's actual emission time is `T − static_delay_ms` within "
+        "the spec's drift tolerance. Per the audit, the highest-severity bug is "
+        "\"parse-but-ignore\": sendspin-rs and SendspinKit parse the field but "
+        "never apply it. A configure-restart-replay variant covers the "
+        "\"forgot-to-persist\" gap that affects seven SDKs."
+    ),
+    initiator_role="server",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="capability-only",
+    required_capability="static-delay-applied",
+)
+
+
 SERVER_INITIATED_MULTI_SERVER_ARBITRATION = ScenarioSpec(
     id="server-initiated-multi-server-arbitration",
     display_name="Client arbitrates between two connected servers",
@@ -269,6 +289,7 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_PCM_24BIT,
     SERVER_INITIATED_EXTERNAL_SOURCE,
     SERVER_INITIATED_MULTI_SERVER_ARBITRATION,
+    SERVER_INITIATED_STATIC_DELAY,
 )
 
 SCENARIOS: dict[str, ScenarioSpec] = {scenario.id: scenario for scenario in SCENARIO_LIST}
