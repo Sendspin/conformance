@@ -196,6 +196,25 @@ SERVER_INITIATED_PCM_24BIT = ScenarioSpec(
 )
 
 
+SERVER_INITIATED_EXTERNAL_SOURCE = ScenarioSpec(
+    id="server-initiated-external-source",
+    display_name="Client enters and leaves `external_source` mid-stream",
+    description=(
+        "Start the server first, then the client. The client enters "
+        "`external_source` mid-stream; the harness asserts the server emits the right "
+        "`group/update` and `stream/end`; then the client leaves `external_source` and "
+        "the previous group is restored. Per the audit, only SendspinKit exposes a "
+        "client-side API today, so every other client fails fast on the "
+        "`external-source-client-api` capability."
+    ),
+    initiator_role="server",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="capability-only",
+    required_capability="external-source-client-api",
+)
+
+
 SERVER_INITIATED_REQUEST_FORMAT = ScenarioSpec(
     id="server-initiated-request-format",
     display_name="Client requests a mid-stream codec switch",
@@ -227,6 +246,7 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_BURST_CADENCE,
     SERVER_INITIATED_REQUEST_FORMAT,
     SERVER_INITIATED_PCM_24BIT,
+    SERVER_INITIATED_EXTERNAL_SOURCE,
 )
 
 SCENARIOS: dict[str, ScenarioSpec] = {scenario.id: scenario for scenario in SCENARIO_LIST}
