@@ -436,13 +436,17 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
 
 async def _run_metadata_scenario(args: argparse.Namespace, *, client: Any) -> dict[str, Any]:
     from aiosendspin.models.types import RepeatMode
+    from aiosendspin.server.roles.controller import ControllerGroupRole
     from aiosendspin.server.roles.metadata import MetadataGroupRole
 
     metadata_group_role = client.group.group_role("metadata")
     if not isinstance(metadata_group_role, MetadataGroupRole):
         raise RuntimeError("Metadata group role is not active for this client")
 
-    repeat = RepeatMode(args.metadata_repeat)
+    controller_group_role = client.group.group_role("controller")
+    if not isinstance(controller_group_role, ControllerGroupRole):
+        raise RuntimeError("Controller group role is not active for this client")
+
     expected = _metadata_snapshot(args)
     metadata_group_role.update(
         title=args.metadata_title,
@@ -452,12 +456,14 @@ async def _run_metadata_scenario(args: argparse.Namespace, *, client: Any) -> di
         artwork_url=args.metadata_artwork_url,
         year=args.metadata_year,
         track=args.metadata_track,
-        repeat=repeat,
-        shuffle=_bool_from_cli(args.metadata_shuffle),
         track_progress=args.metadata_track_progress,
         track_duration=args.metadata_track_duration,
         playback_speed=args.metadata_playback_speed,
     )
+    # repeat/shuffle moved to ControllerGroupRole in aiosendspin #244;
+    # the controller role mirrors them into metadata state for v1 back-compat.
+    controller_group_role.set_repeat(RepeatMode(args.metadata_repeat))
+    controller_group_role.set_shuffle(_bool_from_cli(args.metadata_shuffle))
     await asyncio.sleep(0.5)
     await _disconnect_client(client)
     return {"metadata": {"expected": expected}}
