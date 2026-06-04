@@ -159,6 +159,42 @@ SERVER_INITIATED_PCM_24BIT = ScenarioSpec(
 )
 
 
+CLIENT_INITIATED_REQUEST_FORMAT_PCM = ScenarioSpec(
+    id="client-initiated-request-format-pcm",
+    display_name="Client renegotiates PCM bit depth via stream/request-format",
+    description=(
+        "Start the server first, then the client. The client connects, advertises two PCM "
+        "formats (24-bit then 16-bit), and the server starts streaming the preferred 24-bit "
+        "format. The client then emits stream/request-format asking for the 16-bit format, "
+        "the server re-emits stream/start with the new format, and the matrix verifies the "
+        "client observed the renegotiated 16-bit stream."
+    ),
+    initiator_role="client",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="format-renegotiation",
+    requires_request_format=True,
+)
+
+
+CLIENT_INITIATED_REQUEST_FORMAT_FLAC = ScenarioSpec(
+    id="client-initiated-request-format-flac",
+    display_name="Client renegotiates PCM to FLAC via stream/request-format",
+    description=(
+        "Start the server first, then the client. The client connects, advertises PCM then "
+        "FLAC, and the server starts streaming the preferred PCM format. The client then "
+        "emits stream/request-format asking for FLAC, the server re-emits stream/start with "
+        "the FLAC format, and the matrix verifies the client observed the renegotiated FLAC "
+        "stream."
+    ),
+    initiator_role="client",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="format-renegotiation",
+    requires_request_format=True,
+)
+
+
 SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     CLIENT_INITIATED_PCM,
     SERVER_INITIATED_PCM,
@@ -168,6 +204,8 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_FLAC,
     SERVER_INITIATED_OPUS,
     SERVER_INITIATED_PCM_24BIT,
+    CLIENT_INITIATED_REQUEST_FORMAT_PCM,
+    CLIENT_INITIATED_REQUEST_FORMAT_FLAC,
 )
 
 SCENARIOS: dict[str, ScenarioSpec] = {scenario.id: scenario for scenario in SCENARIO_LIST}
