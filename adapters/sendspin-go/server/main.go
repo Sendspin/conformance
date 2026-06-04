@@ -670,6 +670,12 @@ func controllerStateMessage(parsed args) protocol.ServerStateMessage {
 			SupportedCommands: []string{parsed.ControllerCommand},
 			Volume:            100,
 			Muted:             false,
+			// repeat/shuffle moved to controller state in spec#81 and are
+			// required enum/bool fields. Without an explicit value, repeat
+			// serializes as "" which is not a valid RepeatMode and is
+			// rejected by spec#81-aware clients (e.g. aiosendspin).
+			Repeat:  "off",
+			Shuffle: false,
 		},
 	}
 }
