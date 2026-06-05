@@ -141,6 +141,24 @@ SERVER_INITIATED_ARTWORK = ScenarioSpec(
 )
 
 
+SERVER_INITIATED_PCM_24BIT = ScenarioSpec(
+    id="server-initiated-pcm-24bit",
+    display_name="Server initiates connection and client wants 24-bit PCM",
+    description=(
+        "Start the server first, then the client. The server emits PCM in the 24-bit "
+        "packed wire format (3-byte packed, little-endian, two's complement). The "
+        "client advertises a listener and 24-bit PCM as its only supported audio "
+        "format. The matrix compares canonical PCM hashes after the client unpacks "
+        "the 24-bit stream. A client SDK with no 24-bit decode path misreads the "
+        "bytes and produces a hash mismatch."
+    ),
+    initiator_role="server",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="audio-pcm",
+)
+
+
 SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     CLIENT_INITIATED_PCM,
     SERVER_INITIATED_PCM,
@@ -149,6 +167,7 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_CONTROLLER,
     SERVER_INITIATED_FLAC,
     SERVER_INITIATED_OPUS,
+    SERVER_INITIATED_PCM_24BIT,
 )
 
 SCENARIOS: dict[str, ScenarioSpec] = {scenario.id: scenario for scenario in SCENARIO_LIST}
