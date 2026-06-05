@@ -51,12 +51,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metadata-artwork-url", default="https://example.invalid/almost-silent.jpg")
     parser.add_argument("--metadata-year", type=int, default=2026)
     parser.add_argument("--metadata-track", type=int, default=1)
-    parser.add_argument("--metadata-repeat", default="all")
-    parser.add_argument("--metadata-shuffle", default="false")
     parser.add_argument("--metadata-track-progress", type=int, default=12_000)
     parser.add_argument("--metadata-track-duration", type=int, default=180_000)
     parser.add_argument("--metadata-playback-speed", type=int, default=1_000)
     parser.add_argument("--controller-command", default="next")
+    # Accepted for CLI symmetry with the server; the client observes the
+    # advertised repeat/shuffle from the controller state rather than these.
+    parser.add_argument("--controller-repeat", default="all")
+    parser.add_argument("--controller-shuffle", default="false")
     parser.add_argument("--artwork-format", default="jpeg")
     parser.add_argument("--artwork-width", type=int, default=256)
     parser.add_argument("--artwork-height", type=int, default=256)
@@ -145,7 +147,6 @@ def _normalize_metadata_state(metadata: Any) -> dict[str, Any] | None:
             "track_duration": metadata.progress.track_duration,
             "playback_speed": metadata.progress.playback_speed,
         }
-    repeat = getattr(metadata, "repeat", None)
     return {
         "title": getattr(metadata, "title", None),
         "artist": getattr(metadata, "artist", None),
@@ -154,8 +155,6 @@ def _normalize_metadata_state(metadata: Any) -> dict[str, Any] | None:
         "artwork_url": getattr(metadata, "artwork_url", None),
         "year": getattr(metadata, "year", None),
         "track": getattr(metadata, "track", None),
-        "repeat": None if repeat is None else repeat.value,
-        "shuffle": getattr(metadata, "shuffle", None),
         "progress": progress,
     }
 
@@ -163,10 +162,13 @@ def _normalize_metadata_state(metadata: Any) -> dict[str, Any] | None:
 def _normalize_controller_state(controller: Any) -> dict[str, Any] | None:
     if controller is None:
         return None
+    repeat = getattr(controller, "repeat", None)
     return {
         "supported_commands": [command.value for command in controller.supported_commands],
         "volume": controller.volume,
         "muted": controller.muted,
+        "repeat": None if repeat is None else repeat.value,
+        "shuffle": getattr(controller, "shuffle", None),
     }
 
 

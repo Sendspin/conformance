@@ -314,8 +314,6 @@ private fun JSONObject.addMetadataFields(session: SessionResult, moshi: Moshi) {
                 put("artwork_url", meta.artworkUrl.orNull())
                 put("year", meta.year.orNull() ?: JSONObject.NULL)
                 put("track", meta.track.orNull() ?: JSONObject.NULL)
-                put("repeat", meta.repeat.orNull())
-                put("shuffle", meta.shuffle.orNull() ?: JSONObject.NULL)
                 val prog = meta.progress
                 if (prog != null) {
                     put("progress", JSONObject().apply {

@@ -79,8 +79,6 @@ METADATA_EXTRA_CLI_ARGS = (
     ("metadata_artwork_url", "https://example.invalid/almost-silent.jpg"),
     ("metadata_year", "2026"),
     ("metadata_track", "1"),
-    ("metadata_repeat", "all"),
-    ("metadata_shuffle", "false"),
     ("metadata_track_progress", "12000"),
     ("metadata_track_duration", "180000"),
     ("metadata_playback_speed", "1000"),
@@ -117,6 +115,8 @@ SERVER_INITIATED_CONTROLLER = ScenarioSpec(
     verification_mode="controller",
     extra_cli_args=(
         ("controller_command", "next"),
+        ("controller_repeat", "all"),
+        ("controller_shuffle", "false"),
     ),
 )
 

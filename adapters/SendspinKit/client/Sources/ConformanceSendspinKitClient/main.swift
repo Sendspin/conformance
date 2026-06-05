@@ -438,8 +438,6 @@ actor ConformanceCollector {
                 if let v = m.artworkURL { received["artwork_url"] = v }
                 if let v = m.year { received["year"] = v }
                 if let v = m.track { received["track"] = v }
-                if let v = m.repeatMode { received["repeat"] = v.rawValue }
-                if let v = m.shuffle { received["shuffle"] = v }
                 if let p = m.progress {
                     received["progress"] = [
                         "track_progress": p.trackProgressMs,

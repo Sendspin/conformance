@@ -97,10 +97,12 @@ function scenarioGroup(scenarioId) {
 }
 
 // Strip `timestamp` before comparison: the harness's expected snapshot
-// never contains it (see conformance issue #45).
+// never contains it (see conformance issue #45). repeat/shuffle are
+// controller-role state per the spec and must not appear in the metadata
+// snapshot, so drop them too even if the SDK still surfaces them here.
 function metadataForSummary(metadata) {
   if (!metadata) return null;
-  const { timestamp: _timestamp, ...rest } = metadata;
+  const { timestamp: _timestamp, repeat: _repeat, shuffle: _shuffle, ...rest } = metadata;
   return rest;
 }
 

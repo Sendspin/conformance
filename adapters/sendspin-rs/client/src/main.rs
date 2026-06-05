@@ -62,10 +62,6 @@ struct Args {
     metadata_year: i32,
     #[arg(long, default_value_t = 1)]
     metadata_track: i32,
-    #[arg(long, default_value = "all")]
-    metadata_repeat: String,
-    #[arg(long, default_value = "false")]
-    metadata_shuffle: String,
     #[arg(long, default_value_t = 12_000)]
     metadata_track_progress: i64,
     #[arg(long, default_value_t = 180_000)]
@@ -74,6 +70,12 @@ struct Args {
     metadata_playback_speed: i32,
     #[arg(long, default_value = "next")]
     controller_command: String,
+    // Accepted for CLI symmetry with the server; repeat/shuffle are observed
+    // from the controller state, not these values.
+    #[arg(long, default_value = "all")]
+    controller_repeat: String,
+    #[arg(long, default_value = "false")]
+    controller_shuffle: String,
     #[arg(long, default_value = "jpeg")]
     artwork_format: String,
     #[arg(long, default_value_t = 256)]
@@ -320,8 +322,6 @@ fn normalize_metadata(metadata: &MetadataState) -> serde_json::Value {
         "artwork_url": metadata.artwork_url,
         "year": metadata.year,
         "track": metadata.track,
-        "repeat": metadata.repeat,
-        "shuffle": metadata.shuffle,
         "progress": metadata.progress.as_ref().map(|progress| serde_json::json!({
             "track_progress": progress.track_progress,
             "track_duration": progress.track_duration,

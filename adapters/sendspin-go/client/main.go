@@ -39,12 +39,12 @@ type args struct {
 	MetadataURL       string
 	MetadataYear      int
 	MetadataTrack     int
-	MetadataRepeat    string
-	MetadataShuffle   string
 	MetadataProgress  int
 	MetadataDuration  int
 	MetadataSpeed     int
 	ControllerCommand string
+	ControllerRepeat  string
+	ControllerShuffle string
 	ArtworkFormat     string
 	ArtworkWidth      int
 	ArtworkHeight     int
@@ -82,8 +82,8 @@ func parseArgs() args {
 	flag.StringVar(&parsed.MetadataURL, "metadata-artwork-url", "https://example.invalid/almost-silent.jpg", "")
 	flag.IntVar(&parsed.MetadataYear, "metadata-year", 2026, "")
 	flag.IntVar(&parsed.MetadataTrack, "metadata-track", 1, "")
-	flag.StringVar(&parsed.MetadataRepeat, "metadata-repeat", "all", "")
-	flag.StringVar(&parsed.MetadataShuffle, "metadata-shuffle", "false", "")
+	flag.StringVar(&parsed.ControllerRepeat, "controller-repeat", "all", "")
+	flag.StringVar(&parsed.ControllerShuffle, "controller-shuffle", "false", "")
 	flag.IntVar(&parsed.MetadataProgress, "metadata-track-progress", 12000, "")
 	flag.IntVar(&parsed.MetadataDuration, "metadata-track-duration", 180000, "")
 	flag.IntVar(&parsed.MetadataSpeed, "metadata-playback-speed", 1000, "")
@@ -535,8 +535,6 @@ func normalizeMetadata(metadata *protocol.MetadataState) map[string]any {
 		"artwork_url":  derefString(metadata.ArtworkURL),
 		"year":         derefInt(metadata.Year),
 		"track":        derefInt(metadata.Track),
-		"repeat":       derefString(metadata.Repeat),
-		"shuffle":      derefBool(metadata.Shuffle),
 	}
 	if metadata.Progress != nil {
 		result["progress"] = map[string]any{
@@ -553,6 +551,8 @@ func normalizeController(controller *protocol.ControllerState) map[string]any {
 		"supported_commands": controller.SupportedCommands,
 		"volume":             controller.Volume,
 		"muted":              controller.Muted,
+		"repeat":             controller.Repeat,
+		"shuffle":            controller.Shuffle,
 	}
 }
 

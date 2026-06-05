@@ -681,21 +681,40 @@ def _compare_controller_summaries(
     if client_summary.get("status") != "ok":
         return False, f"Client summary status is {client_summary.get('status')!r}"
 
-    expected = server_summary.get("controller", {}).get("expected_command")
-    received = server_summary.get("controller", {}).get("received_command")
+    server_controller = server_summary.get("controller", {})
+    expected = server_controller.get("expected_command")
+    received = server_controller.get("received_command")
     sent = client_summary.get("controller", {}).get("sent_command")
     if received is None:
         return False, "Server summary shows no controller command received"
     if sent is None:
         return False, "Client summary shows no controller command sent"
-    if expected == received == sent:
-        command_name = expected.get("command") if isinstance(expected, dict) else None
-        return True, f"Controller command matched ({command_name})"
-    return (
-        False,
-        "Controller command mismatch: "
-        f"expected={expected!r} server={received!r} client={sent!r}",
-    )
+    if not (expected == received == sent):
+        return (
+            False,
+            "Controller command mismatch: "
+            f"expected={expected!r} server={received!r} client={sent!r}",
+        )
+
+    # repeat/shuffle are controller-role state; the client must observe and report
+    # them. They are mandatory here (and must never appear in the metadata scenario).
+    received_state = client_summary.get("controller", {}).get("received_state")
+    if not isinstance(received_state, dict):
+        return False, "Client summary shows no controller state"
+    for field in ("repeat", "shuffle"):
+        if field not in received_state:
+            return False, f"Client controller state is missing {field}"
+        expected_value = server_controller.get(field)
+        received_value = received_state.get(field)
+        if expected_value != received_value:
+            return (
+                False,
+                f"Controller {field} mismatch: "
+                f"server={expected_value!r} client={received_value!r}",
+            )
+
+    command_name = expected.get("command") if isinstance(expected, dict) else None
+    return True, f"Controller command matched ({command_name})"
 
 
 def _compare_artwork_summaries(

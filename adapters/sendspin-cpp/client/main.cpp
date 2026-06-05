@@ -659,6 +659,8 @@ static JsonDocument build_summary(const Args& args, const SessionState& state,
             }
             received["volume"] = state.controller_state->volume;
             received["muted"] = state.controller_state->muted;
+            received["repeat"] = to_cstr(state.controller_state->repeat);
+            received["shuffle"] = state.controller_state->shuffle;
         } else {
             controller["received_state"] = nullptr;
         }
