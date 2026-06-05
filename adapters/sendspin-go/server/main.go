@@ -670,6 +670,8 @@ func controllerStateMessage(parsed args) protocol.ServerStateMessage {
 			SupportedCommands: []string{parsed.ControllerCommand},
 			Volume:            100,
 			Muted:             false,
+			Repeat:  "off",
+			Shuffle: false,
 		},
 	}
 }
