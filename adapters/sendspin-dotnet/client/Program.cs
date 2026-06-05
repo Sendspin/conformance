@@ -261,7 +261,7 @@ void HandleGroupState(GroupState group, Func<Task>? sendControllerCommand)
     if (group.Metadata is not null)
     {
         metadataUpdateCount += 1;
-        receivedMetadata = NormalizeMetadata(group.Metadata, group);
+        receivedMetadata = NormalizeMetadata(group.Metadata);
     }
 
     if (options.ScenarioId is not "client-initiated-controller" and not "server-initiated-controller")
@@ -298,7 +298,7 @@ void RecordArtwork(byte[] data)
     artworkSha256 = Hex(SHA256.HashData(data));
 }
 
-static Dictionary<string, object?> NormalizeMetadata(TrackMetadata metadata, GroupState group)
+static Dictionary<string, object?> NormalizeMetadata(TrackMetadata metadata)
 {
     Dictionary<string, object?>? progress = null;
     if (metadata.Progress is not null)
@@ -320,10 +320,6 @@ static Dictionary<string, object?> NormalizeMetadata(TrackMetadata metadata, Gro
         ["artwork_url"] = metadata.ArtworkUrl,
         ["year"] = metadata.Year,
         ["track"] = metadata.Track,
-        // repeat/shuffle moved off TrackMetadata onto GroupState (the controller
-        // role) in SDK v9; the metadata scenario routes them through the group.
-        ["repeat"] = group.Repeat,
-        ["shuffle"] = group.Shuffle,
         ["progress"] = progress,
     };
 }
@@ -335,6 +331,9 @@ static Dictionary<string, object?> NormalizeController(GroupState group, string 
         ["supported_commands"] = new[] { command },
         ["volume"] = group.Volume,
         ["muted"] = group.Muted,
+        // repeat/shuffle are controller-role state, carried on GroupState in SDK v9.
+        ["repeat"] = group.Repeat,
+        ["shuffle"] = group.Shuffle,
     };
 }
 

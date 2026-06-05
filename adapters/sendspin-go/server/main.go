@@ -50,12 +50,12 @@ type args struct {
 	MetadataURL       string
 	MetadataYear      int
 	MetadataTrack     int
-	MetadataRepeat    string
-	MetadataShuffle   string
 	MetadataProgress  int
 	MetadataDuration  int
 	MetadataSpeed     int
 	ControllerCommand string
+	ControllerRepeat  string
+	ControllerShuffle string
 	ArtworkFormat     string
 	ArtworkWidth      int
 	ArtworkHeight     int
@@ -116,12 +116,12 @@ func parseArgs() args {
 	flag.StringVar(&parsed.MetadataURL, "metadata-artwork-url", "https://example.invalid/almost-silent.jpg", "")
 	flag.IntVar(&parsed.MetadataYear, "metadata-year", 2026, "")
 	flag.IntVar(&parsed.MetadataTrack, "metadata-track", 1, "")
-	flag.StringVar(&parsed.MetadataRepeat, "metadata-repeat", "all", "")
-	flag.StringVar(&parsed.MetadataShuffle, "metadata-shuffle", "false", "")
 	flag.IntVar(&parsed.MetadataProgress, "metadata-track-progress", 12000, "")
 	flag.IntVar(&parsed.MetadataDuration, "metadata-track-duration", 180000, "")
 	flag.IntVar(&parsed.MetadataSpeed, "metadata-playback-speed", 1000, "")
 	flag.StringVar(&parsed.ControllerCommand, "controller-command", "next", "")
+	flag.StringVar(&parsed.ControllerRepeat, "controller-repeat", "all", "")
+	flag.StringVar(&parsed.ControllerShuffle, "controller-shuffle", "false", "")
 	flag.StringVar(&parsed.ArtworkFormat, "artwork-format", "jpeg", "")
 	flag.IntVar(&parsed.ArtworkWidth, "artwork-width", 256, "")
 	flag.IntVar(&parsed.ArtworkHeight, "artwork-height", 256, "")
@@ -354,8 +354,10 @@ func runSession(
 				"supported_commands": []string{
 					parsed.ControllerCommand,
 				},
-				"volume": 100,
-				"muted":  false,
+				"volume":  100,
+				"muted":   false,
+				"repeat":  parsed.ControllerRepeat,
+				"shuffle": parsed.ControllerShuffle == "true",
 			},
 		}), nil
 	case conformance.IsArtworkScenario(parsed.ScenarioID):
@@ -634,8 +636,6 @@ func metadataStateMessage(parsed args) protocol.ServerStateMessage {
 			ArtworkURL:  ptr(parsed.MetadataURL),
 			Year:        intPtr(parsed.MetadataYear),
 			Track:       intPtr(parsed.MetadataTrack),
-			Repeat:      ptr(parsed.MetadataRepeat),
-			Shuffle:     boolPtr(parsed.MetadataShuffle == "true"),
 			Progress: &protocol.ProgressState{
 				TrackProgress: parsed.MetadataProgress,
 				TrackDuration: parsed.MetadataDuration,
@@ -654,8 +654,6 @@ func metadataSnapshot(parsed args) map[string]any {
 		"artwork_url":  parsed.MetadataURL,
 		"year":         parsed.MetadataYear,
 		"track":        parsed.MetadataTrack,
-		"repeat":       parsed.MetadataRepeat,
-		"shuffle":      parsed.MetadataShuffle == "true",
 		"progress": map[string]any{
 			"track_progress": parsed.MetadataProgress,
 			"track_duration": parsed.MetadataDuration,
@@ -670,8 +668,8 @@ func controllerStateMessage(parsed args) protocol.ServerStateMessage {
 			SupportedCommands: []string{parsed.ControllerCommand},
 			Volume:            100,
 			Muted:             false,
-			Repeat:  "off",
-			Shuffle: false,
+			Repeat:            parsed.ControllerRepeat,
+			Shuffle:           parsed.ControllerShuffle == "true",
 		},
 	}
 }

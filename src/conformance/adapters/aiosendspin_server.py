@@ -56,12 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metadata-artwork-url", default="https://example.invalid/almost-silent.jpg")
     parser.add_argument("--metadata-year", type=int, default=2026)
     parser.add_argument("--metadata-track", type=int, default=1)
-    parser.add_argument("--metadata-repeat", default="all")
-    parser.add_argument("--metadata-shuffle", default="false")
     parser.add_argument("--metadata-track-progress", type=int, default=12_000)
     parser.add_argument("--metadata-track-duration", type=int, default=180_000)
     parser.add_argument("--metadata-playback-speed", type=int, default=1_000)
     parser.add_argument("--controller-command", default="next")
+    parser.add_argument("--controller-repeat", default="all")
+    parser.add_argument("--controller-shuffle", default="false")
     parser.add_argument("--artwork-format", default="jpeg")
     parser.add_argument("--artwork-width", type=int, default=256)
     parser.add_argument("--artwork-height", type=int, default=256)
@@ -175,8 +175,6 @@ def _metadata_snapshot(args: argparse.Namespace) -> dict[str, Any]:
         "artwork_url": args.metadata_artwork_url,
         "year": args.metadata_year,
         "track": args.metadata_track,
-        "repeat": args.metadata_repeat,
-        "shuffle": _bool_from_cli(args.metadata_shuffle),
         "progress": {
             "track_progress": args.metadata_track_progress,
             "track_duration": args.metadata_track_duration,
@@ -464,17 +462,11 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
 
 
 async def _run_metadata_scenario(args: argparse.Namespace, *, client: Any) -> dict[str, Any]:
-    from aiosendspin.models.types import RepeatMode
-    from aiosendspin.server.roles.controller import ControllerGroupRole
     from aiosendspin.server.roles.metadata import MetadataGroupRole
 
     metadata_group_role = client.group.group_role("metadata")
     if not isinstance(metadata_group_role, MetadataGroupRole):
         raise RuntimeError("Metadata group role is not active for this client")
-
-    controller_group_role = client.group.group_role("controller")
-    if not isinstance(controller_group_role, ControllerGroupRole):
-        raise RuntimeError("Controller group role is not active for this client")
 
     expected = _metadata_snapshot(args)
     metadata_group_role.update(
@@ -489,17 +481,13 @@ async def _run_metadata_scenario(args: argparse.Namespace, *, client: Any) -> di
         track_duration=args.metadata_track_duration,
         playback_speed=args.metadata_playback_speed,
     )
-    # repeat/shuffle moved to ControllerGroupRole in aiosendspin #244;
-    # the controller role mirrors them into metadata state for v1 back-compat.
-    controller_group_role.set_repeat(RepeatMode(args.metadata_repeat))
-    controller_group_role.set_shuffle(_bool_from_cli(args.metadata_shuffle))
     await asyncio.sleep(0.5)
     await _disconnect_client(client)
     return {"metadata": {"expected": expected}}
 
 
 async def _run_controller_scenario(args: argparse.Namespace, *, client: Any) -> dict[str, Any]:
-    from aiosendspin.models.types import MediaCommand
+    from aiosendspin.models.types import MediaCommand, RepeatMode
     from aiosendspin.server.roles.controller import ControllerGroupRole
 
     controller_group_role = client.group.group_role("controller")
@@ -516,6 +504,10 @@ async def _run_controller_scenario(args: argparse.Namespace, *, client: Any) -> 
 
     unsubscribe = client.group.add_event_listener(on_group_event)
     try:
+        # repeat/shuffle are controller-role state; advertise them so the client
+        # observes them in the controller state update.
+        controller_group_role.set_repeat(RepeatMode(args.controller_repeat))
+        controller_group_role.set_shuffle(_bool_from_cli(args.controller_shuffle))
         controller_group_role.set_supported_commands([MediaCommand(args.controller_command)])
         received_command = await asyncio.wait_for(event_future, timeout=args.timeout_seconds)
     finally:
@@ -533,6 +525,8 @@ async def _run_controller_scenario(args: argparse.Namespace, *, client: Any) -> 
             "supported_commands": [command.value for command in all_commands],
             "volume": controller_group_role.volume,
             "muted": controller_group_role.muted,
+            "repeat": controller_group_role.repeat.value,
+            "shuffle": controller_group_role.shuffle,
         }
     }
 
