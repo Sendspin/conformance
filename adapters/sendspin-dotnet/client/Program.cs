@@ -80,7 +80,7 @@ var summary = new Dictionary<string, object?>
     ["peer_hello"] = peerHello,
 };
 
-if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "server-initiated-flac")
+if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "server-initiated-flac" or "server-initiated-pcm-24bit")
 {
     summary["stream"] = playerStream;
     summary["audio"] = pipeline.Snapshot();
@@ -147,7 +147,7 @@ async Task RunListenerClientAsync()
     {
         HandleGroupState(group, () => host.SendCommandAsync(options.ControllerCommand));
     };
-    host.ArtworkReceived += (_, data) => RecordArtwork(data);
+    host.ArtworkReceived += (_, e) => RecordArtwork(e.ImageData);
 
     await host.StartAsync();
     try
@@ -219,7 +219,7 @@ async Task RunOutboundClientAsync()
                 disconnectTcs.TrySetResult(true);
             }
         };
-        client.ArtworkReceived += (_, data) => RecordArtwork(data);
+        client.ArtworkReceived += (_, e) => RecordArtwork(e.ImageData);
 
         await client.ConnectAsync(new Uri(serverUrl), timeout.Token);
         connectedServer = new ConnectionSnapshot(
@@ -241,7 +241,7 @@ async Task RunOutboundClientAsync()
 
 void CaptureStreamStart(StreamStartPayload payload)
 {
-    if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "server-initiated-flac"
+    if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "server-initiated-flac" or "server-initiated-pcm-24bit"
         && payload.Format is not null)
     {
         playerStream = ToWireElement(payload.Format);
@@ -261,7 +261,7 @@ void HandleGroupState(GroupState group, Func<Task>? sendControllerCommand)
     if (group.Metadata is not null)
     {
         metadataUpdateCount += 1;
-        receivedMetadata = NormalizeMetadata(group.Metadata);
+        receivedMetadata = NormalizeMetadata(group.Metadata, group);
     }
 
     if (options.ScenarioId is not "client-initiated-controller" and not "server-initiated-controller")
@@ -298,7 +298,7 @@ void RecordArtwork(byte[] data)
     artworkSha256 = Hex(SHA256.HashData(data));
 }
 
-static Dictionary<string, object?> NormalizeMetadata(TrackMetadata metadata)
+static Dictionary<string, object?> NormalizeMetadata(TrackMetadata metadata, GroupState group)
 {
     Dictionary<string, object?>? progress = null;
     if (metadata.Progress is not null)
@@ -320,8 +320,10 @@ static Dictionary<string, object?> NormalizeMetadata(TrackMetadata metadata)
         ["artwork_url"] = metadata.ArtworkUrl,
         ["year"] = metadata.Year,
         ["track"] = metadata.Track,
-        ["repeat"] = metadata.Repeat,
-        ["shuffle"] = metadata.Shuffle,
+        // repeat/shuffle moved off TrackMetadata onto GroupState (the controller
+        // role) in SDK v9; the metadata scenario routes them through the group.
+        ["repeat"] = group.Repeat,
+        ["shuffle"] = group.Shuffle,
         ["progress"] = progress,
     };
 }
@@ -410,8 +412,16 @@ static ClientCapabilities BuildCapabilities(CliOptions options)
         Roles = roles,
         BufferCapacity = 2_000_000,
         AudioFormats = audioFormats,
-        ArtworkFormats = new List<string> { options.ArtworkFormat },
-        ArtworkMaxSize = Math.Max(options.ArtworkWidth, options.ArtworkHeight),
+        ArtworkChannels = new List<ArtworkChannelSpec>
+        {
+            new ArtworkChannelSpec
+            {
+                Source = "album",
+                Format = options.ArtworkFormat,
+                MediaWidth = options.ArtworkWidth,
+                MediaHeight = options.ArtworkHeight,
+            },
+        },
         ProductName = "Conformance Dotnet Client",
         Manufacturer = "Sendspin Conformance",
         SoftwareVersion = "0.1.0",
