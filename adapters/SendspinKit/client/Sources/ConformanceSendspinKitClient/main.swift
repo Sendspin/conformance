@@ -109,7 +109,13 @@ struct CliOptions {
     }
 
     var isPlayerScenario: Bool {
-        scenarioID.contains("pcm") || scenarioID.contains("flac")
+        scenarioID.contains("pcm") || scenarioID.contains("flac") || scenarioID.contains("opus")
+    }
+
+    /// Codecs whose conformance check compares the raw encoded chunk bytes the
+    /// client received, rather than canonical decoded PCM.
+    var usesEncodedByteVerification: Bool {
+        preferredCodec == "flac" || preferredCodec == "opus"
     }
 
     var isMetadataScenario: Bool {
@@ -414,7 +420,7 @@ actor ConformanceCollector {
                 "audio_chunk_count": audioChunkCount,
                 "received_sample_count": pcmHasher.sampleCount,
             ]
-            if options.preferredCodec == "flac" {
+            if options.usesEncodedByteVerification {
                 audioDict["received_encoded_sha256"] = encodedHasher.hexdigest()
             } else {
                 audioDict["received_pcm_sha256"] = pcmHasher.hexdigest()
@@ -691,7 +697,12 @@ struct ConformanceSendspinKitClient {
             // Declare formats that cover the conformance fixture (8kHz/1ch/16bit)
             // and common production formats. The server picks the closest match,
             // so listing the fixture format first avoids unnecessary resampling.
-            let codec: AudioCodec = options.preferredCodec == "flac" ? .flac : .pcm
+            let codec: AudioCodec
+            switch options.preferredCodec {
+            case "flac": codec = .flac
+            case "opus": codec = .opus
+            default: codec = .pcm
+            }
             let formats = try [
                 // Fixture native format — must match so hashes align
                 AudioFormatSpec(codec: codec, channels: 1, sampleRate: 8000, bitDepth: 16),
