@@ -667,9 +667,29 @@ def _compare_metadata_summaries(
     update_count = int(client_summary.get("metadata", {}).get("update_count") or 0)
     if update_count <= 0:
         return False, "Client summary shows zero metadata updates"
+    # repeat/shuffle are controller-role state, not metadata, in newer SDKs
+    # (e.g. sendspin-cpp dropped them from the metadata object, sendspin-dotnet
+    # moved them onto GroupState). The metadata scenario therefore no longer
+    # asserts them; they belong to the controller scenario.
+    expected = _without_controller_state_fields(expected)
+    received = _without_controller_state_fields(received)
     if expected == received:
         return True, "Metadata snapshot matches"
     return False, f"Metadata mismatch: server={expected!r} client={received!r}"
+
+
+_METADATA_CONTROLLER_FIELDS = ("repeat", "shuffle")
+
+
+def _without_controller_state_fields(snapshot: Any) -> Any:
+    """Drop controller-role fields the metadata scenario no longer asserts."""
+    if not isinstance(snapshot, dict):
+        return snapshot
+    return {
+        key: value
+        for key, value in snapshot.items()
+        if key not in _METADATA_CONTROLLER_FIELDS
+    }
 
 
 def _compare_controller_summaries(
