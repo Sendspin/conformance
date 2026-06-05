@@ -339,6 +339,8 @@ private fun JSONObject.addControllerFields(session: SessionResult) {
                 put("supported_commands", JSONArray(cs.supportedCommands))
                 put("volume", cs.volume)
                 put("muted", cs.muted)
+                put("repeat", cs.repeat.orNull() ?: JSONObject.NULL)
+                put("shuffle", cs.shuffle.orNull() ?: JSONObject.NULL)
             })
         } else {
             put("received_state", JSONObject.NULL)
