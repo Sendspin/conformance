@@ -459,6 +459,8 @@ actor ConformanceCollector {
                     "supported_commands": Array(state.supportedCommands.map(\.rawValue)),
                     "volume": state.volume,
                     "muted": state.muted,
+                    "repeat": state.repeatMode?.rawValue as Any? ?? NSNull(),
+                    "shuffle": state.shuffle as Any? ?? NSNull(),
                 ] as [String: Any]
             }
             if let cmd = sentCommand {
