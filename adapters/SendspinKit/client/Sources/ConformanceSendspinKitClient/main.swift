@@ -611,7 +611,11 @@ actor ConformanceWebSocketTransport: SendspinTransport {
 
 /// Listens for a single inbound WebSocket connection and produces a transport.
 /// NWListener doesn't filter by path — any WebSocket upgrade on this port is accepted.
-func acceptInboundConnection(port: UInt16, path _: String) async throws -> ConformanceWebSocketTransport {
+func acceptInboundConnection(
+    port: UInt16,
+    path _: String,
+    onListening: @escaping @Sendable () throws -> Void
+) async throws -> ConformanceWebSocketTransport {
     let parameters = NWParameters.tcp
     let wsOptions = NWProtocolWebSocket.Options()
     parameters.defaultProtocolStack.applicationProtocols.insert(wsOptions, at: 0)
@@ -629,6 +633,7 @@ func acceptInboundConnection(port: UInt16, path _: String) async throws -> Confo
         }
     }
     let guard_ = ResumeGuard()
+    let listenGuard = ResumeGuard()
 
     // Use DispatchQueue.main — NWConnection callbacks rely on the main queue
     // being serviced. Swift's async runtime keeps it alive in async main().
@@ -660,10 +665,25 @@ func acceptInboundConnection(port: UInt16, path _: String) async throws -> Confo
         }
 
         listener.stateUpdateHandler = { state in
-            if case let .failed(error) = state {
+            switch state {
+            case .ready:
+                // Socket is bound and accepting; only now is it safe to signal
+                // readiness, so an inbound connection can't race ahead of bind.
+                if listenGuard.tryResume() {
+                    do {
+                        try onListening()
+                    } catch {
+                        if guard_.tryResume() {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+            case let .failed(error):
                 if guard_.tryResume() {
                     continuation.resume(throwing: error)
                 }
+            default:
+                break
             }
         }
 
@@ -762,28 +782,34 @@ struct ConformanceSendspinKitClient {
             // Server-initiated: listen for inbound connection
             let wsURL = "ws://127.0.0.1:\(options.port)\(options.path)"
 
-            // Register our endpoint
-            if !options.registryPath.isEmpty {
-                try registerEndpoint(
-                    registryPath: options.registryPath,
-                    name: options.clientName,
-                    url: wsURL
-                )
-            }
-
-            // Write ready file with our URL
-            try writeJSON(to: options.readyPath, payload: [
-                "status": "ready",
-                "scenario_id": options.scenarioID,
-                "initiator_role": options.initiatorRole,
-                "url": wsURL,
-            ])
-
             fputs("[ADAPTER] Listening for server connection on \(wsURL)\n", stderr)
+            // Publish our endpoint (registry + ready file) only once the
+            // listener is bound. The server resolves us via the registry and
+            // dials it with a single, non-retrying attempt, so advertising
+            // before bind lets it connect into a closed port and fail.
+            let registryPath = options.registryPath
+            let clientName = options.clientName
+            let readyPath = options.readyPath
+            let scenarioID = options.scenarioID
+            let initiatorRole = options.initiatorRole
             let transport = try await acceptInboundConnection(
                 port: UInt16(options.port),
                 path: options.path
-            )
+            ) {
+                if !registryPath.isEmpty {
+                    try registerEndpoint(
+                        registryPath: registryPath,
+                        name: clientName,
+                        url: wsURL
+                    )
+                }
+                try writeJSON(to: readyPath, payload: [
+                    "status": "ready",
+                    "scenario_id": scenarioID,
+                    "initiator_role": initiatorRole,
+                    "url": wsURL,
+                ])
+            }
             try await client.acceptConnection(transport)
         }
 
