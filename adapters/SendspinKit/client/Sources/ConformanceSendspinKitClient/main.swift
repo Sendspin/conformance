@@ -839,9 +839,13 @@ struct ConformanceSendspinKitClient {
                 fputs("[ADAPTER] Controller state: \(state.supportedCommands.map(\.rawValue))\n", stderr)
                 await collector.recordControllerState(state)
 
-                // Controller scenario: send the expected command back using the
-                // typed public API (sendCommand is internal by design).
-                if options.isControllerScenario {
+                // Send the expected command back via the typed public API, but only
+                // once the server advertises it in supportedCommands. Per the SDK
+                // contract (see SendspinClient.next()) and the protocol, the server
+                // silently drops unsupported commands: aiosendspin sends an initial
+                // state without the app command, then a second update that adds it.
+                if options.isControllerScenario,
+                   state.supportedCommands.map(\.rawValue).contains(options.controllerCommand) {
                     let cmdString = options.controllerCommand
                     switch cmdString {
                     case "play": try await client.play()
