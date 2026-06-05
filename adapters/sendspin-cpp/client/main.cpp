@@ -181,6 +181,7 @@ struct SessionState {
     Sha256Hasher encoded_hasher;
     size_t received_sample_count{0};
     int audio_chunk_count{0};
+    bool hash_pcm_from_payload{false};
 
     int metadata_update_count{0};
     std::optional<ServerMetadataStateObject> metadata;
@@ -198,7 +199,7 @@ struct SessionState {
 
 static bool is_player_scenario(const std::string& id) {
     return id == "client-initiated-pcm" || id == "server-initiated-pcm" ||
-           id == "server-initiated-flac";
+           id == "server-initiated-flac" || id == "server-initiated-pcm-24bit";
 }
 
 static bool is_metadata_scenario(const std::string& id) {
@@ -377,13 +378,13 @@ class HashingPlayerListener : public PlayerRoleListener {
 public:
     HashingPlayerListener(SessionState& state, PlayerRole& player) : state_(state), player_(player) {}
 
-    size_t on_audio_write(uint8_t* data, size_t length, uint32_t /*timeout_ms*/) override {
-        std::lock_guard<std::mutex> lock(state_.mu);
-        if (state_.stream.has_value() && state_.stream->bit_depth.has_value()) {
-            state_.pcm_hasher.update_from_pcm_bytes(
-                data, length, int(state_.stream->bit_depth.value()));
-            state_.received_sample_count = state_.pcm_hasher.sample_count();
-        }
+    size_t on_audio_write(uint8_t* /*data*/, size_t length, uint32_t /*timeout_ms*/) override {
+        // Drain the player's synchronized playback buffer so the pipeline keeps
+        // flowing, but do not hash it: this buffer is the output of the real-time
+        // sync task, which injects initial-sync silence and soft-sync sample
+        // interpolation, so it is not byte-identical to the transported PCM.
+        // The canonical PCM hash is computed from the wire payload instead (see
+        // install_binary_observer), where PCM frames are carried verbatim.
         return length;
     }
 
@@ -528,6 +529,17 @@ static void install_binary_observer(SendspinClient& client, SessionState& state)
                 std::lock_guard<std::mutex> lock(state.mu);
                 state.audio_chunk_count++;
                 state.encoded_hasher.update(audio, audio_len);
+                if (state.hash_pcm_from_payload) {
+                    // For PCM the wire payload carries decoded samples verbatim, so
+                    // hashing it reproduces the server's canonical PCM exactly. Use the
+                    // negotiated stream bit depth when known, falling back to 16-bit.
+                    int bit_depth =
+                        (state.stream.has_value() && state.stream->bit_depth.has_value())
+                            ? int(state.stream->bit_depth.value())
+                            : 16;
+                    state.pcm_hasher.update_from_pcm_bytes(audio, audio_len, bit_depth);
+                    state.received_sample_count = state.pcm_hasher.sample_count();
+                }
             }
             if (original_binary) {
                 original_binary(current, payload, len);
@@ -626,16 +638,6 @@ static JsonDocument build_summary(const Args& args, const SessionState& state,
             } else {
                 received["track"] = nullptr;
             }
-            if (state.metadata->repeat.has_value()) {
-                received["repeat"] = to_cstr(state.metadata->repeat.value());
-            } else {
-                received["repeat"] = nullptr;
-            }
-            if (state.metadata->shuffle.has_value()) {
-                received["shuffle"] = state.metadata->shuffle.value();
-            } else {
-                received["shuffle"] = nullptr;
-            }
             if (state.metadata->progress.has_value()) {
                 auto progress = received["progress"].to<JsonObject>();
                 progress["track_progress"] = state.metadata->progress->track_progress;
@@ -700,6 +702,8 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
     SendspinClient::set_log_level(level);
 
     SessionState state;
+    state.hash_pcm_from_payload =
+        is_player_scenario(args.scenario_id) && args.preferred_codec == "pcm";
     SendspinClientConfig config = build_client_config(args);
     SendspinClient client(std::move(config));
     AlwaysReadyNetworkProvider network_provider;
