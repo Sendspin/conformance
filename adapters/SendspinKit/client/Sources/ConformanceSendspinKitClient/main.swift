@@ -782,18 +782,13 @@ struct ConformanceSendspinKitClient {
             // Server-initiated: listen for inbound connection
             let wsURL = "ws://127.0.0.1:\(options.port)\(options.path)"
 
-            // Register our endpoint
-            if !options.registryPath.isEmpty {
-                try registerEndpoint(
-                    registryPath: options.registryPath,
-                    name: options.clientName,
-                    url: wsURL
-                )
-            }
-
             fputs("[ADAPTER] Listening for server connection on \(wsURL)\n", stderr)
-            // Defer the ready signal until the listener is bound (see
-            // acceptInboundConnection) so the server can't connect first.
+            // Publish our endpoint (registry + ready file) only once the
+            // listener is bound. The server resolves us via the registry and
+            // dials it with a single, non-retrying attempt, so advertising
+            // before bind lets it connect into a closed port and fail.
+            let registryPath = options.registryPath
+            let clientName = options.clientName
             let readyPath = options.readyPath
             let scenarioID = options.scenarioID
             let initiatorRole = options.initiatorRole
@@ -801,6 +796,13 @@ struct ConformanceSendspinKitClient {
                 port: UInt16(options.port),
                 path: options.path
             ) {
+                if !registryPath.isEmpty {
+                    try registerEndpoint(
+                        registryPath: registryPath,
+                        name: clientName,
+                        url: wsURL
+                    )
+                }
                 try writeJSON(to: readyPath, payload: [
                     "status": "ready",
                     "scenario_id": scenarioID,
