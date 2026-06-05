@@ -483,12 +483,12 @@ actor ConformanceCollector {
 /// that was demoted from the public API.
 actor ConformanceWebSocketTransport: SendspinTransport {
     private var connection: NWConnection?
-    private let textContinuation: AsyncStream<String>.Continuation
-    private let binaryContinuation: AsyncStream<Data>.Continuation
+    /// `nonisolated` so the receive callback yields frames directly in arrival
+    /// order — a per-frame `Task` hop would let independent tasks reorder frames.
+    private nonisolated let frameContinuation: AsyncStream<TransportFrame>.Continuation
     private let encoder = JSONEncoder()
 
-    nonisolated let textMessages: AsyncStream<String>
-    nonisolated let binaryMessages: AsyncStream<Data>
+    nonisolated let frames: AsyncStream<TransportFrame>
 
     var isConnected: Bool {
         connection?.state == .ready
@@ -497,12 +497,9 @@ actor ConformanceWebSocketTransport: SendspinTransport {
     init(connection: NWConnection) {
         self.connection = connection
 
-        let (textStream, textCont) = AsyncStream<String>.makeStream()
-        let (binaryStream, binaryCont) = AsyncStream<Data>.makeStream()
-        textMessages = textStream
-        binaryMessages = binaryStream
-        textContinuation = textCont
-        binaryContinuation = binaryCont
+        let (frameStream, frameCont) = AsyncStream<TransportFrame>.makeStream()
+        frames = frameStream
+        frameContinuation = frameCont
     }
 
     /// Begin pumping messages from the NWConnection into the async streams.
@@ -565,8 +562,7 @@ actor ConformanceWebSocketTransport: SendspinTransport {
     func disconnect() async {
         connection?.cancel()
         connection = nil
-        textContinuation.finish()
-        binaryContinuation.finish()
+        frameContinuation.finish()
     }
 
     // MARK: - Private
@@ -576,7 +572,7 @@ actor ConformanceWebSocketTransport: SendspinTransport {
             guard let self else { return }
 
             if error != nil {
-                Task { await self.finishStreams() }
+                frameContinuation.finish()
                 return
             }
 
@@ -586,14 +582,14 @@ actor ConformanceWebSocketTransport: SendspinTransport {
                 switch metadata.opcode {
                 case .text:
                     if let data = content, let text = String(data: data, encoding: .utf8) {
-                        Task { await self.yieldText(text) }
+                        frameContinuation.yield(.text(text))
                     }
                 case .binary:
                     if let data = content {
-                        Task { await self.yieldBinary(data) }
+                        frameContinuation.yield(.binary(data))
                     }
                 case .close:
-                    Task { await self.finishStreams() }
+                    frameContinuation.finish()
                     return
                 default:
                     break
@@ -602,13 +598,6 @@ actor ConformanceWebSocketTransport: SendspinTransport {
 
             receiveNext(on: connection)
         }
-    }
-
-    private func yieldText(_ text: String) { textContinuation.yield(text) }
-    private func yieldBinary(_ data: Data) { binaryContinuation.yield(data) }
-    private func finishStreams() {
-        textContinuation.finish()
-        binaryContinuation.finish()
     }
 }
 
