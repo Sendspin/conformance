@@ -58,13 +58,22 @@ struct CliOptions {
         var values: [String: String] = [:]
         var index = 0
         while index < filtered.count {
-            let key = filtered[index]
-            guard key.hasPrefix("--"), index + 1 < filtered.count else {
+            let token = filtered[index]
+            guard token.hasPrefix("--") else {
                 index += 1
                 continue
             }
-            values[String(key.dropFirst(2))] = filtered[index + 1]
-            index += 2
+            let key = String(token.dropFirst(2))
+            // A following token is this flag's value only if it isn't itself a
+            // flag; otherwise treat the flag as valueless and don't consume it.
+            let next = index + 1 < filtered.count ? filtered[index + 1] : nil
+            if let next, !next.hasPrefix("--") {
+                values[key] = next
+                index += 2
+            } else {
+                values[key] = ""
+                index += 1
+            }
         }
 
         guard let summaryPath = values["summary"], !summaryPath.isEmpty else {
@@ -150,6 +159,9 @@ struct AdapterError: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
+/// Thrown by the timeout task to win the race against event consumption.
+private struct TimeoutSignal: Error {}
+
 // MARK: - Canonical float32 PCM hashing (matches conformance pcm.py)
 
 /// Incremental SHA-256 hasher that converts integer PCM samples to canonical
@@ -179,8 +191,9 @@ struct FloatPcmHasher {
     }
 
     func hexdigest() -> String {
-        var copy = hasher
-        return copy.finalize().map { String(format: "%02x", $0) }.joined()
+        // `finalize()` is non-mutating, so it reads the running hash without
+        // consuming it — `hexdigest()` stays callable more than once.
+        hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private mutating func update16Bit(_ data: Data) {
@@ -239,8 +252,7 @@ struct RawHasher {
     }
 
     func hexdigest() -> String {
-        var copy = hasher
-        return copy.finalize().map { String(format: "%02x", $0) }.joined()
+        hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -290,6 +302,15 @@ func registerEndpoint(registryPath: String, name: String, url: String) throws {
     try data.write(to: fileURL)
 }
 
+/// True when a metadata update carries at least one populated field — i.e. a
+/// real update, not the server's initial all-null clearing event. Used to
+/// decide when the metadata scenario is satisfied without assuming any single
+/// field (e.g. title) is always present.
+func metadataHasContent(_ m: TrackMetadata) -> Bool {
+    m.title != nil || m.artist != nil || m.albumArtist != nil || m.album != nil
+        || m.artworkURL != nil || m.year != nil || m.track != nil || m.progress != nil
+}
+
 // MARK: - Collected state
 
 /// Accumulates data from events during the conformance run.
@@ -302,6 +323,9 @@ actor ConformanceCollector {
     var audioChunkCount: Int = 0
     var streamFormat: AudioFormatSpec?
     var codecHeaderBase64: String?
+    /// PCM chunks received before the stream format was known, awaiting a bit
+    /// depth so they can be hashed in arrival order.
+    private var pendingPcmChunks: [Data] = []
 
     // Metadata
     var metadataUpdateCount: Int = 0
@@ -319,19 +343,32 @@ actor ConformanceCollector {
     // Server hello
     var peerHello: ServerInfo?
 
+    /// Terminal status reported in the summary. Stays "ok" for a clean run;
+    /// set to "timeout" when the run is cut short so the harness sees a failure
+    /// with a clear reason instead of a missing summary.
+    var runStatus: String = "ok"
+
     init(options: CliOptions) {
         self.options = options
     }
 
-    func recordAudioChunk(data: Data, bitDepth: Int) {
+    func setRunStatus(_ status: String) {
+        runStatus = status
+    }
+
+    func recordAudioChunk(data: Data) {
         audioChunkCount += 1
-        // Always hash raw encoded bytes (for FLAC scenario)
+        // Raw encoded bytes (FLAC/Opus verification) need no format to hash.
         encodedHasher.update(data)
-        // For PCM: also compute canonical float32 hash.
+        // Canonical float32 hashing needs the bit depth.
         // "none" is a harness-level concept for non-audio scenarios that still
         // stream raw PCM — there is no AudioCodec.none in the SDK.
-        if options.preferredCodec == "pcm" || options.preferredCodec == "none" {
-            pcmHasher.update(pcmBytes: data, bitDepth: bitDepth)
+        guard options.preferredCodec == "pcm" || options.preferredCodec == "none" else { return }
+        if let fmt = streamFormat {
+            pcmHasher.update(pcmBytes: data, bitDepth: fmt.bitDepth)
+        } else {
+            // Defer rather than guess a depth and corrupt the running hash.
+            pendingPcmChunks.append(data)
         }
     }
 
@@ -340,6 +377,11 @@ actor ConformanceCollector {
         if let header = codecHeader {
             codecHeaderBase64 = header.base64EncodedString()
         }
+        // Flush chunks that arrived before the format was known, in order.
+        for chunk in pendingPcmChunks {
+            pcmHasher.update(pcmBytes: chunk, bitDepth: format.bitDepth)
+        }
+        pendingPcmChunks.removeAll()
     }
 
     func recordMetadata(_ metadata: TrackMetadata) {
@@ -375,7 +417,7 @@ actor ConformanceCollector {
 
     private func buildSummary() -> [String: Any?] {
         var summary: [String: Any?] = [
-            "status": "ok",
+            "status": runStatus,
             "implementation": "SendspinKit",
             "role": "client",
             "scenario_id": options.scenarioID,
@@ -614,6 +656,7 @@ actor ConformanceWebSocketTransport: SendspinTransport {
 func acceptInboundConnection(
     port: UInt16,
     path _: String,
+    timeout: Double,
     onListening: @escaping @Sendable () throws -> Void
 ) async throws -> ConformanceWebSocketTransport {
     let parameters = NWParameters.tcp
@@ -646,16 +689,19 @@ func acceptInboundConnection(
                 switch state {
                 case .ready:
                     if guard_.tryResume() {
+                        listener.cancel() // one inbound connection is all we need
                         let transport = ConformanceWebSocketTransport(connection: connection)
                         Task { await transport.startReceiving() }
                         continuation.resume(returning: transport)
                     }
                 case let .failed(error):
                     if guard_.tryResume() {
+                        listener.cancel()
                         continuation.resume(throwing: error)
                     }
                 case .cancelled:
                     if guard_.tryResume() {
+                        listener.cancel()
                         continuation.resume(throwing: AdapterError("Connection cancelled"))
                     }
                 default:
@@ -674,12 +720,14 @@ func acceptInboundConnection(
                         try onListening()
                     } catch {
                         if guard_.tryResume() {
+                            listener.cancel()
                             continuation.resume(throwing: error)
                         }
                     }
                 }
             case let .failed(error):
                 if guard_.tryResume() {
+                    listener.cancel()
                     continuation.resume(throwing: error)
                 }
             default:
@@ -688,6 +736,19 @@ func acceptInboundConnection(
         }
 
         listener.start(queue: .main)
+
+        // Bound the wait: if no server dials in, fail with a clear error rather
+        // than hanging until the harness SIGKILLs us with no summary written.
+        // The ResumeGuard makes this a no-op if a connection already won the
+        // race, so no explicit timer cancellation is needed.
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+            if guard_.tryResume() {
+                listener.cancel()
+                continuation.resume(throwing: AdapterError(
+                    "Timed out after \(timeout)s waiting for inbound connection on port \(port)"
+                ))
+            }
+        }
     }
 }
 
@@ -794,7 +855,8 @@ struct ConformanceSendspinKitClient {
             let initiatorRole = options.initiatorRole
             let transport = try await acceptInboundConnection(
                 port: UInt16(options.port),
-                path: options.path
+                path: options.path,
+                timeout: options.timeoutSeconds
             ) {
                 if !registryPath.isEmpty {
                     try registerEndpoint(
@@ -813,105 +875,117 @@ struct ConformanceSendspinKitClient {
             try await client.acceptConnection(transport)
         }
 
-        // Consume events until disconnection or timeout
-        let deadline = Date().addingTimeInterval(options.timeoutSeconds)
-        var done = false
+        // Consume events until the scenario signals completion. The timeout is
+        // enforced by racing consumption against a sleep (below), so a
+        // connected-but-silent peer can't hang us until the harness SIGKILLs
+        // the process with no summary written. `events` is an AsyncStream, so
+        // cancelling the consuming task unblocks the `for await` promptly.
+        @Sendable func consumeEvents() async throws -> Bool {
+            var done = false
+            for await event in await client.events {
+                switch event {
+                case let .serverConnected(info):
+                    fputs("[ADAPTER] Connected to server: \(info.name)\n", stderr)
+                    await collector.recordPeerHello(info)
 
-        for await event in await client.events {
-            if Date() > deadline {
-                fputs("[ADAPTER] Timeout reached\n", stderr)
-                break
-            }
+                case let .streamStarted(format):
+                    fputs("[ADAPTER] Stream started: \(format.codec.rawValue) \(format.sampleRate)Hz \(format.channels)ch \(format.bitDepth)bit\n", stderr)
+                    let codecHeader = await client.currentCodecHeader
+                    await collector.recordStreamFormat(format, codecHeader: codecHeader)
 
-            switch event {
-            case let .serverConnected(info):
-                fputs("[ADAPTER] Connected to server: \(info.name)\n", stderr)
-                await collector.recordPeerHello(info)
+                case let .streamFormatChanged(format):
+                    fputs("[ADAPTER] Stream format changed: \(format.codec.rawValue) \(format.sampleRate)Hz\n", stderr)
+                    let codecHeader = await client.currentCodecHeader
+                    await collector.recordStreamFormat(format, codecHeader: codecHeader)
 
-            case let .streamStarted(format):
-                fputs("[ADAPTER] Stream started: \(format.codec.rawValue) \(format.sampleRate)Hz \(format.channels)ch \(format.bitDepth)bit\n", stderr)
-                let codecHeader = await client.currentCodecHeader
-                await collector.recordStreamFormat(format, codecHeader: codecHeader)
+                case let .rawAudioChunk(data, _):
+                    // The collector buffers chunks that arrive before stream/start
+                    // is processed (clock sync can delay it) and hashes them once
+                    // the format — and thus the bit depth — is known.
+                    await collector.recordAudioChunk(data: data)
 
-            case let .streamFormatChanged(format):
-                fputs("[ADAPTER] Stream format changed: \(format.codec.rawValue) \(format.sampleRate)Hz\n", stderr)
-                let codecHeader = await client.currentCodecHeader
-                await collector.recordStreamFormat(format, codecHeader: codecHeader)
+                case .streamEnded:
+                    fputs("[ADAPTER] Stream ended\n", stderr)
+                    if options.isPlayerScenario { done = true }
 
-            case let .rawAudioChunk(data, _):
-                // Stream format may not have been set yet if audio chunks arrive
-                // before stream/start is processed (clock sync can delay it).
-                var fmt = await collector.streamFormat
-                if fmt == nil {
-                    fmt = await client.currentStreamFormat
-                }
-                let bitDepth = fmt?.bitDepth ?? 16
-                await collector.recordAudioChunk(data: data, bitDepth: bitDepth)
-
-            case .streamEnded:
-                fputs("[ADAPTER] Stream ended\n", stderr)
-                if options.isPlayerScenario { done = true }
-
-            case let .metadataReceived(metadata):
-                fputs("[ADAPTER] Metadata: \(metadata.title ?? "(nil)")\n", stderr)
-                await collector.recordMetadata(metadata)
-                // Metadata scenario: done when we receive metadata with actual content.
-                // The server may send an initial "all null" clearing update first.
-                if options.isMetadataScenario, metadata.title != nil {
-                    done = true
-                }
-
-            case let .controllerStateUpdated(state):
-                fputs("[ADAPTER] Controller state: \(state.supportedCommands.map(\.rawValue))\n", stderr)
-                await collector.recordControllerState(state)
-
-                // Send the expected command back via the typed public API, but only
-                // once the server advertises it in supportedCommands. Per the SDK
-                // contract (see SendspinClient.next()) and the protocol, the server
-                // silently drops unsupported commands: aiosendspin sends an initial
-                // state without the app command, then a second update that adds it.
-                if options.isControllerScenario,
-                   state.supportedCommands.map(\.rawValue).contains(options.controllerCommand) {
-                    let cmdString = options.controllerCommand
-                    switch cmdString {
-                    case "play": try await client.play()
-                    case "pause": try await client.pause()
-                    case "stop": try await client.stopPlayback()
-                    case "next": try await client.next()
-                    case "previous": try await client.previous()
-                    case "repeat_off": try await client.repeatOff()
-                    case "repeat_one": try await client.repeatOne()
-                    case "repeat_all": try await client.repeatAll()
-                    case "shuffle": try await client.shuffle()
-                    case "unshuffle": try await client.unshuffle()
-                    case "switch": try await client.switchGroup()
-                    default:
-                        fputs("[ADAPTER] Unknown controller command: \(cmdString)\n", stderr)
-                        break
+                case let .metadataReceived(metadata):
+                    fputs("[ADAPTER] Metadata: \(metadata.title ?? "(nil)")\n", stderr)
+                    await collector.recordMetadata(metadata)
+                    // Metadata scenario: done when we receive metadata with actual content.
+                    // The server may send an initial "all null" clearing update first.
+                    if options.isMetadataScenario, metadataHasContent(metadata) {
+                        done = true
                     }
-                    await collector.recordSentCommand(["command": cmdString])
-                    fputs("[ADAPTER] Sent controller command: \(cmdString)\n", stderr)
+
+                case let .controllerStateUpdated(state):
+                    fputs("[ADAPTER] Controller state: \(state.supportedCommands.map(\.rawValue))\n", stderr)
+                    await collector.recordControllerState(state)
+
+                    // Send the expected command back via the typed public API, but only
+                    // once the server advertises it in supportedCommands. Per the SDK
+                    // contract (see SendspinClient.next()) and the protocol, the server
+                    // silently drops unsupported commands: aiosendspin sends an initial
+                    // state without the app command, then a second update that adds it.
+                    if options.isControllerScenario,
+                       state.supportedCommands.map(\.rawValue).contains(options.controllerCommand) {
+                        let cmdString = options.controllerCommand
+                        switch cmdString {
+                        case "play": try await client.play()
+                        case "pause": try await client.pause()
+                        case "stop": try await client.stopPlayback()
+                        case "next": try await client.next()
+                        case "previous": try await client.previous()
+                        case "repeat_off": try await client.repeatOff()
+                        case "repeat_one": try await client.repeatOne()
+                        case "repeat_all": try await client.repeatAll()
+                        case "shuffle": try await client.shuffle()
+                        case "unshuffle": try await client.unshuffle()
+                        case "switch": try await client.switchGroup()
+                        default:
+                            fputs("[ADAPTER] Unknown controller command: \(cmdString)\n", stderr)
+                            break
+                        }
+                        await collector.recordSentCommand(["command": cmdString])
+                        fputs("[ADAPTER] Sent controller command: \(cmdString)\n", stderr)
+                        done = true
+                    }
+
+                case let .artworkReceived(channel, data):
+                    fputs("[ADAPTER] Artwork received: channel=\(channel) bytes=\(data.count)\n", stderr)
+                    await collector.recordArtwork(channel: channel, data: data)
+                    if options.isArtworkScenario { done = true }
+
+                case let .disconnected(reason):
+                    fputs("[ADAPTER] Disconnected: \(reason)\n", stderr)
                     done = true
+
+                default:
+                    break
                 }
 
-            case let .artworkReceived(channel, data):
-                fputs("[ADAPTER] Artwork received: channel=\(channel) bytes=\(data.count)\n", stderr)
-                await collector.recordArtwork(channel: channel, data: data)
-                if options.isArtworkScenario { done = true }
-
-            case let .disconnected(reason):
-                fputs("[ADAPTER] Disconnected: \(reason)\n", stderr)
-                done = true
-
-            default:
-                break
+                if done { return true }
             }
-
-            if done { break }
+            return false
         }
 
-        // Give server a moment to finish, then disconnect gracefully
-        if !done {
+        let completed: Bool
+        do {
+            completed = try await withThrowingTaskGroup(of: Bool.self) { group in
+                group.addTask { try await consumeEvents() }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(options.timeoutSeconds))
+                    throw TimeoutSignal()
+                }
+                defer { group.cancelAll() }
+                return try await group.next() ?? false
+            }
+        } catch is TimeoutSignal {
+            fputs("[ADAPTER] Timeout reached after \(options.timeoutSeconds)s\n", stderr)
+            await collector.setRunStatus("timeout")
+            completed = false
+        }
+
+        if !completed {
             fputs("[ADAPTER] Event stream ended without explicit done signal\n", stderr)
         }
         await client.disconnect(reason: .shutdown)
