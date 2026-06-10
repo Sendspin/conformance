@@ -26,4 +26,5 @@ class CollectingAudioPlayer(val audioBuffer: AudioBuffer) : AudioPlayer {
     override fun flush() {}
     override fun stop() {}
     override fun transition(format: StreamFormat) { this.format = format }
+    override fun setVolume(gain: Float) {}
 }
