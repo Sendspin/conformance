@@ -536,7 +536,18 @@ actor ConformanceWebSocketTransport: SendspinTransport {
     private nonisolated let frameContinuation: AsyncStream<TransportFrame>.Continuation
     private let encoder = JSONEncoder()
 
-    nonisolated let frames: AsyncStream<TransportFrame>
+    private let frames: AsyncStream<TransportFrame>
+
+    /// Iterator over the frames stream, used by `nextFrame()`.
+    /// Protected by the actor's serial work queue and the `isReading` flag.
+    private var frameIterator: AsyncStream<TransportFrame>.AsyncIterator?
+
+    /// Reentrancy guard for `nextFrame()` to enforce single-consumer contract.
+    private var isReading = false
+
+    /// Set when a WebSocket close frame is received, so the expected post-close
+    /// receive error is suppressed rather than logged as a transport failure.
+    private var closeReceived = false
 
     var isConnected: Bool {
         connection?.state == .ready
@@ -556,8 +567,32 @@ actor ConformanceWebSocketTransport: SendspinTransport {
         receiveNext(on: connection)
     }
 
+    func nextFrame() async -> TransportFrame? {
+        precondition(!isReading, "SendspinTransport.nextFrame() is single-consumer; overlapping calls are a contract violation")
+        if frameIterator == nil { frameIterator = frames.makeAsyncIterator() }
+        isReading = true
+        defer { isReading = false }
+        // Copy the iterator to a local before awaiting: you cannot call the
+        // `mutating async` next() on an actor-isolated stored property — Swift 6
+        // rejects holding exclusive access across the suspension. AsyncStream's
+        // iterator shares the underlying buffer by reference, so the copy-out /
+        // copy-back is safe and loses no frames.
+        //
+        // Swift 6 flags passing the actor-isolated iterator to the nonisolated `next()`
+        // as #SendingRisksDataRace; the local copy is `nonisolated(unsafe)` because the
+        // `isReading` guard + actor serialization guarantee exactly one in-flight consumer,
+        // so no concurrent access to the shared buffer occurs.
+        nonisolated(unsafe) var iterator = frameIterator
+        guard iterator != nil else { return nil }
+        let frame = await iterator!.next()
+        frameIterator = iterator
+        return frame
+    }
+
     func send(_ message: some Codable & Sendable) async throws {
-        guard let connection else { throw AdapterError("Transport not connected") }
+        guard let connection, connection.state == .ready else {
+            throw AdapterError("Transport not connected")
+        }
 
         let data = try encoder.encode(message)
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
@@ -583,7 +618,9 @@ actor ConformanceWebSocketTransport: SendspinTransport {
     }
 
     func sendBinary(_ data: Data) async throws {
-        guard let connection else { throw AdapterError("Transport not connected") }
+        guard let connection, connection.state == .ready else {
+            throw AdapterError("Transport not connected")
+        }
 
         let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
         let context = NWConnection.ContentContext(
@@ -608,9 +645,10 @@ actor ConformanceWebSocketTransport: SendspinTransport {
     }
 
     func disconnect() async {
+        // Finish the buffer first so a pending nextFrame() unblocks promptly, then cancel.
+        frameContinuation.finish()
         connection?.cancel()
         connection = nil
-        frameContinuation.finish()
     }
 
     // MARK: - Private
@@ -619,8 +657,8 @@ actor ConformanceWebSocketTransport: SendspinTransport {
         connection.receiveMessage { [weak self] content, context, _, error in
             guard let self else { return }
 
-            if error != nil {
-                frameContinuation.finish()
+            if let error {
+                Task { await self.handleReceiveError(error) }
                 return
             }
 
@@ -637,8 +675,9 @@ actor ConformanceWebSocketTransport: SendspinTransport {
                         frameContinuation.yield(.binary(data))
                     }
                 case .close:
-                    frameContinuation.finish()
-                    return
+                    // Note the close but keep receiving — frames may sit buffered behind
+                    // it. The stream finishes when the loop ends (the post-close error).
+                    Task { await self.handleClose() }
                 default:
                     break
                 }
@@ -646,6 +685,20 @@ actor ConformanceWebSocketTransport: SendspinTransport {
 
             receiveNext(on: connection)
         }
+    }
+
+    /// Records a WebSocket close so the expected post-close receive error is suppressed.
+    private func handleClose() {
+        closeReceived = true
+    }
+
+    /// Finishes the frame buffer when the receive loop ends. Logs an unexpected error,
+    /// but stays quiet for the expected error that follows a clean close.
+    private func handleReceiveError(_ error: NWError) {
+        if !closeReceived {
+            fputs("[ADAPTER] Transport receive error: \(error)\n", stderr)
+        }
+        frameContinuation.finish()
     }
 }
 
@@ -878,11 +931,11 @@ struct ConformanceSendspinKitClient {
         // Consume events until the scenario signals completion. The timeout is
         // enforced by racing consumption against a sleep (below), so a
         // connected-but-silent peer can't hang us until the harness SIGKILLs
-        // the process with no summary written. `events` is an AsyncStream, so
-        // cancelling the consuming task unblocks the `for await` promptly.
-        @Sendable func consumeEvents() async throws -> Bool {
+        // the process with no summary written. The streams are AsyncStreams, so
+        // cancelling the consuming tasks unblocks the `for await` loops promptly.
+        @Sendable func consumeControlEvents() async throws -> Bool {
             var done = false
-            for await event in await client.events {
+            for await event in await client.events() {
                 switch event {
                 case let .serverConnected(info):
                     fputs("[ADAPTER] Connected to server: \(info.name)\n", stderr)
@@ -898,12 +951,6 @@ struct ConformanceSendspinKitClient {
                     let codecHeader = await client.currentCodecHeader
                     await collector.recordStreamFormat(format, codecHeader: codecHeader)
 
-                case let .rawAudioChunk(data, _):
-                    // The collector buffers chunks that arrive before stream/start
-                    // is processed (clock sync can delay it) and hashes them once
-                    // the format — and thus the bit depth — is known.
-                    await collector.recordAudioChunk(data: data)
-
                 case .streamEnded:
                     fputs("[ADAPTER] Stream ended\n", stderr)
                     if options.isPlayerScenario { done = true }
@@ -918,7 +965,8 @@ struct ConformanceSendspinKitClient {
                     }
 
                 case let .controllerStateUpdated(state):
-                    fputs("[ADAPTER] Controller state: \(state.supportedCommands.map(\.rawValue))\n", stderr)
+                    let supportedCommands = state.supportedCommands.map { $0.rawValue }
+                    fputs("[ADAPTER] Controller state: \(supportedCommands)\n", stderr)
                     await collector.recordControllerState(state)
 
                     // Send the expected command back via the typed public API, but only
@@ -927,7 +975,7 @@ struct ConformanceSendspinKitClient {
                     // silently drops unsupported commands: aiosendspin sends an initial
                     // state without the app command, then a second update that adds it.
                     if options.isControllerScenario,
-                       state.supportedCommands.map(\.rawValue).contains(options.controllerCommand) {
+                       supportedCommands.contains(options.controllerCommand) {
                         let cmdString = options.controllerCommand
                         switch cmdString {
                         case "play": try await client.play()
@@ -950,11 +998,6 @@ struct ConformanceSendspinKitClient {
                         done = true
                     }
 
-                case let .artworkReceived(channel, data):
-                    fputs("[ADAPTER] Artwork received: channel=\(channel) bytes=\(data.count)\n", stderr)
-                    await collector.recordArtwork(channel: channel, data: data)
-                    if options.isArtworkScenario { done = true }
-
                 case let .disconnected(reason):
                     fputs("[ADAPTER] Disconnected: \(reason)\n", stderr)
                     done = true
@@ -968,10 +1011,31 @@ struct ConformanceSendspinKitClient {
             return false
         }
 
+        @Sendable func consumeAudioChunks() async -> Bool {
+            for await chunk in await client.audioChunks {
+                // The collector buffers chunks that arrive before stream/start
+                // is processed (clock sync can delay it) and hashes them once
+                // the format — and thus the bit depth — is known.
+                await collector.recordAudioChunk(data: chunk.data)
+            }
+            return false
+        }
+
+        @Sendable func consumeArtwork() async -> Bool {
+            for await artwork in await client.artwork {
+                fputs("[ADAPTER] Artwork received: channel=\(artwork.channel) bytes=\(artwork.data.count)\n", stderr)
+                await collector.recordArtwork(channel: artwork.channel, data: artwork.data)
+                if options.isArtworkScenario { return true }
+            }
+            return false
+        }
+
         let completed: Bool
         do {
             completed = try await withThrowingTaskGroup(of: Bool.self) { group in
-                group.addTask { try await consumeEvents() }
+                group.addTask { try await consumeControlEvents() }
+                group.addTask { await consumeAudioChunks() }
+                group.addTask { await consumeArtwork() }
                 group.addTask {
                     try await Task.sleep(for: .seconds(options.timeoutSeconds))
                     throw TimeoutSignal()
