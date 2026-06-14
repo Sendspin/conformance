@@ -17,7 +17,7 @@ Current scenarios:
 
 - `aiosendspin`: real server adapter and real client adapter, including OPUS support
 - `sendspin-dotnet`: real client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
-- `SendspinKit`: client intentionally unsupported until conformance can use the public SDK like an example application, without bespoke protocol code; server placeholder
+- `SendspinKit`: real Swift client adapter for client-initiated PCM, Flac, and Opus plus the server-initiated PCM, Flac, Opus, metadata, artwork, and controller scenarios; server placeholer
 - `sendspin-cpp`: real C++ client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
 - `sendspin-go`: real Go client adapter and real Go server adapter across the PCM, FLAC, metadata, artwork, and controller scenarios (no OPUS yet)
 - `sendspin-js`: real Node.js client adapter driving the public `SendspinCore` SDK over an adapter-owned WebSocket; covers client-initiated PCM plus the server-initiated PCM, metadata, and controller scenarios (FLAC/OPUS decode and `artwork@v1` are not exposed by the public SDK in a headless Node environment); server placeholder
