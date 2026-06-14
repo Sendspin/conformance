@@ -19,7 +19,7 @@ permissions:
 jobs:
   publish-report:
     if: github.repository == 'sendspin/conformance'
-    runs-on: macos-latest
+    runs-on: macos-26
     outputs:
       site_built: ${{ steps.check_site.outputs.site_built }}
       has_regressions: ${{ steps.regressions.outputs.has_regressions }}
@@ -62,6 +62,9 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+
+      - name: Show Swift version
+        run: swift --version
 
       - name: Install package
         run: uv sync
