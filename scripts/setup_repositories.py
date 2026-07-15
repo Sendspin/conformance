@@ -24,12 +24,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def clone_or_update(target: Path, url: str, update: bool) -> None:
-    if target.exists():
-        if update:
-            subprocess.run(["git", "-C", str(target), "pull", "--ff-only"], check=True)
+# Pin specific repositories to a fixed revision. Used when an implementation
+# lands breaking changes the conformance adapters have not been migrated to yet;
+# remove an entry once the adapters catch up.
+REPO_PINS: dict[str, str] = {
+    # Remove once aiosendspin works with non-encrypted clients again
+    "aiosendspin": "af9dbc8b625bffbee99d7a67712c0e3b4c44147d",
+}
+
+
+def clone_or_update(
+    target: Path, url: str, update: bool, pin: str | None = None
+) -> None:
+    if not target.exists():
+        subprocess.run(["git", "clone", url, str(target)], check=True)
+    if pin:
+        # Pinned repository: fetch and check out the exact revision instead of
+        # tracking the default branch.
+        subprocess.run(["git", "-C", str(target), "fetch", "origin"], check=True)
+        subprocess.run(["git", "-C", str(target), "checkout", pin], check=True)
         return
-    subprocess.run(["git", "clone", url, str(target)], check=True)
+    if update:
+        subprocess.run(["git", "-C", str(target), "pull", "--ff-only"], check=True)
 
 
 def main() -> int:
@@ -38,9 +54,16 @@ def main() -> int:
     repos_dir.mkdir(parents=True, exist_ok=True)
 
     for spec in IMPLEMENTATIONS.values():
-        clone_or_update(repos_dir / spec.repo_dirname, spec.remote_url, args.update)
+        clone_or_update(
+            repos_dir / spec.repo_dirname,
+            spec.remote_url,
+            args.update,
+            pin=REPO_PINS.get(spec.repo_dirname),
+        )
     for dirname, url in SUPPORTING_REPOS.values():
-        clone_or_update(repos_dir / dirname, url, args.update)
+        clone_or_update(
+            repos_dir / dirname, url, args.update, pin=REPO_PINS.get(dirname)
+        )
     return 0
 
 
