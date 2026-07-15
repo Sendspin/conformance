@@ -172,7 +172,10 @@ fn current_micros() -> i64 {
 fn is_player_scenario(scenario_id: &str) -> bool {
     matches!(
         scenario_id,
-        "client-initiated-pcm" | "server-initiated-pcm" | "server-initiated-flac"
+        "client-initiated-pcm"
+            | "server-initiated-pcm"
+            | "server-initiated-pcm-24bit"
+            | "server-initiated-flac"
     )
 }
 
@@ -248,11 +251,16 @@ fn build_client_hello(args: &Args) -> ClientHello {
                 vec!["player@v1".to_string()],
                 Some(PlayerV1Support {
                     supported_formats: if args.preferred_codec == "pcm" {
+                        let bit_depth = if args.scenario_id == "server-initiated-pcm-24bit" {
+                            24
+                        } else {
+                            16
+                        };
                         vec![AudioFormatSpec {
                             codec: "pcm".to_string(),
                             channels: 1,
                             sample_rate: 8000,
-                            bit_depth: 16,
+                            bit_depth,
                         }]
                     } else {
                         vec![
@@ -286,6 +294,7 @@ fn build_client_hello(args: &Args) -> ClientHello {
             product_name: Some("sendspin-rs Conformance Client".to_string()),
             manufacturer: Some("Sendspin Conformance".to_string()),
             software_version: Some("0.1.0".to_string()),
+            mac_address: None,
         }),
         player_v1_support,
         artwork_v1_support,
@@ -335,6 +344,8 @@ fn normalize_controller(controller: &ControllerState) -> serde_json::Value {
         "supported_commands": controller.supported_commands,
         "volume": controller.volume,
         "muted": controller.muted,
+        "repeat": controller.repeat,
+        "shuffle": controller.shuffle,
     })
 }
 
@@ -527,6 +538,8 @@ where
                                         volume: Some(100),
                                         muted: Some(false),
                                         static_delay_ms: None,
+                                        min_buffer_ms: None,
+                                        required_lead_time_ms: None,
                                         supported_commands: None,
                                     }),
                                 });
@@ -774,6 +787,8 @@ async fn run_outbound_protocol_client(args: &Args, server_url: &str) -> serde_js
                 volume: Some(100),
                 muted: Some(false),
                 static_delay_ms: None,
+                min_buffer_ms: None,
+                required_lead_time_ms: None,
                 supported_commands: None,
             }),
         }))
@@ -786,6 +801,11 @@ async fn run_outbound_protocol_client(args: &Args, server_url: &str) -> serde_js
     let mut received_hasher = FloatPcmHasher::default();
     let mut encoded_hasher = Sha256::new();
     let mut audio_chunk_count = 0usize;
+    // The SDK forwards stream/start (text) and audio (binary) on separate
+    // channels, and tokio::select! randomizes branch order, so audio can be
+    // polled before an already-buffered stream/start. Buffer early audio and
+    // flush it once stream/start has been observed.
+    let mut pending_audio: Vec<AudioChunk> = Vec::new();
     let timeout = Duration::from_secs_f64(args.timeout_seconds);
 
     let read_result = tokio::time::timeout(timeout, async {
@@ -798,6 +818,21 @@ async fn run_outbound_protocol_client(args: &Args, server_url: &str) -> serde_js
                     match message {
                         Message::StreamStart(stream_start) => {
                             current_stream = stream_start.player;
+                            if let Some(stream) = current_stream.as_ref() {
+                                if stream.codec != "pcm" {
+                                    return Err(format!(
+                                        "Unsupported codec for current scenario: {}",
+                                        stream.codec
+                                    ));
+                                }
+                                for chunk in pending_audio.drain(..) {
+                                    encoded_hasher.update(&chunk.data);
+                                    received_hasher
+                                        .update_from_pcm_bytes(&chunk.data, stream.bit_depth)
+                                        .map_err(|err| err.to_string())?;
+                                    audio_chunk_count += 1;
+                                }
+                            }
                         }
                         Message::StreamEnd(_)
                         | Message::StreamClear(_)
@@ -813,9 +848,10 @@ async fn run_outbound_protocol_client(args: &Args, server_url: &str) -> serde_js
                     let Some(chunk) = maybe_audio else {
                         break;
                     };
-                    let stream = current_stream
-                        .as_ref()
-                        .ok_or_else(|| "Received audio before stream/start".to_string())?;
+                    let Some(stream) = current_stream.as_ref() else {
+                        pending_audio.push(chunk);
+                        continue;
+                    };
                     if stream.codec != "pcm" {
                         return Err(format!("Unsupported codec for current scenario: {}", stream.codec));
                     }
