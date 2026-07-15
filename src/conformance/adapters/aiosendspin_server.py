@@ -420,6 +420,13 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
         )
         next_play_start_us = server.clock.now_us() + 250_000
         total_duration_us = 0
+        # Renegotiation scenarios need audio to keep flowing in real time so a
+        # mid-stream stream/request-format has later chunks to flush the new
+        # stream/start. Other scenarios commit upfront and settle once at the end.
+        pace_realtime = args.scenario_id in {
+            "client-initiated-request-format-pcm",
+            "client-initiated-request-format-flac",
+        }
         for chunk, duration_us in _iter_pcm_blocks(
             source_pcm_bytes,
             sample_rate=fixture.sample_rate,
@@ -430,7 +437,10 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
             play_start_us = await stream.commit_audio(play_start_us=next_play_start_us)
             next_play_start_us = play_start_us + duration_us
             total_duration_us += duration_us
-        await asyncio.sleep((total_duration_us / 1_000_000.0) + 0.75)
+            if pace_realtime:
+                await asyncio.sleep(duration_us / 1_000_000.0)
+        settle_seconds = 0.75 if pace_realtime else (total_duration_us / 1_000_000.0) + 0.75
+        await asyncio.sleep(settle_seconds)
         await client.group.stop()
         await asyncio.sleep(0.5)
         await _disconnect_client(client)
@@ -574,7 +584,12 @@ async def _scenario_payload(
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
+        "client-initiated-request-format-pcm",
+        "client-initiated-request-format-flac",
     }:
+        # The server streams source PCM and the player role re-encodes to whatever
+        # format the client negotiates, including a mid-stream stream/request-format
+        # switch, so no renegotiation-specific server logic is required here.
         return await _run_audio_scenario(args, server=server, client=client)
     if args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}:
         return await _run_metadata_scenario(args, client=client)

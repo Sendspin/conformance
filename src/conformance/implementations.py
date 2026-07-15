@@ -60,6 +60,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_flac=True,
             supports_opus=True,
             supports_discovery=True,
+            supports_request_format=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
     ),
@@ -143,6 +144,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_server_initiated=True,
             supports_client_initiated=True,
             supports_flac=True,
+            supports_request_format=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(

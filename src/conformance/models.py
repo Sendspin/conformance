@@ -11,7 +11,14 @@ CaseStatus = Literal["passed", "failed", "skipped"]
 InitiatorRole = Literal["server", "client"]
 RoleName = Literal["server", "client"]
 RoleFamily = Literal["player", "metadata", "controller", "artwork"]
-VerificationMode = Literal["audio-pcm", "audio-encoded-bytes", "metadata", "controller", "artwork"]
+VerificationMode = Literal[
+    "audio-pcm",
+    "audio-encoded-bytes",
+    "metadata",
+    "controller",
+    "artwork",
+    "format-renegotiation",
+]
 
 
 @dataclass(frozen=True)
@@ -27,6 +34,7 @@ class RoleSpec:
     supports_flac: bool = False
     supports_opus: bool = False
     supports_discovery: bool = False
+    supports_request_format: bool = False
     supported_role_families: tuple[RoleFamily, ...] = ()
     reason: str | None = None
 
@@ -57,9 +65,12 @@ class RoleSpec:
         scenario: "ScenarioSpec",
     ) -> str | None:
         """Explain why this role cannot execute the scenario."""
-        if self.supports_initiator(scenario.initiator_role) and self.supports_codec(
-            scenario.preferred_codec
-        ) and self.supports_role_families(scenario.required_role_families):
+        if (
+            self.supports_initiator(scenario.initiator_role)
+            and self.supports_codec(scenario.preferred_codec)
+            and self.supports_role_families(scenario.required_role_families)
+            and (self.supports_request_format or not scenario.requires_request_format)
+        ):
             return None
 
         if scenario.initiator_role == "server":
@@ -83,6 +94,12 @@ class RoleSpec:
             return (
                 f"{implementation} {role} adapter does not support role family/families "
                 f"{missing_display} required by {scenario.id}."
+            )
+
+        if scenario.requires_request_format and not self.supports_request_format:
+            return (
+                f"{implementation} {role} adapter does not support the "
+                f"stream/request-format renegotiation required by {scenario.id}."
             )
 
         return (
@@ -114,6 +131,7 @@ class ScenarioSpec:
     preferred_codec: str
     required_role_families: tuple[RoleFamily, ...]
     verification_mode: VerificationMode
+    requires_request_format: bool = False
     extra_cli_args: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
     def cli_args(self) -> dict[str, str]:

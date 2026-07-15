@@ -12,6 +12,8 @@ Current scenarios:
 - `server-initiated-flac` (Server initiates connection and client wants FLAC): start the server first with PCM audio decoded from `almost_silent.flac`, let the client advertise a listener and FLAC as its only supported audio format, let the server connect in, encode the PCM to FLAC using the SDK, stream it to the client, and compare the transported FLAC bytes
 - `server-initiated-opus` (Server initiates connection and client wants OPUS): start the server first with PCM audio decoded from `almost_silent.flac`, let the client advertise a listener and OPUS as its only supported audio format, let the server connect in, encode the PCM to OPUS using the SDK, stream it to the client, and compare the transported OPUS bytes
 - `server-initiated-pcm-24bit` (Server initiates connection and client wants 24-bit PCM): start the server first, let the client advertise a listener and 24-bit PCM as its only supported audio format, let the server connect in, negotiate the 24-bit packed wire format, stream it to the client, and compare canonical PCM hashes — a client SDK with no 24-bit decode path misreads the bytes and produces a hash mismatch
+- `client-initiated-request-format-pcm` (Client renegotiates PCM bit depth): start the server first, let the client connect advertising two PCM formats (24-bit then 16-bit), let the server stream the preferred 24-bit format, have the client emit `stream/request-format` for the 16-bit format, and verify the client observed the server re-emit `stream/start` with the renegotiated 16-bit format
+- `client-initiated-request-format-flac` (Client renegotiates PCM to FLAC): start the server first, let the client connect advertising PCM then FLAC, let the server stream the preferred PCM format, have the client emit `stream/request-format` for FLAC, and verify the client observed the server re-emit `stream/start` with the FLAC format
 
 ## Current coverage
 
@@ -22,9 +24,11 @@ Current scenarios:
 - `sendspin-go`: real Go client adapter and real Go server adapter across the PCM, FLAC, metadata, artwork, and controller scenarios (no OPUS yet)
 - `sendspin-js`: real Node.js client adapter driving the public `SendspinCore` SDK over an adapter-owned WebSocket; covers client-initiated PCM plus the server-initiated PCM, metadata, and controller scenarios (FLAC/OPUS decode and `artwork@v1` are not exposed by the public SDK in a headless Node environment); server placeholder
 - `sendspin-jvm`: real JVM client adapter written in Kotlin, for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
-- `sendspin-rs`: real Rust client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
+- `sendspin-rs`: real Rust client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios, and the client-initiated `stream/request-format` renegotiation scenarios; server placeholder
 
 The OPUS scenario is currently exercised only by the `aiosendspin` server and client until other implementations opt in via `supports_opus`.
+
+The `client-initiated-request-format-*` scenarios are currently exercised only by the `sendspin-rs` client against the `aiosendspin` server until other implementations opt in via `supports_request_format`.
 
 Unsupported client roles use fail-fast adapters that emit a summary and exit non-zero. Unsupported server roles are filtered out before case creation, so the matrix only shows server rows that can actually run a scenario.
 

@@ -5,7 +5,7 @@ use sendspin::protocol::messages::{
     ArtworkChannel, ArtworkSource, ArtworkV1Support, AudioFormatSpec, ClientCommand, ClientHello,
     ClientState, ClientSyncState, ClientTime, ConnectionReason, ControllerCommand,
     ControllerCommandType, ControllerState, DeviceInfo, ImageFormat, Message, MetadataState,
-    PlayerState, PlayerV1Support, ServerHello, StreamPlayerConfig,
+    PlayerFormatRequest, PlayerState, PlayerV1Support, ServerHello, StreamPlayerConfig,
 };
 use sendspin::ProtocolClientBuilder;
 use sha2::{Digest, Sha256};
@@ -198,6 +198,100 @@ fn is_artwork_scenario(scenario_id: &str) -> bool {
         scenario_id,
         "client-initiated-artwork" | "server-initiated-artwork"
     )
+}
+
+fn is_request_format_scenario(scenario_id: &str) -> bool {
+    matches!(
+        scenario_id,
+        "client-initiated-request-format-pcm" | "client-initiated-request-format-flac"
+    )
+}
+
+/// The formats a renegotiation scenario advertises (priority order) and the
+/// format it later requests via `stream/request-format`. The server starts on
+/// the first advertised format, then switches to the requested one.
+fn request_format_plan(scenario_id: &str) -> (Vec<AudioFormatSpec>, PlayerFormatRequest) {
+    let pcm = |bit_depth: u8| AudioFormatSpec {
+        codec: "pcm".to_string(),
+        channels: 1,
+        sample_rate: 8000,
+        bit_depth,
+    };
+    if scenario_id == "client-initiated-request-format-flac" {
+        let flac = AudioFormatSpec {
+            codec: "flac".to_string(),
+            channels: 1,
+            sample_rate: 8000,
+            bit_depth: 16,
+        };
+        return (
+            vec![pcm(16), flac],
+            PlayerFormatRequest {
+                codec: Some("flac".to_string()),
+                channels: Some(1),
+                sample_rate: Some(8000),
+                bit_depth: Some(16),
+            },
+        );
+    }
+    // Default: PCM bit-depth downgrade (24-bit preferred, request 16-bit).
+    (
+        vec![pcm(24), pcm(16)],
+        PlayerFormatRequest {
+            codec: Some("pcm".to_string()),
+            channels: Some(1),
+            sample_rate: Some(8000),
+            bit_depth: Some(16),
+        },
+    )
+}
+
+fn stream_format_json(stream: &StreamPlayerConfig) -> serde_json::Value {
+    serde_json::json!({
+        "codec": stream.codec,
+        "sample_rate": stream.sample_rate,
+        "bit_depth": stream.bit_depth,
+        "channels": stream.channels,
+    })
+}
+
+fn player_format_request_json(request: &PlayerFormatRequest) -> serde_json::Value {
+    serde_json::json!({
+        "codec": request.codec,
+        "sample_rate": request.sample_rate,
+        "bit_depth": request.bit_depth,
+        "channels": request.channels,
+    })
+}
+
+fn build_renegotiation_summary(
+    args: &Args,
+    status: &str,
+    reason: Option<&str>,
+    server_hello: Option<&ServerHello>,
+    renegotiation: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": status,
+        "reason": reason,
+        "implementation": "sendspin-rs",
+        "role": "client",
+        "scenario_id": args.scenario_id,
+        "initiator_role": args.initiator_role,
+        "preferred_codec": args.preferred_codec,
+        "client_name": args.client_name,
+        "client_id": args.client_id,
+        "server": server_hello.map(|hello| {
+            serde_json::json!({
+                "server_id": hello.server_id,
+                "name": hello.name,
+                "version": hello.version,
+                "active_roles": hello.active_roles,
+                "connection_reason": hello.connection_reason,
+            })
+        }),
+        "renegotiation": renegotiation,
+    })
 }
 
 async fn wait_for_server_url(
@@ -974,10 +1068,132 @@ async fn run_outbound_protocol_client(args: &Args, server_url: &str) -> serde_js
     }
 }
 
+async fn run_request_format_client(args: &Args, server_url: &str) -> serde_json::Value {
+    let (supported_formats, requested) = request_format_plan(&args.scenario_id);
+
+    let builder = ProtocolClientBuilder::builder()
+        .client_id(args.client_id.clone())
+        .name(args.client_name.clone())
+        .product_name(Some("sendspin-rs Conformance Client".to_string()))
+        .manufacturer(Some("Sendspin Conformance".to_string()))
+        .software_version(Some("0.1.0".to_string()))
+        .player_v1_support(PlayerV1Support {
+            supported_formats,
+            buffer_capacity: 2_000_000,
+            supported_commands: vec!["volume".to_string(), "mute".to_string()],
+        })
+        .build();
+
+    let client = match builder.connect(server_url).await {
+        Ok(client) => client,
+        Err(err) => {
+            return build_error_summary(args, &format!("Failed to connect to {server_url}: {err}"));
+        }
+    };
+
+    let conn = client.split();
+    let mut message_rx = conn.messages;
+    let mut audio_rx = conn.audio;
+    let _artwork_rx = conn.artwork;
+    let _visualizer_rx = conn.visualizer;
+    let _clock_sync = conn.clock_sync;
+    let ws_tx = conn.sender;
+    let server_hello = conn.server_hello;
+    let _guard = conn.guard;
+
+    // Renegotiation is verified from stream/start messages alone, but the audio
+    // channel must still be consumed so the SDK keeps the session flowing.
+    tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
+
+    if let Err(err) = ws_tx
+        .send_message(Message::ClientState(ClientState {
+            state: Some(ClientSyncState::Synchronized),
+            player: Some(PlayerState {
+                volume: Some(100),
+                muted: Some(false),
+                static_delay_ms: None,
+                min_buffer_ms: None,
+                required_lead_time_ms: None,
+                supported_commands: None,
+            }),
+        }))
+        .await
+    {
+        return build_error_summary(args, &err.to_string());
+    }
+
+    let mut stream_start_count = 0usize;
+    let mut initial_format: Option<StreamPlayerConfig> = None;
+    let mut final_format: Option<StreamPlayerConfig> = None;
+    let timeout = Duration::from_secs_f64(args.timeout_seconds);
+
+    let read_result = tokio::time::timeout(timeout, async {
+        loop {
+            let Some(message) = message_rx.recv().await else {
+                break;
+            };
+            match message {
+                Message::StreamStart(stream_start) => {
+                    let Some(format) = stream_start.player else {
+                        continue;
+                    };
+                    stream_start_count += 1;
+                    if stream_start_count == 1 {
+                        initial_format = Some(format);
+                        ws_tx
+                            .request_player_format(requested.clone())
+                            .await
+                            .map_err(|err| err.to_string())?;
+                    } else {
+                        final_format = Some(format);
+                    }
+                }
+                Message::StreamEnd(_)
+                | Message::StreamClear(_)
+                | Message::ServerState(_)
+                | Message::GroupUpdate(_)
+                | Message::ServerCommand(_) => {}
+                other => {
+                    return Err(format!("Unexpected server message: {other:?}"));
+                }
+            }
+        }
+        Ok::<(), String>(())
+    })
+    .await;
+
+    let renegotiation = serde_json::json!({
+        "stream_start_count": stream_start_count,
+        "requested": player_format_request_json(&requested),
+        "initial_format": initial_format.as_ref().map(stream_format_json),
+        "final_format": final_format.as_ref().map(stream_format_json),
+    });
+
+    let (status, reason): (&str, Option<String>) = match read_result {
+        Err(_) => (
+            "error",
+            Some("Timed out waiting for server disconnect".to_string()),
+        ),
+        Ok(Err(reason)) => ("error", Some(reason)),
+        Ok(Ok(())) => ("ok", None),
+    };
+
+    build_renegotiation_summary(
+        args,
+        status,
+        reason.as_deref(),
+        Some(&server_hello),
+        renegotiation,
+    )
+}
+
 async fn run(args: Args) -> Result<(), String> {
     let summary = if args.initiator_role == "client" {
         write_json(&args.ready, &build_ready(&args, None))?;
         match wait_for_server_url(&args.registry, &args.server_name, args.timeout_seconds).await {
+            Ok(server_url) if is_request_format_scenario(&args.scenario_id) => {
+                run_request_format_client(&args, &server_url).await
+            }
             Ok(server_url) => run_outbound_protocol_client(&args, &server_url).await,
             Err(reason) => build_error_summary(&args, &reason),
         }

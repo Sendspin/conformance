@@ -742,6 +742,71 @@ def _compare_artwork_summaries(
     )
 
 
+_FORMAT_KEYS = ("codec", "sample_rate", "bit_depth", "channels")
+
+
+def _format_label(fmt: dict[str, Any] | None) -> str:
+    if not fmt:
+        return "none"
+    return (
+        f"{fmt.get('codec')}/{fmt.get('sample_rate')}Hz/"
+        f"{fmt.get('bit_depth')}bit/{fmt.get('channels')}ch"
+    )
+
+
+def _format_matches(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
+    """Match on every field the requester constrained; ``None`` means unconstrained."""
+    for key in _FORMAT_KEYS:
+        wanted = expected.get(key)
+        if wanted is not None and actual.get(key) != wanted:
+            return False
+    return True
+
+
+def _formats_equal(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return all(left.get(key) == right.get(key) for key in _FORMAT_KEYS)
+
+
+def _compare_renegotiation_summaries(
+    server_summary: dict[str, Any],
+    client_summary: dict[str, Any],
+) -> tuple[bool, str]:
+    if server_summary.get("status") != "ok":
+        return False, f"Server summary status is {server_summary.get('status')!r}"
+    if client_summary.get("status") != "ok":
+        return False, f"Client summary status is {client_summary.get('status')!r}"
+
+    renegotiation = client_summary.get("renegotiation")
+    if not isinstance(renegotiation, dict):
+        return False, "Client summary missing renegotiation block"
+
+    requested = renegotiation.get("requested")
+    if not isinstance(requested, dict):
+        return False, "Client did not record a requested format"
+
+    stream_start_count = int(renegotiation.get("stream_start_count") or 0)
+    final = renegotiation.get("final_format")
+    if stream_start_count < 2 or not isinstance(final, dict):
+        return (
+            False,
+            "Server did not re-emit stream/start after the request "
+            f"(stream_start_count={stream_start_count})",
+        )
+
+    if not _format_matches(final, requested):
+        return (
+            False,
+            f"Renegotiated format {_format_label(final)} does not match "
+            f"requested {_format_label(requested)}",
+        )
+
+    initial = renegotiation.get("initial_format")
+    if isinstance(initial, dict) and _formats_equal(initial, final):
+        return False, f"Format did not change (stayed {_format_label(final)})"
+
+    return True, f"Renegotiated {_format_label(initial)} -> {_format_label(final)}"
+
+
 def _compare_summaries(
     scenario: ScenarioSpec,
     server_summary: dict[str, Any],
@@ -761,6 +826,8 @@ def _compare_summaries(
         return _compare_controller_summaries(server_summary, client_summary)
     if scenario.verification_mode == "artwork":
         return _compare_artwork_summaries(server_summary, client_summary)
+    if scenario.verification_mode == "format-renegotiation":
+        return _compare_renegotiation_summaries(server_summary, client_summary)
     raise ValueError(f"Unsupported verification mode: {scenario.verification_mode}")
 
 
