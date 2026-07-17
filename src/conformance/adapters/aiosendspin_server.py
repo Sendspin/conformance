@@ -286,13 +286,14 @@ def _client_snapshot(client: Any) -> dict[str, Any]:
         "client_id": client.client_id,
         "name": client.name,
         "supported_roles": list(client.info.supported_roles),
-        "active_roles": list(client.negotiated_roles),
+        "active_roles": client.active_role_ids,
     }
 
 
 def _base_summary(
     args: argparse.Namespace,
     *,
+    server_id: str,
     discovery_method: str,
     client: Any,
 ) -> dict[str, Any]:
@@ -300,7 +301,7 @@ def _base_summary(
         "status": "ok",
         "implementation": "aiosendspin",
         "role": "server",
-        "server_id": args.server_id,
+        "server_id": server_id,
         "server_name": args.server_name,
         "scenario_id": args.scenario_id,
         "initiator_role": args.initiator_role,
@@ -603,6 +604,8 @@ async def _scenario_payload(
 async def _run(args: argparse.Namespace) -> int:
     _add_repo_to_syspath("aiosendspin")
 
+    from aiosendspin.noise.keys import Identity
+    from aiosendspin.noise.trust_store import InMemoryServerPairingStore
     from aiosendspin.server.server import SendspinServer
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
@@ -612,7 +615,14 @@ async def _run(args: argparse.Namespace) -> int:
     registry_path = Path(args.registry)
 
     loop = asyncio.get_running_loop()
-    server = SendspinServer(loop, server_id=args.server_id, server_name=args.server_name)
+    server = SendspinServer(
+        loop,
+        identity=Identity.generate(),
+        server_name=args.server_name,
+        pairing_store=InMemoryServerPairingStore(),
+        allow_unencrypted=True,
+    )
+    server_id = server.id
 
     try:
         await server.start_server(
@@ -632,7 +642,7 @@ async def _run(args: argparse.Namespace) -> int:
             ready_path,
             {
                 "status": "ready",
-                "server_id": args.server_id,
+                "server_id": server_id,
                 "server_name": args.server_name,
                 "scenario_id": args.scenario_id,
                 "initiator_role": args.initiator_role,
@@ -656,7 +666,7 @@ async def _run(args: argparse.Namespace) -> int:
 
         payload = await _scenario_payload(args, server=server, client=client)
         summary = {
-            **_base_summary(args, discovery_method=discovery_method, client=client),
+            **_base_summary(args, server_id=server_id, discovery_method=discovery_method, client=client),
             **payload,
         }
         write_json(summary_path, summary)
