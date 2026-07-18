@@ -685,7 +685,16 @@ async def _run(args: argparse.Namespace) -> int:
         )
         return 1
     finally:
-        await server.close()
+        # Workaround for https://github.com/Sendspin/aiosendspin/issues/299:
+        # server.close() can hang indefinitely waiting on an unresponsive
+        # message-loop task cancellation for client-initiated connections.
+        # By this point the summary has already been written (or the error
+        # path already ran), so a slow/hung close() here should not turn an
+        # otherwise-successful run into a harness SIGKILL/timeout failure.
+        try:
+            await asyncio.wait_for(server.close(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logging.warning("server.close() timed out after 5s; continuing shutdown")
 
 
 def main() -> int:
