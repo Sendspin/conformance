@@ -21,7 +21,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -74,7 +76,78 @@ data class SessionResult(
     val artworkBytes: ByteArray?,
     val artworkChannel: Int,
     val artworkReceivedCount: Int,
+    val renegotiation: RenegotiationResult?,
 )
+
+// ── stream/request-format renegotiation ──────────────────────────────────────
+
+/** The format the client asks for via `stream/request-format`. */
+data class RequestedFormat(
+    val codec: String?,
+    val channels: Int?,
+    val sampleRate: Int?,
+    val bitDepth: Int?,
+)
+
+data class RenegotiationResult(
+    val streamStartCount: Int,
+    val requested: RequestedFormat,
+    val initialFormat: StreamFormat?,
+    val finalFormat: StreamFormat?,
+)
+
+private fun isRequestFormatScenario(scenarioId: String) =
+    scenarioId == "client-initiated-request-format-pcm" || scenarioId == "client-initiated-request-format-flac"
+
+/**
+ * The formats a renegotiation scenario advertises in client/hello (priority order) and the
+ * format it later requests via stream/request-format. The server starts on the first
+ * advertised format, then switches to the requested one.
+ */
+private fun requestFormatPlan(scenarioId: String): Pair<List<AudioFormat>, RequestedFormat> {
+    fun pcm(bitDepth: Int) = AudioFormat("pcm", 1, 8000, bitDepth)
+    if (scenarioId == "client-initiated-request-format-flac") {
+        val flac = AudioFormat("flac", 1, 8000, 16)
+        return listOf(pcm(16), flac) to RequestedFormat("flac", 1, 8000, 16)
+    }
+    // Default: PCM bit-depth downgrade (24-bit preferred, request 16-bit).
+    return listOf(pcm(24), pcm(16)) to RequestedFormat("pcm", 1, 8000, 16)
+}
+
+/**
+ * Waits for the initial stream/start, requests [requested] via stream/request-format, then
+ * waits for the server to re-emit stream/start with the renegotiated format.
+ */
+private suspend fun runRequestFormatRenegotiation(
+    client: SendSpinClient,
+    requested: RequestedFormat,
+): RenegotiationResult {
+    var streamStartCount = 0
+    var initialFormat: StreamFormat? = null
+    var finalFormat: StreamFormat? = null
+
+    client.streamFormat.filterNotNull().take(2).collect { fmt ->
+        streamStartCount++
+        if (streamStartCount == 1) {
+            initialFormat = fmt
+            client.requestPlayerFormat(
+                codec = requested.codec,
+                channels = requested.channels,
+                sampleRate = requested.sampleRate,
+                bitDepth = requested.bitDepth,
+            )
+        } else {
+            finalFormat = fmt
+        }
+    }
+
+    return RenegotiationResult(
+        streamStartCount = streamStartCount,
+        requested = requested,
+        initialFormat = initialFormat,
+        finalFormat = finalFormat,
+    )
+}
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -99,6 +172,7 @@ fun main(args: Array<String>) {
     var lastControllerState: ControllerState? = null
     var lastStreamFormat: StreamFormat? = null
     var sentCommand: String? = null
+    var renegotiationResult: RenegotiationResult? = null
 
     // Collect all raw audio chunks via the hook — bypasses AudioBuffer drop logic so early
     // chunks (arriving before clock sync converges) are not lost.
@@ -107,7 +181,14 @@ fun main(args: Array<String>) {
     val client = SendSpinClient(
         okHttpClient = OkHttpClient.Builder().build(),
         moshi = moshi,
-        preferences = buildPreferences(config.preferredCodec),
+        preferences = if (isRequestFormatScenario(config.scenarioId)) {
+            ClientPreferences(
+                supportedFormats = requestFormatPlan(config.scenarioId).first,
+                artworkChannels = listOf(ArtworkChannel("album", "jpeg", 256, 256)),
+            )
+        } else {
+            buildPreferences(config.preferredCodec)
+        },
         clientId = config.clientId,
         clientName = config.clientName,
         manufacturer = "conformance",
@@ -140,7 +221,7 @@ fun main(args: Array<String>) {
         val result = withTimeoutOrNull(config.timeoutMs) {
             when (config.initiatorRole) {
                 "server" -> runServerInitiated(client, moshi, config) { sentCommand = it }
-                "client" -> runClientInitiated(client, config) { sentCommand = it }
+                "client" -> runClientInitiated(client, config, { sentCommand = it }) { renegotiationResult = it }
                 else -> error("Unknown initiator_role: ${config.initiatorRole}")
             }
         }
@@ -176,6 +257,7 @@ fun main(args: Array<String>) {
         artworkBytes = client.albumArtwork.value,
         artworkChannel = 0,
         artworkReceivedCount = artworkReceivedCount,
+        renegotiation = renegotiationResult,
     )
 
     writeSummaryAndExit(config, moshi, buildSummary(config, session, moshi), exitCode = 0)
@@ -229,6 +311,7 @@ private suspend fun runClientInitiated(
     client: SendSpinClient,
     config: CliConfig,
     onCommandSent: (String) -> Unit,
+    onRenegotiation: (RenegotiationResult) -> Unit,
 ): ServerHello {
     val serverUrl = pollRegistry(config.registryPath, config.serverName, timeoutMs = config.timeoutMs)
         ?: error("Server did not register in registry within timeout")
@@ -242,6 +325,11 @@ private suspend fun runClientInitiated(
         client.controllerState.first { it != null }
         client.sendControllerCommand(config.controllerCommand)
         onCommandSent(config.controllerCommand)
+    }
+
+    if (isRequestFormatScenario(config.scenarioId)) {
+        val (_, requested) = requestFormatPlan(config.scenarioId)
+        onRenegotiation(runRequestFormatRenegotiation(client, requested))
     }
 
     client.state.first { it == ClientState.DISCONNECTED || it == ClientState.ERROR }
@@ -269,9 +357,32 @@ private fun buildSummary(config: CliConfig, session: SessionResult, moshi: Moshi
             config.scenarioId.contains("-metadata") -> addMetadataFields(session, moshi)
             config.scenarioId.contains("-controller") -> addControllerFields(session)
             config.scenarioId.contains("-artwork") -> addArtworkFields(session)
+            isRequestFormatScenario(config.scenarioId) -> addRenegotiationFields(session)
             else -> addAudioFields(session, config.preferredCodec)
         }
     }
+}
+
+private fun JSONObject.addRenegotiationFields(session: SessionResult) {
+    val reneg = session.renegotiation
+    put("renegotiation", JSONObject().apply {
+        put("stream_start_count", reneg?.streamStartCount ?: 0)
+        put("requested", JSONObject().apply {
+            put("codec", reneg?.requested?.codec ?: JSONObject.NULL)
+            put("channels", reneg?.requested?.channels ?: JSONObject.NULL)
+            put("sample_rate", reneg?.requested?.sampleRate ?: JSONObject.NULL)
+            put("bit_depth", reneg?.requested?.bitDepth ?: JSONObject.NULL)
+        })
+        put("initial_format", reneg?.initialFormat?.let { streamFormatJson(it) } ?: JSONObject.NULL)
+        put("final_format", reneg?.finalFormat?.let { streamFormatJson(it) } ?: JSONObject.NULL)
+    })
+}
+
+private fun streamFormatJson(fmt: StreamFormat) = JSONObject().apply {
+    put("codec", fmt.codec)
+    put("sample_rate", fmt.sampleRate)
+    put("channels", fmt.channels)
+    put("bit_depth", fmt.bitDepth)
 }
 
 private fun JSONObject.addAudioFields(session: SessionResult, codec: String) {
