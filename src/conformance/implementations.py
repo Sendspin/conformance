@@ -24,6 +24,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_flac=True,
             supports_opus=False,
             supports_discovery=False,
+            supports_request_format=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
