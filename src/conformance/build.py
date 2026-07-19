@@ -203,11 +203,14 @@ def _node_build_result() -> BuildResult:
     return _built_result(adapter="sendspin-js-adapters", completed=completed)
 
 
-def _cargo_build_result() -> BuildResult:
+def _cargo_build_result(
+    adapter: str = "sendspin-rs-client",
+    subdir: str = "client",
+) -> BuildResult:
     cargo = find_cargo()
     if cargo is None:
         return {
-            "adapter": "sendspin-rs-client",
+            "adapter": adapter,
             "status": "failed",
             "detail": "cargo executable is not available",
         }
@@ -216,12 +219,12 @@ def _cargo_build_result() -> BuildResult:
         ensure_repo_checkout("sendspin-rs")
     except FileNotFoundError as err:
         return {
-            "adapter": "sendspin-rs-client",
+            "adapter": adapter,
             "status": "failed",
             "detail": str(err),
         }
 
-    manifest = repo_root() / "adapters" / "sendspin-rs" / "client" / "Cargo.toml"
+    manifest = repo_root() / "adapters" / "sendspin-rs" / subdir / "Cargo.toml"
     completed = _run_command([cargo, "build", "--manifest-path", str(manifest)])
     runtime_command_prefix = None
     if completed.returncode == 0:
@@ -229,7 +232,7 @@ def _cargo_build_result() -> BuildResult:
         if binary_path.exists():
             runtime_command_prefix = [str(binary_path)]
     return _built_result(
-        adapter="sendspin-rs-client",
+        adapter=adapter,
         completed=completed,
         runtime_command_prefix=runtime_command_prefix,
     )
@@ -405,6 +408,10 @@ def _build_plan() -> BuildPlan:
         ("sendspin-jvm-client", _gradle_build_result),
         ("sendspin-dotnet-client", _dotnet_build_result),
         ("sendspin-rs-client", _cargo_build_result),
+        (
+            "sendspin-rs-server",
+            lambda: _cargo_build_result("sendspin-rs-server", "server"),
+        ),
         ("SendspinKit-client", _swift_build_result),
         ("sendspin-cpp-client", _cmake_build_result),
         (
