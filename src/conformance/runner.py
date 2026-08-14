@@ -41,10 +41,7 @@ def _case_resource_keys(
     client_impl: str,
 ) -> tuple[str, ...]:
     """Return shared resources that make a case incompatible with parallel peers."""
-    scenario = require_scenario(scenario_id)
     keys: list[str] = []
-    if scenario.initiator_role == "server" and client_impl == "sendspin-cpp":
-        keys.append("sendspin-cpp-client-listener-8928")
     if client_impl == "sendspin-go":
         # The Go adapter is stable under the matrix, but local parallel runs can stall before
         # the paired server writes its ready file. Serialize Go client cases to match CI.
