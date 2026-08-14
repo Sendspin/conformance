@@ -113,9 +113,10 @@ The generated site includes:
 - a separate static HTML page per test under `results/scenarios/`
 - a dedicated static HTML page per pairing under `results/cases/`
 - a dedicated static HTML page per implementation under `results/implementations/` for linkable filtered overviews
+- the audio formats each client declared in `client/hello`, marked exercised or not verified, on that client's implementation page
 - per-case status and reason with explicit server/client labeling
 - summary, server, client, and build tabs on each dedicated case page when build data exists
-- run artifacts under `results/data/`
+- run artifacts under `results/data/`, including `declared-formats.json` for the declared-versus-exercised data
 - the static report at `results/index.html`
 - linked case artifacts for drill-down: `result.json`, client/server summaries, and logs
 

@@ -20,6 +20,11 @@ VerificationMode = Literal[
     "format-renegotiation",
 ]
 
+# The fields that together identify one audio format on the wire. Anything
+# comparing two formats must agree on this set, so it lives here rather than in
+# whichever module happens to compare them.
+AUDIO_FORMAT_FIELDS: tuple[str, ...] = ("codec", "sample_rate", "bit_depth", "channels")
+
 
 @dataclass(frozen=True)
 class RoleSpec:

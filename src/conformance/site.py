@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
 
+from .declared_formats import collect_declared_formats, declared_formats_for_implementation
 from .environment import build_log_filename
 from .implementations import IMPLEMENTATIONS, implementation_names, implementations_for_scenario
-from .io import read_json
+from .io import read_json, write_json
 from .repository_versions import collect_repository_versions
 from .scenarios import get_scenario, ordered_scenarios
 
@@ -502,6 +503,13 @@ CELL_CLASSES = {
     "unsupported": "cell-unsupported",
 }
 
+CLAIM_PILL_EXERCISED = "status-pill border-amber-800/20 bg-amber-100/70 text-retro-bark"
+# An untested claim is neither a pass nor a failure, so it deliberately avoids
+# the filled pass/fail pills and reads as an open question instead.
+CLAIM_PILL_UNVERIFIED = "status-pill border-dashed border-retro-line/60 bg-transparent text-retro-bark/60"
+
+DECLARED_FORMAT_COLUMNS = ("Declared format", "Claim status", "Declared in", "Exercised by")
+
 GITHUB_REPO_URL = "https://github.com/balloob-travel/conformance"
 SENDSPIN_AUDIO_URL = "https://sendspin-audio.com/"
 SCENARIOS_REPO_PATH = "src/conformance/scenarios.py"
@@ -987,6 +995,18 @@ def _status_classes(status: str) -> str:
 
 def _cell_classes(status: str) -> str:
     return CELL_CLASSES.get(status, "cell-skipped")
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
 
 
 def _escape(value: Any) -> str:
@@ -1509,9 +1529,178 @@ def _render_index_page(results: list[dict[str, Any]], *, data_dir: Path) -> str:
     return _page_shell(title="Sendspin Conformance", body=body)
 
 
+def _case_chips(references: list[dict[str, Any]], *, qualify: bool) -> str:
+    """Render case links. ``qualify`` marks weak or non-passing observations."""
+    if not references:
+        return "<span class='text-sm text-retro-bark/45'>&mdash;</span>"
+    show_server = len({str(reference.get("server_impl")) for reference in references}) > 1
+    chips: list[str] = []
+    for reference in references:
+        scenario_label = _scenario_name(str(reference.get("scenario_id") or ""))
+        server_label = _implementation_label(str(reference.get("server_impl") or ""))
+        status = str(reference.get("status") or "")
+        sources = [str(source) for source in _str_list(reference.get("sources"))]
+        chip_label = f"{scenario_label} · {server_label}" if show_server else scenario_label
+        qualifiers: list[str] = []
+        if qualify:
+            # A format carried only by a failing case is still negotiated, and a
+            # format only the client reported seeing is only the client's word
+            # for it. Either way, calling it coverage unqualified overstates it.
+            if status and status != "passed":
+                qualifiers.append(status)
+            if sources and not any(source.startswith("server.") for source in sources):
+                qualifiers.append("client-reported")
+        if qualifiers:
+            chip_label = f"{chip_label} ({', '.join(qualifiers)})"
+        title = (
+            f"Scenario: {scenario_label} | Server: {server_label} | "
+            f"Case status: {status or 'unknown'}"
+        )
+        if sources:
+            title += f" | Observed in: {', '.join(sources)}"
+        href = f"../cases/{quote(str(reference.get('case_name') or ''))}.html"
+        chips.append(
+            f"<a class='chip' href='{html.escape(href, quote=True)}' "
+            f"title='{html.escape(title, quote=True)}'>{html.escape(chip_label)}</a>"
+        )
+    return f"<div class='flex flex-wrap gap-1.5'>{''.join(chips)}</div>"
+
+
+def _declared_in_chips(references: list[dict[str, Any]]) -> str:
+    """Render where a format was declared, one chip per scenario.
+
+    A declaration belongs to the client and the scenario; the server merely
+    witnessed it, so repeating it per server (or per host in a merged run) would
+    only add indistinguishable chips.
+    """
+    by_scenario: dict[str, dict[str, Any]] = {}
+    for reference in references:
+        by_scenario.setdefault(str(reference.get("scenario_id") or ""), reference)
+    return _case_chips(list(by_scenario.values()), qualify=False)
+
+
+def _exercised_by_chips(references: list[dict[str, Any]]) -> str:
+    """Render which cases negotiated a format, kept per case.
+
+    Unlike a declaration, the server chose the format, so each case is a
+    distinct observation and must not be collapsed.
+    """
+    return _case_chips(references, qualify=True)
+
+
+def _declared_format_rows(formats: list[dict[str, Any]]) -> str:
+    cell_style = "border-color: rgb(var(--retro-line) / 0.28); vertical-align: top"
+    rows: list[str] = []
+    for audio_format in formats:
+        exercised = bool(audio_format.get("exercised"))
+        claim_class = CLAIM_PILL_EXERCISED if exercised else CLAIM_PILL_UNVERIFIED
+        claim_label = "Exercised" if exercised else "Not verified"
+        rows.append(
+            "<tr>"
+            f"<td class='border-b px-4 py-3' style='{cell_style}'>"
+            f"<span class='font-mono text-sm'>{_escape(audio_format.get('label'))}</span>"
+            "</td>"
+            f"<td class='border-b px-4 py-3' style='{cell_style}'>"
+            f"<span class='{claim_class}'>{claim_label}</span>"
+            "</td>"
+            f"<td class='border-b px-4 py-3' style='{cell_style}'>"
+            f"{_declared_in_chips(_dict_list(audio_format.get('declared_by')))}"
+            "</td>"
+            f"<td class='border-b px-4 py-3' style='{cell_style}'>"
+            f"{_exercised_by_chips(_dict_list(audio_format.get('exercised_by')))}"
+            "</td>"
+            "</tr>"
+        )
+    return "".join(rows)
+
+
+def _unreadable_declarations_notice(entries: list[dict[str, Any]]) -> str:
+    if not entries:
+        return ""
+    items = "".join(
+        "<li>"
+        f"<span class='font-mono text-[13px]'>{_escape(json.dumps(entry.get('value')))}</span> "
+        f"&mdash; {_escape(entry.get('reason'))}"
+        f"{_declared_in_chips(_dict_list(entry.get('declared_by')))}"
+        "</li>"
+        for entry in entries
+    )
+    return (
+        "<div class='mt-4 surface-inset px-4 py-3 text-sm'>"
+        "<p class='eyebrow'>Unreadable declarations</p>"
+        "<p class='mt-2 subtle-copy'>These advertised entries could not be read as an audio "
+        "format, so they are reported rather than dropped.</p>"
+        f"<ul class='mt-2 list-disc space-y-1 pl-5 subtle-copy'>{items}</ul>"
+        "</div>"
+    )
+
+
+def _render_declared_formats_section(entry: dict[str, Any], *, label: str) -> str:
+    formats = _dict_list(entry.get("formats"))
+    exercised_count = sum(1 for audio_format in formats if audio_format.get("exercised"))
+    unverified_count = len(formats) - exercised_count
+
+    header_cell = (
+        "<th scope='col' class='border-b px-4 py-3 text-left' "
+        "style='border-color: rgb(var(--retro-line) / 0.36); "
+        "background-color: rgb(var(--retro-shell) / 0.88)'>"
+        "<p class='eyebrow'>{column}</p>"
+        "</th>"
+    )
+    headers = "".join(header_cell.format(column=column) for column in DECLARED_FORMAT_COLUMNS)
+
+    pills = ""
+    if exercised_count:
+        pills += f"<span class='{CLAIM_PILL_EXERCISED}'>{exercised_count} exercised</span>"
+    if unverified_count:
+        pills += f"<span class='{CLAIM_PILL_UNVERIFIED}'>{unverified_count} not verified</span>"
+
+    table = (
+        ""
+        if not formats
+        else (
+            "<section class='list-shell overflow-hidden'>"
+            "<div class='overflow-x-auto'>"
+            "<table class='w-full border-separate border-spacing-0 text-sm'>"
+            f"<thead><tr>{headers}</tr></thead>"
+            f"<tbody>{_declared_format_rows(formats)}</tbody>"
+            "</table>"
+            "</div>"
+            "</section>"
+        )
+    )
+
+    return (
+        "<section class='surface p-5 sm:p-6'>"
+        "<div class='flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between'>"
+        "<div class='max-w-3xl'>"
+        "<p class='eyebrow'>Declared capability</p>"
+        "<h2 class='mt-2 text-2xl sm:text-3xl'>Declared audio formats</h2>"
+        "<p class='mt-3 text-sm leading-6 subtle-copy sm:text-base'>"
+        f"Every audio format the {_escape(label)} client advertised in a "
+        "<span class='font-mono text-[13px]'>client/hello</span> captured by a server in this "
+        "report, and whether any case negotiated exactly that codec, sample rate, bit depth and "
+        "channel count. <strong>Not verified</strong> means no case ever carried the format, so "
+        "the claim is untested &mdash; neither a pass nor a failure. This table compares a claim "
+        "against the wire only; it does not say whether a scenario got the format it set out to "
+        "test."
+        "</p>"
+        "</div>"
+        f"<div class='flex flex-wrap items-center gap-2 xl:justify-end'>{pills}</div>"
+        "</div>"
+        "<div class='mt-5'>"
+        f"{table}"
+        f"{_unreadable_declarations_notice(_dict_list(entry.get('unreadable_declarations')))}"
+        "</div>"
+        "</section>"
+    )
+
+
 def _render_implementation_page(
     implementation: str,
     results: list[dict[str, Any]],
+    *,
+    declared_formats: dict[str, Any] | None = None,
 ) -> str:
     filtered_results = _implementation_results(results, implementation)
     label = _implementation_label(implementation)
@@ -1585,11 +1774,18 @@ def _render_implementation_page(
         )
 
     impl_sections_html = ''.join(sections) if sections else '<section class="surface p-6 text-sm subtle-copy">No results were found for this implementation in the current report.</section>'
+    declared_formats_html = (
+        _render_declared_formats_section(declared_formats, label=label)
+        if declared_formats is not None
+        and (declared_formats.get("formats") or declared_formats.get("unreadable_declarations"))
+        else ""
+    )
     body = (
         "<div class='app-shell'>"
         "<div class='mx-auto max-w-[1540px] px-4 py-4 sm:px-6 lg:px-8 lg:py-6'>"
         "<main class='space-y-6'>"
         f"{_page_header(accent='overview', breadcrumb=_breadcrumb([('Overview', '../index.html'), (label, None)]), kicker='Implementation', title=f'{label} filtered overview', description=f'This view narrows the conformance overview to cases where {label} participates as either the server or the client.', actions=actions, meta=_summary_cards(counts=counts, total_label='matching cases', total_value=len(filtered_results)))}"
+        f"{declared_formats_html}"
         f"{impl_sections_html}"
         "</main>"
         "</div>"
@@ -1875,6 +2071,11 @@ def build_site(results_dir: Path, site_dir: Path) -> None:
     results: list[dict[str, Any]] = list(results_payload["results"])
     build_index = _build_results_index(data_dir)
 
+    # Written before the artifact sync so a site directory separate from the
+    # results directory receives it along with the other cross-run metadata.
+    declared_formats = collect_declared_formats(data_dir, results)
+    write_json(data_dir / "declared-formats.json", declared_formats)
+
     site_dir.mkdir(parents=True, exist_ok=True)
     _clear_legacy_dirs(site_dir)
     _sync_case_artifacts(data_dir, site_dir)
@@ -1916,6 +2117,10 @@ def build_site(results_dir: Path, site_dir: Path) -> None:
             _render_implementation_page(
                 implementation,
                 results,
+                declared_formats=declared_formats_for_implementation(
+                    declared_formats,
+                    implementation,
+                ),
             ),
             encoding="utf-8",
         )
