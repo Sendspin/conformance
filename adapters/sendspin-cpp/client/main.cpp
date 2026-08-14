@@ -497,7 +497,6 @@ static ArtworkRoleConfig build_artwork_config(const Args& args) {
     ArtworkRoleConfig config;
     config.preferred_formats = {
         ImageSlotPreference{
-            0,
             SendspinImageSource::ALBUM,
             parse_image_format(args.artwork_format).value_or(SendspinImageFormat::JPEG),
             static_cast<uint16_t>(args.artwork_width),
