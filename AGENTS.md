@@ -284,8 +284,13 @@ After meaningful changes, run the smallest relevant subset plus a syntax/build p
 Typical minimum:
 
 1. `python -m compileall src scripts`
-2. `python -m conformance.cli run --results-dir results --from aiosendspin --to aiosendspin,sendspin-dotnet --timeout-seconds 25`
-3. `python -m conformance.cli report --results-dir results`
+2. `python -m unittest discover -s tests`
+3. `python -m conformance.cli run --results-dir results --from aiosendspin --to aiosendspin,sendspin-dotnet --timeout-seconds 25`
+4. `python -m conformance.cli report --results-dir results`
+
+`tests/` holds stdlib `unittest` coverage for harness rules that the matrix
+cannot reach on a machine without every toolchain installed. It needs no test
+dependency beyond the package itself and is not wired into CI.
 
 If you changed CI, read `.github/workflows/publish.yml` afterward and confirm:
 

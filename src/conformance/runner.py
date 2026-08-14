@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .declared_formats import undeclared_format_violation
 from .environment import resolve_environment
 from .flac import decode_fixture
 from .fixtures import fixture_path
@@ -806,6 +807,24 @@ def _compare_renegotiation_summaries(
 
 
 def _compare_summaries(
+    scenario: ScenarioSpec,
+    server_summary: dict[str, Any],
+    client_summary: dict[str, Any],
+) -> tuple[bool, str]:
+    matches, reason = _dispatch_comparison(scenario, server_summary, client_summary)
+    if not matches:
+        return matches, reason
+    # Every format the case negotiated must be one the client declared. Modes
+    # that negotiate no player stream leave the check with nothing to inspect,
+    # so it applies to all of them rather than to a list of audio modes that a
+    # later scenario could be forgotten from.
+    violation = undeclared_format_violation(server_summary, client_summary)
+    if violation is not None:
+        return False, violation
+    return matches, reason
+
+
+def _dispatch_comparison(
     scenario: ScenarioSpec,
     server_summary: dict[str, Any],
     client_summary: dict[str, Any],
