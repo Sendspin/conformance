@@ -21,6 +21,13 @@ def pcm_int_bytes_to_float_bytes(pcm_bytes: bytes, bit_depth: int) -> bytes:
         floats = [sample / 32768.0 for sample in ints]
         return struct.pack(f"<{len(floats)}f", *floats)
     if bit_depth == 24:
+        # struct.unpack rejects a partial trailing sample for 16- and 32-bit. The manual
+        # 24-bit loop has to say so itself, or the same input surfaces as an opaque
+        # IndexError from the middle of the unpack.
+        if len(pcm_bytes) % 3:
+            raise ValueError(
+                f"PCM buffer of {len(pcm_bytes)} bytes is not a whole number of 24-bit samples"
+            )
         floats: list[float] = []
         for offset in range(0, len(pcm_bytes), 3):
             value = pcm_bytes[offset] | (pcm_bytes[offset + 1] << 8) | (pcm_bytes[offset + 2] << 16)
