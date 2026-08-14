@@ -5,8 +5,10 @@ harness records that hello verbatim in every server summary. This module joins
 those declarations to the formats the matrix really negotiated, so an untested
 claim is visible as such instead of hiding behind a green case.
 
-The join is observational. It reports what a client claimed and what the wire
-carried; it says nothing about whether a scenario got the format it set out to
+The join is mostly observational: it reports what a client claimed and what the
+wire carried. The one verdict drawn from it is `undeclared_format_violation`,
+which asserts the spec MUST that a negotiated format be one the client listed.
+It still says nothing about whether a scenario got the format it set out to
 test, which is not recorded in machine-readable form anywhere yet.
 """
 
@@ -70,6 +72,71 @@ def format_label(audio_format: dict[str, Any]) -> str:
         f"{str(audio_format['codec']).upper()} · {channel_label} · "
         f"{rate_label} · {int(audio_format['bit_depth'])}-bit"
     )
+
+
+def _comparable_key(audio_format: dict[str, Any]) -> FormatKey:
+    """Return the identity used to match a negotiated format against a declared one.
+
+    `bit_depth` is ignored for `opus`, per the spec, so it is dropped from the
+    key for that codec rather than compared.
+    """
+    if audio_format.get("codec") == "opus":
+        return tuple(
+            audio_format[field] for field in AUDIO_FORMAT_FIELDS if field != "bit_depth"
+        )
+    return format_key(audio_format)
+
+
+def undeclared_format_violation(
+    server_summary: dict[str, Any],
+    client_summary: dict[str, Any],
+) -> str | None:
+    """Return why the case's negotiated formats break the client's declaration, or None.
+
+    Both `stream/start` and `stream/request-format` carry the same spec MUST:
+    the format has to be one the client listed in its `supported_formats`. The
+    reason names every undeclared format, the summary field that observed it,
+    and what the client actually offered — the three things a reader of the red
+    cell needs to tell a server defect from a client misreport.
+
+    Formats match on `AUDIO_FORMAT_FIELDS`, except that `bit_depth` is dropped
+    for `opus`, which the spec says to ignore for that codec in both
+    `supported_formats` and `stream/start`. Comparing it there would fail a
+    conformant server for a field it was told not to honour, and a check that
+    only earns its red cells by naming real violations cannot afford that. The
+    report's declared-versus-exercised join keeps the full identity: it is
+    descriptive, so distinguishing two opus entries that differ only in an
+    ignored field costs nothing, while this verdict is normative and has to
+    match the spec exactly.
+
+    None means there is nothing to report, which deliberately covers two cases:
+    no violation, and no declaration this harness could read. An unreadable
+    claim is not evidence against an implementation, and `declared-formats.json`
+    already publishes such claims per implementation, so skipping here hides
+    nothing. One unparsable entry suppresses the check for the whole case,
+    because a format that looks undeclared could be the very entry that failed
+    to parse. An explicitly empty `supported_formats` is likewise read as no
+    declaration; no implementation emits one today.
+    """
+    declared, unreadable = _declared_formats(server_summary)
+    if not declared or unreadable:
+        return None
+
+    declared_keys = {_comparable_key(audio_format) for audio_format in declared}
+    undeclared = [
+        audio_format
+        for audio_format in _negotiated_formats(server_summary, client_summary)
+        if _comparable_key(audio_format) not in declared_keys
+    ]
+    if not undeclared:
+        return None
+
+    observed = ", ".join(
+        f"{format_label(audio_format)} (via {', '.join(audio_format['sources'])})"
+        for audio_format in undeclared
+    )
+    offered = ", ".join(format_label(audio_format) for audio_format in declared)
+    return f"Negotiated format not declared by the client: {observed}; declared: {offered}"
 
 
 def _declared_formats(
