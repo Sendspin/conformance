@@ -199,7 +199,8 @@ struct SessionState {
 
 static bool is_player_scenario(const std::string& id) {
     return id == "client-initiated-pcm" || id == "server-initiated-pcm" ||
-           id == "server-initiated-flac" || id == "server-initiated-pcm-24bit";
+           id == "server-initiated-flac" || id == "server-initiated-opus" ||
+           id == "server-initiated-pcm-24bit";
 }
 
 static bool is_metadata_scenario(const std::string& id) {
@@ -482,8 +483,14 @@ static SendspinClientConfig build_client_config(const Args& args) {
 static PlayerRoleConfig build_player_config(const Args& args) {
     PlayerRoleConfig config;
     if (is_player_scenario(args.scenario_id)) {
+        SendspinCodecFormat codec = SendspinCodecFormat::PCM;
+        if (args.preferred_codec == "flac") {
+            codec = SendspinCodecFormat::FLAC;
+        } else if (args.preferred_codec == "opus") {
+            codec = SendspinCodecFormat::OPUS;
+        }
         AudioSupportedFormatObject format{
-            args.preferred_codec == "flac" ? SendspinCodecFormat::FLAC : SendspinCodecFormat::PCM,
+            codec,
             1,
             8000,
             16,
