@@ -547,12 +547,16 @@ def _compare_audio_summaries(
         Path(audio["fixture"]),
         max_duration_seconds=float(audio.get("clip_seconds") or 5.0),
     )
-    bytes_per_sample = audio["bit_depth"] // 8
+    # Slice and hash in the fixture's own depth, not the negotiated wire depth. The
+    # canonical hash is over float samples, which carry the same value at any depth, so
+    # the comparison holds; using the wire depth against a fixture decoded at another
+    # would take the wrong number of bytes per sample.
+    bytes_per_sample = fixture.bit_depth // 8
     prefix_pcm = fixture.pcm_bytes[: received_sample_count * bytes_per_sample]
     from .pcm import FloatPcmHasher
 
     prefix_hasher = FloatPcmHasher()
-    prefix_hasher.update_from_pcm_bytes(prefix_pcm, bit_depth=audio["bit_depth"])
+    prefix_hasher.update_from_pcm_bytes(prefix_pcm, bit_depth=fixture.bit_depth)
     prefix_hash = prefix_hasher.hexdigest()
     if prefix_hash == received_hash:
         missing_samples = fixture.frame_count * audio["channels"] - received_sample_count
