@@ -487,6 +487,9 @@ static SendspinClientConfig build_client_config(const Args& args) {
     config.product_name = "sendspin-cpp Conformance Client";
     config.manufacturer = "Sendspin Conformance";
     config.software_version = "0.2.0";
+    // The harness hands every case its own client listener port so parallel cases do not
+    // fight over one socket; leaving this at DEFAULT_SERVER_PORT would bind 8928 for all.
+    config.server_port = static_cast<uint16_t>(args.port);
     return config;
 }
 
@@ -797,9 +800,11 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
         artwork.set_listener(artwork_listener.get());
     }
 
+    // start_server() reports role startup, not the listener bind: the socket is opened
+    // later from the client loop, and a failure there is retried rather than returned.
     if (!client.start_server()) {
         SessionState empty;
-        return emit_summary(args, empty, "error", "Failed to start client listener");
+        return emit_summary(args, empty, "error", "Failed to start client roles");
     }
     client.loop();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -813,8 +818,9 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
         install_binary_observer(client, state);
     }
 
-    const std::string local_url = "ws://127.0.0.1:8928" + args.path;
     if (args.initiator_role == "server") {
+        const std::string local_url =
+            "ws://127.0.0.1:" + std::to_string(args.port) + args.path;
         register_endpoint(args.registry, args.client_name, local_url);
         write_ready_file(args, local_url);
     }
