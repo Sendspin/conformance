@@ -17,7 +17,7 @@ Current scenarios:
 
 ## Current coverage
 
-- `aiosendspin`: real server adapter and real client adapter, including OPUS support
+- `aiosendspin`: real server adapter, including OPUS encoding, and real client adapter; the client SDK decodes PCM and FLAC only, so it does not advertise OPUS
 - `sendspin-dotnet`: real client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
 - `SendspinKit`: real Swift client adapter for client-initiated PCM, Flac, and Opus plus the server-initiated PCM, Flac, Opus, metadata, artwork, and controller scenarios; server placeholer
 - `sendspin-cpp`: real C++ client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
@@ -26,7 +26,7 @@ Current scenarios:
 - `sendspin-jvm`: real JVM client adapter written in Kotlin, for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
 - `sendspin-rs`: real Rust client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios, and the client-initiated `stream/request-format` renegotiation scenarios; server placeholder
 
-The OPUS scenario is currently exercised only by the `aiosendspin` server and client until other implementations opt in via `supports_opus`.
+The OPUS scenario is currently exercised only by the `SendspinKit` and `sendspin-cpp` clients against the `aiosendspin` server until other implementations opt in via `supports_opus`.
 
 The `client-initiated-request-format-*` scenarios are currently exercised only by the `sendspin-rs` client against the `aiosendspin` server until other implementations opt in via `supports_request_format`.
 
