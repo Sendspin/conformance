@@ -183,6 +183,16 @@ struct SessionState {
     int audio_chunk_count{0};
     bool hash_pcm_from_payload{false};
 
+    // Bit depth read off the wire from stream/start. The SDK's parsed stream params reach
+    // this adapter on the main loop, but audio frames are observed on the receive thread,
+    // so the parsed copy is not reliably populated yet when the first chunk lands. Both
+    // callbacks dispatch from the receive thread in wire order, so a depth taken there is
+    // always in place before the audio it describes.
+    bool stream_start_seen{false};
+    std::optional<int> wire_bit_depth;
+    int chunks_before_stream_start{0};
+    int chunks_without_bit_depth{0};
+
     int metadata_update_count{0};
     std::optional<ServerMetadataStateObject> metadata;
 
@@ -489,11 +499,17 @@ static PlayerRoleConfig build_player_config(const Args& args) {
         } else if (args.preferred_codec == "opus") {
             codec = SendspinCodecFormat::OPUS;
         }
+        // The 24-bit scenario hinges on a client that advertises 24-bit as its only
+        // supported depth; advertising 16-bit here would have the server stream 16-bit
+        // and the case would pass without exercising the 24-bit path at all.
+        const uint8_t bit_depth =
+            args.scenario_id == "server-initiated-pcm-24bit" ? static_cast<uint8_t>(24)
+                                                            : static_cast<uint8_t>(16);
         AudioSupportedFormatObject format{
             codec,
             1,
             8000,
-            16,
+            bit_depth,
         };
         config.audio_formats = {format};
     }
@@ -525,6 +541,27 @@ static void install_binary_observer(SendspinClient& client, SessionState& state)
     if (conn == nullptr || conn == state.hooked_connection) {
         return;
     }
+    auto original_json = conn->on_json_message_cb;
+    conn->on_json_message_cb = [&state, original_json](SendspinConnection* current,
+                                                      const char* data, size_t len,
+                                                      int64_t receive_time) {
+        JsonDocument doc;
+        if (deserializeJson(doc, data, len) == DeserializationError::Ok &&
+            doc["type"] == "stream/start") {
+            JsonVariantConst depth = doc["payload"]["player"]["bit_depth"];
+            std::lock_guard<std::mutex> lock(state.mu);
+            state.stream_start_seen = true;
+            // Only depths the hasher can actually unpack; anything else leaves
+            // wire_bit_depth unset so the chunks are counted rather than misread.
+            if (depth.is<int>() && (depth == 16 || depth == 24 || depth == 32)) {
+                state.wire_bit_depth = depth.as<int>();
+            }
+        }
+        if (original_json) {
+            original_json(current, data, len, receive_time);
+        }
+    };
+
     auto original_binary = conn->on_binary_message_cb;
     conn->on_binary_message_cb =
         [&state, original_binary](SendspinConnection* current, uint8_t* payload, size_t len) {
@@ -535,16 +572,21 @@ static void install_binary_observer(SendspinClient& client, SessionState& state)
                 std::lock_guard<std::mutex> lock(state.mu);
                 state.audio_chunk_count++;
                 state.encoded_hasher.update(audio, audio_len);
+                if (!state.stream_start_seen) {
+                    state.chunks_before_stream_start++;
+                }
                 if (state.hash_pcm_from_payload) {
                     // For PCM the wire payload carries decoded samples verbatim, so
-                    // hashing it reproduces the server's canonical PCM exactly. Use the
-                    // negotiated stream bit depth when known, falling back to 16-bit.
-                    int bit_depth =
-                        (state.stream.has_value() && state.stream->bit_depth.has_value())
-                            ? int(state.stream->bit_depth.value())
-                            : 16;
-                    state.pcm_hasher.update_from_pcm_bytes(audio, audio_len, bit_depth);
-                    state.received_sample_count = state.pcm_hasher.sample_count();
+                    // hashing it reproduces the server's canonical PCM exactly. Without a
+                    // usable depth the chunk cannot be interpreted at all; count it rather
+                    // than guessing a width and folding nonsense into the hash.
+                    if (state.wire_bit_depth.has_value()) {
+                        state.pcm_hasher.update_from_pcm_bytes(audio, audio_len,
+                                                               state.wire_bit_depth.value());
+                        state.received_sample_count = state.pcm_hasher.sample_count();
+                    } else {
+                        state.chunks_without_bit_depth++;
+                    }
                 }
             }
             if (original_binary) {
@@ -613,6 +655,13 @@ static JsonDocument build_summary(const Args& args, const SessionState& state,
     if (is_player_scenario(args.scenario_id)) {
         auto audio = doc["audio"].to<JsonObject>();
         audio["audio_chunk_count"] = state.audio_chunk_count;
+        audio["chunks_before_stream_start"] = state.chunks_before_stream_start;
+        audio["chunks_without_bit_depth"] = state.chunks_without_bit_depth;
+        if (state.wire_bit_depth.has_value()) {
+            audio["hash_bit_depth"] = state.wire_bit_depth.value();
+        } else {
+            audio["hash_bit_depth"] = nullptr;
+        }
         if (state.audio_chunk_count > 0) {
             audio["received_encoded_sha256"] = state.encoded_hasher.hexdigest();
         } else {
@@ -819,6 +868,14 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
         for (int i = 0; i < 10; i++) {
             client.loop();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        // Chunks the adapter could not interpret leave a hash covering only part of the
+        // stream. Reporting that as ok would send the runner chasing a PCM mismatch, so
+        // name the real cause instead.
+        if (state.chunks_without_bit_depth > 0) {
+            return emit_summary(args, state, "error",
+                                "Received " + std::to_string(state.chunks_without_bit_depth) +
+                                    " audio chunks with no usable stream/start bit depth");
         }
         return emit_summary(args, state, "ok", "");
     }
