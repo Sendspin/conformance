@@ -24,7 +24,7 @@ from .implementations import (
     resolve_repo_path,
 )
 from .io import read_json, write_json
-from .models import CaseResult, RoleName, ScenarioSpec
+from .models import AUDIO_FORMAT_FIELDS, CaseResult, RoleName, ScenarioSpec
 from .paths import repo_root
 from .process import close_process_log, collect_process, wait_for_file
 from .scenarios import ordered_scenarios, require_scenario
@@ -746,9 +746,6 @@ def _compare_artwork_summaries(
     )
 
 
-_FORMAT_KEYS = ("codec", "sample_rate", "bit_depth", "channels")
-
-
 def _format_label(fmt: dict[str, Any] | None) -> str:
     if not fmt:
         return "none"
@@ -760,7 +757,7 @@ def _format_label(fmt: dict[str, Any] | None) -> str:
 
 def _format_matches(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
     """Match on every field the requester constrained; ``None`` means unconstrained."""
-    for key in _FORMAT_KEYS:
+    for key in AUDIO_FORMAT_FIELDS:
         wanted = expected.get(key)
         if wanted is not None and actual.get(key) != wanted:
             return False
@@ -768,7 +765,7 @@ def _format_matches(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
 
 
 def _formats_equal(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    return all(left.get(key) == right.get(key) for key in _FORMAT_KEYS)
+    return all(left.get(key) == right.get(key) for key in AUDIO_FORMAT_FIELDS)
 
 
 def _compare_renegotiation_summaries(

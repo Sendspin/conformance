@@ -81,6 +81,11 @@ Cross-run metadata such as build logs and repository revisions also live under
 
 - `results/data/build-report.json`
 - `results/data/repositories.json`
+- `results/data/declared-formats.json`
+
+`declared-formats.json` is derived by the report step from the per-case summaries,
+so a merged multi-host run regenerates it rather than merging it. It carries a
+`schema_version`; downstream consumers should check it.
 
 Do not reintroduce SPA-style routing or inline all case details onto scenario pages.
 
@@ -148,6 +153,7 @@ If the baseline is unreachable (first publish, network error), the check is skip
 - `src/conformance/runner.py`: matrix execution and process orchestration
 - `src/conformance/build.py`: adapter build checks
 - `src/conformance/repository_versions.py`: git revision metadata written into `results/data/repositories.json`
+- `src/conformance/declared_formats.py`: joins client format declarations to the formats the matrix negotiated, written into `results/data/declared-formats.json`
 - `src/conformance/merge.py`: merges host-specific raw result directories, including build and repository metadata
 - `src/conformance/site.py`: static site generation
 - `src/conformance/flac.py` and `src/conformance/pcm.py`: canonical decode/hash helpers
