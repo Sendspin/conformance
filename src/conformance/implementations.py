@@ -149,10 +149,13 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
-            supported=False,
-            adapter_kind="placeholder",
-            entrypoint="conformance.adapters.placeholder",
-            reason="sendspin-rs does not yet expose a server implementation in this workspace.",
+            supported=True,
+            adapter_kind="cargo",
+            build_adapter="sendspin-rs-server",
+            entrypoint="adapters/sendspin-rs/server/Cargo.toml",
+            supports_server_initiated=True,
+            supports_client_initiated=True,
+            supported_role_families=("player",),
         ),
     ),
     "sendspin-cpp": ImplementationSpec(
