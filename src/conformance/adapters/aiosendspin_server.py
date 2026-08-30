@@ -206,8 +206,6 @@ def _picture_format(raw: str) -> Any:
         return PictureFormat.JPEG
     if normalized == "png":
         return PictureFormat.PNG
-    if normalized == "bmp":
-        return PictureFormat.BMP
     raise ValueError(f"Unsupported artwork format: {raw}")
 
 
@@ -235,8 +233,6 @@ def _encode_artwork(image: Image.Image, width: int, height: int, art_format: Any
             letterboxed.save(buf, format="JPEG", quality=85)
         elif art_format == PictureFormat.PNG:
             letterboxed.save(buf, format="PNG", compress_level=6)
-        elif art_format == PictureFormat.BMP:
-            letterboxed.save(buf, format="BMP")
         else:
             raise NotImplementedError(f"Unsupported artwork format: {art_format}")
         buf.seek(0)

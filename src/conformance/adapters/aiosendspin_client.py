@@ -332,8 +332,8 @@ async def _run(args: argparse.Namespace) -> int:
                 ArtworkChannel(
                     source=ArtworkSource.ALBUM,
                     format=PictureFormat(args.artwork_format.lower()),
-                    media_width=args.artwork_width,
-                    media_height=args.artwork_height,
+                    width=args.artwork_width,
+                    height=args.artwork_height,
                 )
             ]
         )
