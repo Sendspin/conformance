@@ -27,6 +27,7 @@ from .io import read_json, write_json
 from .models import CaseResult, RoleName, ScenarioSpec
 from .paths import repo_root
 from .process import close_process_log, collect_process, wait_for_file
+from .protocol import protocol_evidence_failure
 from .scenarios import ordered_scenarios, require_scenario
 from .toolchains import find_cargo, find_cmake, find_dotnet, find_go, find_swift
 
@@ -728,6 +729,19 @@ def _compare_summaries(
     server_summary: dict[str, Any],
     client_summary: dict[str, Any],
 ) -> tuple[bool, str]:
+    if scenario.verification_mode == "protocol":
+        if server_summary.get("status") != "ok":
+            return False, f"Server summary status is {server_summary.get('status')!r}"
+        if client_summary.get("status") != "ok":
+            return False, f"Client summary status is {client_summary.get('status')!r}"
+        failure = protocol_evidence_failure(
+            server_summary,
+            client_summary,
+            assertion_ids=scenario.protocol_assertions,
+        )
+        if failure is not None:
+            return False, failure
+        return True, f"Passed {len(scenario.protocol_assertions)} protocol assertions"
     if scenario.verification_mode == "audio-pcm":
         return _compare_audio_summaries(server_summary, client_summary)
     if scenario.verification_mode == "audio-encoded-bytes":

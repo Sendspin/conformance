@@ -11,7 +11,14 @@ CaseStatus = Literal["passed", "failed", "skipped"]
 InitiatorRole = Literal["server", "client"]
 RoleName = Literal["server", "client"]
 RoleFamily = Literal["player", "metadata", "controller", "artwork"]
-VerificationMode = Literal["audio-pcm", "audio-encoded-bytes", "metadata", "controller", "artwork"]
+VerificationMode = Literal[
+    "audio-pcm",
+    "audio-encoded-bytes",
+    "metadata",
+    "controller",
+    "artwork",
+    "protocol",
+]
 
 
 @dataclass(frozen=True)
@@ -115,6 +122,7 @@ class ScenarioSpec:
     required_role_families: tuple[RoleFamily, ...]
     verification_mode: VerificationMode
     extra_cli_args: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    protocol_assertions: tuple[str, ...] = field(default_factory=tuple)
 
     def cli_args(self) -> dict[str, str]:
         """Return scenario-wide CLI arguments passed to both roles."""
