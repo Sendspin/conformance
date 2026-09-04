@@ -210,7 +210,7 @@ struct SessionState {
 static bool is_player_scenario(const std::string& id) {
     return id == "client-initiated-pcm" || id == "server-initiated-pcm" ||
            id == "server-initiated-flac" || id == "server-initiated-opus" ||
-           id == "server-initiated-pcm-24bit";
+           id == "server-initiated-pcm-24bit" || id == "server-initiated-legacy-unencrypted";
 }
 
 static bool is_metadata_scenario(const std::string& id) {

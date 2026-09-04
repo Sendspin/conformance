@@ -38,6 +38,7 @@ const IMPLEMENTATION = "sendspin-js";
 const PLAYER_SCENARIOS = new Set([
   "client-initiated-pcm",
   "server-initiated-pcm",
+  "server-initiated-legacy-unencrypted",
 ]);
 const METADATA_SCENARIOS = new Set(["server-initiated-metadata"]);
 const CONTROLLER_SCENARIOS = new Set(["server-initiated-controller"]);
