@@ -25,6 +25,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_opus=False,
             supports_discovery=False,
             supports_request_format=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
@@ -62,6 +63,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_opus=True,
             supports_discovery=True,
             supports_request_format=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
     ),
@@ -79,6 +81,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_client_initiated=True,
             supports_flac=True,
             supports_discovery=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
@@ -102,6 +105,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_client_initiated=True,
             supports_flac=True,
             supports_opus=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
@@ -123,6 +127,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             entrypoint="adapters/sendspin-js/client.mjs",
             supports_server_initiated=True,
             supports_client_initiated=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller"),
         ),
         server=RoleSpec(
@@ -146,6 +151,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_client_initiated=True,
             supports_flac=True,
             supports_request_format=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
@@ -169,6 +175,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_client_initiated=True,
             supports_flac=True,
             supports_opus=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
@@ -192,6 +199,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_client_initiated=True,
             supports_flac=True,
             supports_discovery=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(

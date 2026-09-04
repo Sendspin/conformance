@@ -407,10 +407,16 @@ class CaseContext:
             return {
                 **common,
                 "client_name": self.client_name,
+                "client_id": self.client_id,
                 "fixture": str(fixture_path()),
                 "server_id": self.server_id,
                 "server_name": self.server_name,
                 "port": str(self.server_port),
+                **(
+                    {"allow_unencrypted": "true"}
+                    if self.scenario.requires_legacy_unencrypted
+                    else {}
+                ),
             }
         args = {
             **common,

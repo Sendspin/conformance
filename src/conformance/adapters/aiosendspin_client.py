@@ -185,8 +185,8 @@ async def _run(args: argparse.Namespace) -> int:
         ArtworkSource,
     )
     from aiosendspin.models.types import PlayerCommand
-    from aiosendspin.noise.keys import Identity
-    from aiosendspin.noise.trust_store import InMemoryClientPairingStore
+
+    from conformance.adapters._aiosendspin_pairing import make_client_identity_and_store
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
@@ -312,6 +312,7 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
+        "server-initiated-legacy-unencrypted",
     }:
         player_support = ClientHelloPlayerSupport(
             supported_formats=_supported_formats(
@@ -338,6 +339,7 @@ async def _run(args: argparse.Namespace) -> int:
             ]
         )
     else:
+        write_json(ready_path, {"status": "error"})
         write_json(
             summary_path,
             {
@@ -347,11 +349,15 @@ async def _run(args: argparse.Namespace) -> int:
         )
         return 1
 
+    identity, pairing_store = await make_client_identity_and_store(
+        server_id=args.server_id,
+        client_id=args.client_id,
+    )
     client = SendspinClient(
-        identity=Identity.generate(),
+        identity=identity,
         client_name=args.client_name,
         roles=scenario_roles,
-        pairing_store=InMemoryClientPairingStore(),
+        pairing_store=pairing_store,
         player_support=player_support,
         artwork_support=artwork_support,
     )
@@ -365,6 +371,7 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
+        "server-initiated-legacy-unencrypted",
     }:
         client.add_audio_chunk_listener(on_audio_chunk)
         client.add_stream_end_listener(on_stream_end)
@@ -484,6 +491,7 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
+        "server-initiated-legacy-unencrypted",
     }:
         summary["stream"] = audio_state["stream"]
         summary["audio"] = {

@@ -45,9 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8927)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--server-id", default="conformance-server")
+    parser.add_argument("--client-id", default="conformance-client-id")
     parser.add_argument("--server-name", default="Sendspin Conformance Server")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--enable-mdns", action="store_true")
+    parser.add_argument("--allow-unencrypted", default="false")
     parser.add_argument("--clip-seconds", type=float, default=5.0)
     parser.add_argument("--metadata-title", default="Almost Silent")
     parser.add_argument("--metadata-artist", default="Sendspin Conformance")
@@ -587,6 +589,7 @@ async def _scenario_payload(
         "server-initiated-opus",
         "client-initiated-request-format-pcm",
         "client-initiated-request-format-flac",
+        "server-initiated-legacy-unencrypted",
     }:
         # The server streams source PCM and the player role re-encodes to whatever
         # format the client negotiates, including a mid-stream stream/request-format
@@ -604,9 +607,9 @@ async def _scenario_payload(
 async def _run(args: argparse.Namespace) -> int:
     _add_repo_to_syspath("aiosendspin")
 
-    from aiosendspin.noise.keys import Identity
-    from aiosendspin.noise.trust_store import InMemoryServerPairingStore
     from aiosendspin.server.server import SendspinServer
+
+    from conformance.adapters._aiosendspin_pairing import make_server_identity_and_store
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
@@ -615,12 +618,16 @@ async def _run(args: argparse.Namespace) -> int:
     registry_path = Path(args.registry)
 
     loop = asyncio.get_running_loop()
+    identity, pairing_store = await make_server_identity_and_store(
+        server_id=args.server_id,
+        client_id=args.client_id,
+    )
     server = SendspinServer(
         loop,
-        identity=Identity.generate(),
+        identity=identity,
         server_name=args.server_name,
-        pairing_store=InMemoryServerPairingStore(),
-        allow_unencrypted=True,
+        pairing_store=pairing_store,
+        allow_unencrypted=_bool_from_cli(args.allow_unencrypted),
     )
     server_id = server.id
 
