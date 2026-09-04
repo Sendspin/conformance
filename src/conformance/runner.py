@@ -539,15 +539,22 @@ def _compare_audio_summaries(
     if client_summary.get("status") != "ok":
         return False, f"Client summary status is {client_summary.get('status')!r}"
 
-    source_hash = server_summary["audio"]["source_pcm_sha256"]
-    received_hash = client_summary["audio"]["received_pcm_sha256"]
-    if not client_summary["audio"]["audio_chunk_count"]:
+    server_audio = server_summary.get("audio")
+    if not isinstance(server_audio, dict):
+        return False, "Server summary is missing an 'audio' section"
+    client_audio = client_summary.get("audio")
+    if not isinstance(client_audio, dict):
+        return False, "Client summary is missing an 'audio' section"
+
+    source_hash = server_audio["source_pcm_sha256"]
+    received_hash = client_audio["received_pcm_sha256"]
+    if not client_audio["audio_chunk_count"]:
         return False, "Client summary shows zero audio chunks"
     if source_hash == received_hash:
         return True, "PCM hashes match exactly"
 
-    audio = server_summary["audio"]
-    received_sample_count = int(client_summary["audio"]["received_sample_count"])
+    audio = server_audio
+    received_sample_count = int(client_audio["received_sample_count"])
     fixture = decode_fixture(
         Path(audio["fixture"]),
         max_duration_seconds=float(audio.get("clip_seconds") or 5.0),
@@ -1157,11 +1164,15 @@ async def run_case(
 
     server_payload = read_json(context.summary_path("server"))
     client_payload = read_json(context.summary_path("client"))
-    matches, comparison_reason = _compare_summaries(
-        scenario,
-        server_payload,
-        client_payload,
-    )
+    try:
+        matches, comparison_reason = _compare_summaries(
+            scenario,
+            server_payload,
+            client_payload,
+        )
+    except Exception as err:  # noqa: BLE001 - never let one bad case crash the whole matrix run
+        matches = False
+        comparison_reason = f"Comparison raised {err.__class__.__name__}: {err}"
     if not matches:
         status = "failed"
         reason = comparison_reason
