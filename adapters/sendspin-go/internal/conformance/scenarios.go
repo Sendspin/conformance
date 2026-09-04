@@ -12,7 +12,8 @@ func SupportsScenario(scenarioID string) bool {
 func IsPlayerScenario(scenarioID string) bool {
 	return scenarioID == "client-initiated-pcm" ||
 		scenarioID == "server-initiated-pcm" ||
-		scenarioID == "server-initiated-flac"
+		scenarioID == "server-initiated-flac" ||
+		scenarioID == "server-initiated-legacy-unencrypted"
 }
 
 func IsMetadataScenario(scenarioID string) bool {
