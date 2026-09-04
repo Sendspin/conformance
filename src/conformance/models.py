@@ -18,6 +18,7 @@ VerificationMode = Literal[
     "controller",
     "artwork",
     "format-renegotiation",
+    "protocol",
 ]
 
 # The fields that together identify one audio format on the wire. Anything
@@ -138,6 +139,7 @@ class ScenarioSpec:
     verification_mode: VerificationMode
     requires_request_format: bool = False
     extra_cli_args: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    protocol_assertions: tuple[str, ...] = field(default_factory=tuple)
 
     def cli_args(self) -> dict[str, str]:
         """Return scenario-wide CLI arguments passed to both roles."""
