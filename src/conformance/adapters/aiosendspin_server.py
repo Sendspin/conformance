@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Create the CLI parser."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--client-name", required=True)
+    parser.add_argument("--client-id", default="conformance-client")
     parser.add_argument("--summary", required=True)
     parser.add_argument("--ready", required=True)
     parser.add_argument("--registry", required=True)
@@ -270,7 +271,7 @@ def _client_snapshot(client: Any) -> dict[str, Any]:
         "client_id": client.client_id,
         "name": client.name,
         "supported_roles": list(client.info.supported_roles),
-        "active_roles": list(client.negotiated_roles),
+        "active_roles": list(client.negotiated_role_ids),
     }
 
 
@@ -566,6 +567,8 @@ async def _run(args: argparse.Namespace) -> int:
 
     from aiosendspin.server.server import SendspinServer
 
+    from conformance.adapters._aiosendspin_pairing import make_server_identity_and_store
+
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
     summary_path = Path(args.summary)
@@ -573,7 +576,16 @@ async def _run(args: argparse.Namespace) -> int:
     registry_path = Path(args.registry)
 
     loop = asyncio.get_running_loop()
-    server = SendspinServer(loop, server_id=args.server_id, server_name=args.server_name)
+    identity, pairing_store = await make_server_identity_and_store(
+        server_id=args.server_id,
+        client_id=args.client_id,
+    )
+    server = SendspinServer(
+        loop,
+        identity=identity,
+        server_name=args.server_name,
+        pairing_store=pairing_store,
+    )
 
     try:
         await server.start_server(
@@ -636,7 +648,16 @@ async def _run(args: argparse.Namespace) -> int:
         )
         return 1
     finally:
-        await server.close()
+        try:
+            await asyncio.wait_for(server.close(), timeout=5.0)
+        except TimeoutError:
+            logging.warning(
+                "Server close() did not complete within 5s (likely aiohttp "
+                "keep-alive shutdown_timeout); proceeding since summary was "
+                "already written."
+            )
+        except BaseException as close_err:  # noqa: BLE001
+            logging.exception("Error while closing server: %r", close_err)
 
 
 def main() -> int:

@@ -172,13 +172,19 @@ async def _run(args: argparse.Namespace) -> int:
     )
     from aiosendspin.models.types import PlayerCommand
 
+    from conformance.adapters._aiosendspin_pairing import make_client_identity_and_store
+
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+
+    identity, pairing_store = await make_client_identity_and_store(
+        server_id=args.server_id,
+        client_id=args.client_id,
+    )
 
     summary_path = Path(args.summary)
     ready_path = Path(args.ready)
     registry_path = Path(args.registry)
     disconnect_event = asyncio.Event()
-    received_server_hello: dict[str, Any] | None = None
 
     audio_state: dict[str, Any] = {
         "chunk_count": 0,
@@ -280,13 +286,6 @@ async def _run(args: argparse.Namespace) -> int:
     def on_stream_end(_roles: list[str] | None) -> None:
         flush_decoder()
 
-    def on_server_hello(payload: Any) -> None:
-        nonlocal received_server_hello
-        received_server_hello = {
-            "type": "server/hello",
-            "payload": payload.to_dict(),
-        }
-
     def on_artwork_chunk(channel: int, data: bytes) -> None:
         artwork_state["channel"] = channel
         artwork_state["received_count"] += 1
@@ -337,14 +336,14 @@ async def _run(args: argparse.Namespace) -> int:
         return 1
 
     client = SendspinClient(
-        client_id=args.client_id,
+        identity=identity,
         client_name=args.client_name,
         roles=scenario_roles,
+        pairing_store=pairing_store,
         player_support=player_support,
         artwork_support=artwork_support,
     )
 
-    client.add_server_hello_listener(on_server_hello)
     client.add_stream_start_listener(on_stream_start)
     client.add_artwork_listener(on_artwork_chunk)
 
@@ -461,7 +460,7 @@ async def _run(args: argparse.Namespace) -> int:
         "scenario_id": args.scenario_id,
         "initiator_role": args.initiator_role,
         "preferred_codec": args.preferred_codec,
-        "peer_hello": received_server_hello,
+        "peer_hello": (asdict(client.server_info) if client.server_info is not None else None),
         "server": asdict(client.server_info) if client.server_info is not None else None,
     }
 
