@@ -7,12 +7,19 @@ import asyncio
 import base64
 import logging
 import sys
+import time
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw
 
+from conformance.adapters._aiosendspin_protocol_evidence import (
+    ProtocolEvidenceCollector,
+    record_activation_evidence_server,
+    record_handshake_evidence_server,
+    record_player_stream_evidence,
+)
 from conformance.flac import (
     decode_fixture,
     flac_encoder_frame_samples,
@@ -474,6 +481,149 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
     }
 
 
+async def _run_protocol_baseline_scenario(
+    args: argparse.Namespace,
+    *,
+    server: Any,
+    client: Any,
+    handshake_start_ts: float,
+    handshake_end_ts: float,
+) -> dict[str, Any]:
+    """Run the server-initiated-protocol-baseline-v1 scenario and populate
+    ``summary["protocol"]`` per the contract in :mod:`conformance.protocol`.
+
+    See :mod:`conformance.adapters._aiosendspin_protocol_evidence` for the
+    fidelity caveats of each assertion this records.
+    """
+    from aiosendspin.models.core import StreamStartMessage
+
+    collector = ProtocolEvidenceCollector()
+
+    connection = client.connection
+    if connection is None:
+        raise RuntimeError("Client has no active connection to capture handshake evidence from")
+    record_handshake_evidence_server(
+        collector,
+        connection,
+        start_ts=handshake_start_ts,
+        end_ts=handshake_end_ts,
+    )
+    record_activation_evidence_server(
+        collector,
+        client,
+        requested_roles=list(client.info.supported_roles),
+    )
+
+    advertised_formats: list[dict[str, Any]] = []
+    player_support = getattr(client.info, "player_support", None)
+    if player_support is not None:
+        advertised_formats = [
+            {
+                "codec": fmt.codec.value,
+                "sample_rate": fmt.sample_rate,
+                "channels": fmt.channels,
+                "bit_depth": fmt.bit_depth,
+            }
+            for fmt in player_support.supported_formats
+        ]
+
+    negotiated_format: dict[str, Any] | None = None
+    chunk_timestamps_us: list[int] = []
+
+    def capture_stream_start(message: Any) -> None:
+        nonlocal negotiated_format
+        if not isinstance(message, StreamStartMessage) or message.payload.player is None:
+            return
+        player = message.payload.player
+        negotiated_format = {
+            "codec": player.codec.value,
+            "sample_rate": player.sample_rate,
+            "channels": player.channels,
+            "bit_depth": player.bit_depth,
+        }
+
+    original_send_message = client.send_message
+    original_send_role_message = client.send_role_message
+    original_send_binary = client.send_binary
+
+    def send_message_wrapper(message: Any) -> None:
+        capture_stream_start(message)
+        original_send_message(message)
+
+    def send_role_message_wrapper(role: str, message: Any) -> None:
+        capture_stream_start(message)
+        original_send_role_message(role, message)
+
+    def send_binary_wrapper(
+        data: bytes,
+        *,
+        role_family: str,
+        timestamp_us: int,
+        message_type: int,
+        buffer_end_time_us: int | None = None,
+        buffer_byte_count: int | None = None,
+        duration_us: int | None = None,
+    ) -> None:
+        from aiosendspin.models.types import BinaryMessageType
+
+        if message_type == BinaryMessageType.AUDIO_CHUNK.value:
+            chunk_timestamps_us.append(timestamp_us)
+        original_send_binary(
+            data,
+            role_family=role_family,
+            timestamp_us=timestamp_us,
+            message_type=message_type,
+            buffer_end_time_us=buffer_end_time_us,
+            buffer_byte_count=buffer_byte_count,
+            duration_us=duration_us,
+        )
+
+    client.send_message = send_message_wrapper  # type: ignore[method-assign]
+    client.send_role_message = send_role_message_wrapper  # type: ignore[method-assign]
+    client.send_binary = send_binary_wrapper  # type: ignore[method-assign]
+
+    fixture = decode_fixture(Path(args.fixture), max_duration_seconds=args.clip_seconds)
+    try:
+        stream = client.group.start_stream()
+        from aiosendspin.server.audio import AudioFormat
+
+        audio_format = AudioFormat(
+            sample_rate=fixture.sample_rate,
+            bit_depth=fixture.bit_depth,
+            channels=fixture.channels,
+        )
+        next_play_start_us = server.clock.now_us() + 250_000
+        total_duration_us = 0
+        for chunk, duration_us in _iter_pcm_blocks(
+            fixture.pcm_bytes,
+            sample_rate=fixture.sample_rate,
+            channels=fixture.channels,
+            bit_depth=fixture.bit_depth,
+        ):
+            stream.prepare_audio(chunk, audio_format)
+            play_start_us = await stream.commit_audio(play_start_us=next_play_start_us)
+            next_play_start_us = play_start_us + duration_us
+            total_duration_us += duration_us
+        await asyncio.sleep((total_duration_us / 1_000_000.0) + 0.75)
+        await client.group.stop()
+        await asyncio.sleep(0.5)
+        await _disconnect_client(client)
+    finally:
+        client.send_message = original_send_message  # type: ignore[method-assign]
+        client.send_role_message = original_send_role_message  # type: ignore[method-assign]
+        client.send_binary = original_send_binary  # type: ignore[method-assign]
+
+    record_player_stream_evidence(
+        collector,
+        advertised_formats=advertised_formats,
+        negotiated_format=negotiated_format,
+        chunk_count=len(chunk_timestamps_us),
+        chunk_timestamps_us=chunk_timestamps_us,
+    )
+
+    return {"protocol": collector.to_summary_fragment()}
+
+
 async def _run_metadata_scenario(args: argparse.Namespace, *, client: Any) -> dict[str, Any]:
     from aiosendspin.server.roles.metadata import MetadataGroupRole
 
@@ -580,6 +730,7 @@ async def _scenario_payload(
     *,
     server: Any,
     client: Any,
+    handshake_timestamps: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     if args.scenario_id in {
         "client-initiated-pcm",
@@ -595,6 +746,16 @@ async def _scenario_payload(
         # format the client negotiates, including a mid-stream stream/request-format
         # switch, so no renegotiation-specific server logic is required here.
         return await _run_audio_scenario(args, server=server, client=client)
+    if args.scenario_id == "server-initiated-protocol-baseline-v1":
+        assert handshake_timestamps is not None
+        handshake_start_ts, handshake_end_ts = handshake_timestamps
+        return await _run_protocol_baseline_scenario(
+            args,
+            server=server,
+            client=client,
+            handshake_start_ts=handshake_start_ts,
+            handshake_end_ts=handshake_end_ts,
+        )
     if args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}:
         return await _run_metadata_scenario(args, client=client)
     if args.scenario_id in {"client-initiated-controller", "server-initiated-controller"}:
@@ -628,6 +789,7 @@ async def _run(args: argparse.Namespace) -> int:
         server_name=args.server_name,
         pairing_store=pairing_store,
         allow_unencrypted=_bool_from_cli(args.allow_unencrypted),
+        allow_noncompliant_clients=args.scenario_id != "server-initiated-protocol-baseline-v1",
     )
     server_id = server.id
 
@@ -658,20 +820,29 @@ async def _run(args: argparse.Namespace) -> int:
         )
 
         if args.initiator_role == "client":
+            handshake_start_ts = time.time()
             client, discovery_method = await _wait_for_incoming_client(
                 server,
                 client_name=args.client_name,
                 timeout_s=args.timeout_seconds,
             )
+            handshake_end_ts = time.time()
         else:
+            handshake_start_ts = time.time()
             client, discovery_method = await _wait_for_target_client(
                 server,
                 client_name=args.client_name,
                 registry_path=registry_path,
                 timeout_s=args.timeout_seconds,
             )
+            handshake_end_ts = time.time()
 
-        payload = await _scenario_payload(args, server=server, client=client)
+        payload = await _scenario_payload(
+            args,
+            server=server,
+            client=client,
+            handshake_timestamps=(handshake_start_ts, handshake_end_ts),
+        )
         summary = {
             **_base_summary(args, server_id=server_id, discovery_method=discovery_method, client=client),
             **payload,
