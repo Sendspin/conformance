@@ -30,6 +30,7 @@ const (
 
 type args struct {
 	ClientName        string
+	ClientID          string
 	Summary           string
 	Ready             string
 	Registry          string
@@ -96,6 +97,7 @@ func main() {
 func parseArgs() args {
 	var parsed args
 	flag.StringVar(&parsed.ClientName, "client-name", "", "")
+	flag.StringVar(&parsed.ClientID, "client-id", "", "")
 	flag.StringVar(&parsed.Summary, "summary", "", "")
 	flag.StringVar(&parsed.Ready, "ready", "", "")
 	flag.StringVar(&parsed.Registry, "registry", "", "")

@@ -407,6 +407,7 @@ class CaseContext:
             return {
                 **common,
                 "client_name": self.client_name,
+                "client_id": self.client_id,
                 "fixture": str(fixture_path()),
                 "server_id": self.server_id,
                 "server_name": self.server_name,
