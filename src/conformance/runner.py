@@ -412,6 +412,11 @@ class CaseContext:
                 "server_id": self.server_id,
                 "server_name": self.server_name,
                 "port": str(self.server_port),
+                **(
+                    {"allow_unencrypted": "true"}
+                    if self.scenario.requires_legacy_unencrypted
+                    else {}
+                ),
             }
         args = {
             **common,

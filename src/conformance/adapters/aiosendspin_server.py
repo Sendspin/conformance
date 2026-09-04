@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--server-name", default="Sendspin Conformance Server")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--enable-mdns", action="store_true")
+    parser.add_argument("--allow-unencrypted", default="false")
     parser.add_argument("--clip-seconds", type=float, default=5.0)
     parser.add_argument("--metadata-title", default="Almost Silent")
     parser.add_argument("--metadata-artist", default="Sendspin Conformance")
@@ -588,6 +589,7 @@ async def _scenario_payload(
         "server-initiated-opus",
         "client-initiated-request-format-pcm",
         "client-initiated-request-format-flac",
+        "server-initiated-legacy-unencrypted",
     }:
         # The server streams source PCM and the player role re-encodes to whatever
         # format the client negotiates, including a mid-stream stream/request-format
@@ -625,6 +627,7 @@ async def _run(args: argparse.Namespace) -> int:
         identity=identity,
         server_name=args.server_name,
         pairing_store=pairing_store,
+        allow_unencrypted=_bool_from_cli(args.allow_unencrypted),
     )
     server_id = server.id
 

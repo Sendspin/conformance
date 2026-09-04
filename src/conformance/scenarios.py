@@ -213,6 +213,25 @@ CLIENT_INITIATED_REQUEST_FORMAT_FLAC = ScenarioSpec(
 )
 
 
+SERVER_INITIATED_LEGACY_UNENCRYPTED = ScenarioSpec(
+    id="server-initiated-legacy-unencrypted",
+    display_name="Server initiates connection over the legacy unencrypted transition mode",
+    description=(
+        "Start the server first, then the client. The server opts into aiosendspin's "
+        "non-spec unencrypted transition mode (allow_unencrypted) rather than the real "
+        "encrypted Noise handshake, to keep tracking the plaintext legacy path used by "
+        "implementations that have not yet adopted the spec's mandatory encryption. This "
+        "scenario is expected to be dropped once every tracked implementation supports the "
+        "real handshake."
+    ),
+    initiator_role="server",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="audio-pcm",
+    requires_legacy_unencrypted=True,
+)
+
+
 SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     CLIENT_INITIATED_PCM,
     SERVER_INITIATED_PCM,
@@ -225,6 +244,7 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_PCM_24BIT,
     CLIENT_INITIATED_REQUEST_FORMAT_PCM,
     CLIENT_INITIATED_REQUEST_FORMAT_FLAC,
+    SERVER_INITIATED_LEGACY_UNENCRYPTED,
 )
 
 SCENARIOS: dict[str, ScenarioSpec] = {scenario.id: scenario for scenario in SCENARIO_LIST}

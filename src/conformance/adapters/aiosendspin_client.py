@@ -312,6 +312,7 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
+        "server-initiated-legacy-unencrypted",
     }:
         player_support = ClientHelloPlayerSupport(
             supported_formats=_supported_formats(
@@ -370,6 +371,7 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
+        "server-initiated-legacy-unencrypted",
     }:
         client.add_audio_chunk_listener(on_audio_chunk)
         client.add_stream_end_listener(on_stream_end)
@@ -489,6 +491,7 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
+        "server-initiated-legacy-unencrypted",
     }:
         summary["stream"] = audio_state["stream"]
         summary["audio"] = {
