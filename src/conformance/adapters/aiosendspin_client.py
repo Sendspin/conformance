@@ -7,11 +7,18 @@ import asyncio
 import base64
 import logging
 import sys
+import time
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from conformance.adapters._aiosendspin_protocol_evidence import (
+    ProtocolEvidenceCollector,
+    record_activation_evidence_client,
+    record_handshake_evidence_client,
+    record_player_stream_evidence,
+)
 from conformance.flac import StreamingFlacDecoder
 from conformance.io import write_json
 from conformance.pcm import FloatPcmHasher, sha256_hex
@@ -219,6 +226,7 @@ async def _run(args: argparse.Namespace) -> int:
         "byte_count": 0,
     }
     artwork_hasher = sha256()
+    audio_chunk_timestamps_us: list[int] = []
 
     def flush_decoder() -> None:
         nonlocal current_decoder
@@ -275,7 +283,7 @@ async def _run(args: argparse.Namespace) -> int:
             current_decoder = None
 
     def on_audio_chunk(timestamp_us: int, payload: bytes, audio_format: Any) -> None:
-        del timestamp_us
+        audio_chunk_timestamps_us.append(timestamp_us)
         audio_state["chunk_count"] += 1
         encoded_accumulator.extend(payload)
         codec = audio_format.codec.value
@@ -313,6 +321,7 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-flac",
         "server-initiated-opus",
         "server-initiated-legacy-unencrypted",
+        "server-initiated-protocol-baseline-v1",
     }:
         player_support = ClientHelloPlayerSupport(
             supported_formats=_supported_formats(
@@ -372,6 +381,7 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-flac",
         "server-initiated-opus",
         "server-initiated-legacy-unencrypted",
+        "server-initiated-protocol-baseline-v1",
     }:
         client.add_audio_chunk_listener(on_audio_chunk)
         client.add_stream_end_listener(on_stream_end)
@@ -403,8 +413,19 @@ async def _run(args: argparse.Namespace) -> int:
 
     client.add_disconnect_listener(record_disconnect)
 
+    handshake_timestamps: list[float] = []
+    captured_connection: list[Any] = [None]
+
     async def handle_connection(ws: Any) -> None:
-        await client.attach_websocket(ws)
+        handshake_timestamps.append(time.time())
+        connect_task = asyncio.create_task(client.attach_websocket(ws))
+        while not connect_task.done() and captured_connection[0] is None:
+            if client._admitted_connection is not None:  # noqa: SLF001
+                captured_connection[0] = client._admitted_connection  # noqa: SLF001
+                handshake_timestamps.append(time.time())
+                break
+            await asyncio.sleep(0)
+        await connect_task
         await disconnect_event.wait()
 
     try:
@@ -422,7 +443,9 @@ async def _run(args: argparse.Namespace) -> int:
                 args.server_name,
                 args.timeout_seconds,
             )
+            handshake_timestamps.append(time.time())
             await client.connect(target_url)
+            handshake_timestamps.append(time.time())
             await asyncio.wait_for(disconnect_event.wait(), timeout=args.timeout_seconds)
         else:
             listener = ClientListener(
@@ -500,6 +523,49 @@ async def _run(args: argparse.Namespace) -> int:
             "received_pcm_sha256": received_hasher.hexdigest(),
             "received_sample_count": received_hasher.sample_count,
         }
+    elif args.scenario_id == "server-initiated-protocol-baseline-v1":
+        collector = ProtocolEvidenceCollector()
+        connection = captured_connection[0]
+        assert len(handshake_timestamps) == 2, "handshake start/end timestamps were not captured"
+        if connection is not None:
+            record_handshake_evidence_client(
+                collector,
+                connection,
+                start_ts=handshake_timestamps[0],
+                end_ts=handshake_timestamps[1],
+            )
+        record_activation_evidence_client(collector, client)
+        advertised_formats = [
+            {
+                "codec": fmt.codec.value,
+                "sample_rate": fmt.sample_rate,
+                "channels": fmt.channels,
+                "bit_depth": fmt.bit_depth,
+            }
+            for fmt in (player_support.supported_formats if player_support is not None else [])
+        ]
+        negotiated_format = None
+        if audio_state["stream"] is not None:
+            negotiated_format = {
+                "codec": audio_state["stream"]["codec"],
+                "sample_rate": audio_state["stream"]["sample_rate"],
+                "channels": audio_state["stream"]["channels"],
+                "bit_depth": audio_state["stream"]["bit_depth"],
+            }
+        record_player_stream_evidence(
+            collector,
+            advertised_formats=advertised_formats,
+            negotiated_format=negotiated_format,
+            chunk_count=audio_state["chunk_count"],
+            chunk_timestamps_us=audio_chunk_timestamps_us,
+        )
+        summary["stream"] = audio_state["stream"]
+        summary["audio"] = {
+            "audio_chunk_count": audio_state["chunk_count"],
+            "received_pcm_sha256": received_hasher.hexdigest(),
+            "received_sample_count": received_hasher.sample_count,
+        }
+        summary["protocol"] = collector.to_summary_fragment()
     elif args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}:
         summary["metadata"] = {
             "update_count": metadata_state["update_count"],
