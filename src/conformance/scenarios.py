@@ -37,6 +37,24 @@ SERVER_INITIATED_PCM = ScenarioSpec(
 )
 
 
+SERVER_INITIATED_PROTOCOL_BASELINE = ScenarioSpec(
+    id="server-initiated-protocol-baseline-v1",
+    display_name="Server initiates a protocol baseline session",
+    description=(
+        "Start the server first, then the client. The client advertises a listener and a "
+        "PCM player capability, the server connects in, and both adapters record "
+        "spec-revision-pinned evidence for the handshake, role activation, initial state, "
+        "stream negotiation, and timestamped player chunks. Media decoding and rendered "
+        "audio are explicitly outside this test."
+    ),
+    initiator_role="server",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="protocol",
+    protocol_assertions=("CORE-001", "CORE-002", "CORE-003", "CORE-004", "PLAYER-001"),
+)
+
+
 SERVER_INITIATED_FLAC = ScenarioSpec(
     id="server-initiated-flac",
     display_name="Server initiates connection and client wants FLAC",
@@ -198,6 +216,7 @@ CLIENT_INITIATED_REQUEST_FORMAT_FLAC = ScenarioSpec(
 SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     CLIENT_INITIATED_PCM,
     SERVER_INITIATED_PCM,
+    SERVER_INITIATED_PROTOCOL_BASELINE,
     SERVER_INITIATED_METADATA,
     SERVER_INITIATED_ARTWORK,
     SERVER_INITIATED_CONTROLLER,

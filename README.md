@@ -6,6 +6,7 @@ Current scenarios:
 
 - `client-initiated-pcm` (Client initiates connection and client wants PCM): start the server first, let the client discover/connect to it, advertise PCM as the only supported audio format, and compare canonical PCM hashes
 - `server-initiated-pcm` (Server initiates connection and client wants PCM): start the server first, let the client advertise a listener and PCM as its only supported audio format, let the server connect in, and compare canonical PCM hashes
+- `server-initiated-protocol-baseline-v1` (Server initiates a protocol baseline session): validates a spec-revision-pinned protocol trace for handshake order, activation, initial state, stream negotiation, and player chunk framing; it does not assess decoded or rendered audio
 - `server-initiated-metadata` (Server initiates connection and client wants Metadata): start the server first, let the client advertise a listener, let the server connect in, receive a metadata snapshot, and compare normalized metadata fields
 - `server-initiated-artwork` (Server initiates connection and client wants Artwork): start the server first, let the client advertise a listener, let the server connect in, receive album artwork bytes, and compare the encoded image hash
 - `server-initiated-controller` (Server initiates connection and client wants Controller): start the server first, let the client advertise a listener, let the server connect in, observe controller state, send a control command, and verify the server recorded it
@@ -31,6 +32,18 @@ The OPUS scenario is currently exercised only by the `SendspinKit` and `sendspin
 The `client-initiated-request-format-*` scenarios are currently exercised only by the `sendspin-rs` client against the `aiosendspin` server until other implementations opt in via `supports_request_format`.
 
 Unsupported client roles use fail-fast adapters that emit a summary and exit non-zero. Unsupported server roles are filtered out before case creation, so the matrix only shows server rows that can actually run a scenario.
+
+## Protocol conformance migration
+
+The matrix is moving from media-oriented interoperability checks to normative protocol
+conformance. `server-initiated-protocol-baseline-v1` is the first authoritative
+protocol test and is pinned to Sendspin spec revision
+`8c9577ea8719ad082d051ec13cc73ef15ed68948`. It intentionally fails until an adapter
+can provide the required ordered protocol evidence described in
+[`adapters/README.md`](adapters/README.md). The current PCM, FLAC, OPUS, artwork,
+metadata, and controller scenarios remain diagnostic interoperability checks during
+this migration: a matching hash or normalized snapshot is evidence that two adapters
+interoperated, not proof that either followed the specification.
 
 ## Quick start
 
