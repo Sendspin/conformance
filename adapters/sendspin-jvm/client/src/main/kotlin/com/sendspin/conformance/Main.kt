@@ -203,7 +203,7 @@ fun main(args: Array<String>) {
         // so we capture values that cleanupJobs() will null out after disconnect.
         val metaJob: Job = launch {
             client.serverState.collect { state ->
-                state.metadata?.let { lastMetadata = it; metadataUpdateCount++ }
+                state.metadata.orNull()?.let { lastMetadata = it; metadataUpdateCount++ }
             }
         }
         val artworkJob: Job = launch {
