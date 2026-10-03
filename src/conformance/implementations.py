@@ -105,6 +105,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_client_initiated=True,
             supports_flac=True,
             supports_opus=True,
+            supports_request_format=True,
             supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),

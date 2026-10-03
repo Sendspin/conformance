@@ -396,10 +396,12 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
+        player_audio_header: bool = False,
+        epoch_exempt: bool = False,
     ) -> None:
         nonlocal sent_audio_chunk_count, sent_audio_byte_count
         if message_type == BinaryMessageType.AUDIO_CHUNK.value:
-            payload = data[BINARY_HEADER_SIZE:]
+            payload = data if player_audio_header else data[BINARY_HEADER_SIZE:]
             sent_audio_hasher.update(payload)
             sent_audio_chunk_count += 1
             sent_audio_byte_count += len(payload)
@@ -411,6 +413,8 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
             buffer_end_time_us=buffer_end_time_us,
             buffer_byte_count=buffer_byte_count,
             duration_us=duration_us,
+            player_audio_header=player_audio_header,
+            epoch_exempt=epoch_exempt,
         )
 
     client.send_message = send_message_wrapper  # type: ignore[method-assign]
@@ -559,6 +563,8 @@ async def _run_protocol_baseline_scenario(
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
+        player_audio_header: bool = False,
+        epoch_exempt: bool = False,
     ) -> None:
         from aiosendspin.models.types import BinaryMessageType
 
@@ -572,6 +578,8 @@ async def _run_protocol_baseline_scenario(
             buffer_end_time_us=buffer_end_time_us,
             buffer_byte_count=buffer_byte_count,
             duration_us=duration_us,
+            player_audio_header=player_audio_header,
+            epoch_exempt=epoch_exempt,
         )
 
     client.send_message = send_message_wrapper  # type: ignore[method-assign]
