@@ -48,10 +48,24 @@ async def make_server_identity_and_store(*, server_id: str, client_id: str) -> t
     spec handshake (``server/hello`` -> ``client/hello`` -> ``server/activate``).
     """
     from aiosendspin.noise.keys import psk_id_for
-    from aiosendspin.noise.trust_store import InMemoryServerPairingStore, ServerPairingRecord
+    from aiosendspin.noise.trust_store import (
+        InMemoryServerPairingStore,
+        ServerPairingRecord,
+        TrustedUnpairedClient,
+    )
+
+    class ConformancePairingStore(InMemoryServerPairingStore):
+        async def trusted_unpaired(self, client_id: str) -> TrustedUnpairedClient:
+            # Isolated harness sessions approve every connecting implementation before
+            # initial activation, including clients with fresh device identities.
+            approval = await super().trusted_unpaired(client_id)
+            if approval is None:
+                approval = TrustedUnpairedClient(client_id=client_id)
+                await self.add_trusted_unpaired(approval)
+            return approval
 
     identity = deterministic_identity(f"server:{server_id}")
-    store = InMemoryServerPairingStore()
+    store = ConformancePairingStore()
     psk = deterministic_psk(server_id, client_id)
     client_identity = deterministic_identity(f"client:{client_id}")
     await store.store_record(
