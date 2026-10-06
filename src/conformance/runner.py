@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import os
+import re
 import shutil
 import sys
 from contextlib import AsyncExitStack
@@ -26,13 +27,16 @@ from .implementations import (
 from .io import read_json, write_json
 from .models import AUDIO_FORMAT_FIELDS, CaseResult, RoleName, ScenarioSpec
 from .paths import repo_root
-from .process import close_process_log, collect_process, wait_for_file
+from .process import close_process_log, collect_process, wait_for_exit, wait_for_file
 from .protocol import protocol_evidence_failure
 from .scenarios import ordered_scenarios, require_scenario
 from .toolchains import find_cargo, find_cmake, find_dotnet, find_go, find_swift
 
 SERVER_PORT_BASE = 18927
 CLIENT_PORT_BASE = 19927
+
+# "error" as a word of its own, so a dependency named quick-error or thiserror is not one.
+_BUILD_ERROR_LINE = re.compile(r"(?<![\w-])error(?![\w-])", re.IGNORECASE)
 
 
 def _case_resource_keys(
@@ -498,6 +502,40 @@ def _missing_summary_reason(
     return f"Missing summary output for {role_text}"
 
 
+def _written_summaries(context: CaseContext) -> dict[RoleName, dict[str, Any]]:
+    """Return the summaries the adapters left on disk, server first."""
+    summaries: dict[RoleName, dict[str, Any]] = {}
+    for role in ("server", "client"):
+        try:
+            payload = read_json(context.summary_path(role))
+        except (OSError, ValueError):
+            # Absent, or truncated by an adapter killed mid-write.
+            continue
+        if isinstance(payload, dict):
+            summaries[role] = payload
+    return summaries
+
+
+def _adapter_reported_failures(summaries: dict[RoleName, dict[str, Any]]) -> str | None:
+    """Return the reasons the adapters gave for their non-ok summaries, or None."""
+    reported = [
+        f"{role.capitalize()} adapter reported: {summary['reason']}"
+        for role, summary in summaries.items()
+        if summary.get("status") != "ok" and summary.get("reason")
+    ]
+    return "; ".join(reported) or None
+
+
+def _incomplete_case_reason(context: CaseContext, observed: str) -> str:
+    """Explain a case that ended without a usable summary from both adapters.
+
+    An adapter that already reported why it failed leads, because what the
+    harness observed is usually only the consequence of it.
+    """
+    reported = _adapter_reported_failures(_written_summaries(context))
+    return f"{reported}; {observed}" if reported else observed
+
+
 def _build_result_index(
     build_results: list[dict[str, Any]] | None,
 ) -> dict[str, dict[str, Any]]:
@@ -526,7 +564,13 @@ def _build_failure_reason(build_result: dict[str, Any]) -> str:
     adapter = str(build_result.get("adapter") or "adapter")
     status = str(build_result.get("status") or "failed")
     detail = str(build_result.get("detail") or "").strip()
-    headline = detail.splitlines()[0].strip() if detail else "no detail available"
+    lines = [line.strip() for line in detail.splitlines() if line.strip()]
+    # The detail is the tail of the build log, so its first line is often a
+    # dependency being compiled or a line cut mid-word; lead with a diagnostic.
+    headline = next(
+        (line for line in lines if _BUILD_ERROR_LINE.search(line)),
+        lines[0] if lines else "no detail available",
+    )
     return f"{adapter} build {status}: {headline}"
 
 
@@ -971,6 +1015,9 @@ def _compare_summaries(
     server_summary: dict[str, Any],
     client_summary: dict[str, Any],
 ) -> tuple[bool, str]:
+    reported = _adapter_reported_failures({"server": server_summary, "client": client_summary})
+    if reported is not None:
+        return False, reported
     matches, reason = _dispatch_comparison(scenario, server_summary, client_summary)
     if not matches:
         return matches, reason
@@ -1077,7 +1124,7 @@ async def _run_failfast_role(
     )
     try:
         await wait_for_file(ready_path, timeout_s=10)
-        await asyncio.wait_for(process.wait(), timeout=5)
+        await wait_for_exit(process, role=failing_role, timeout_s=5)
     except Exception as err:
         if process.returncode is None:
             try:
@@ -1260,8 +1307,8 @@ async def run_case(
         )
         await wait_for_file(context.ready_path("client"), timeout_s=10)
 
-        await asyncio.wait_for(server_process.wait(), timeout=timeout_s)
-        await asyncio.wait_for(client_process.wait(), timeout=10)
+        await wait_for_exit(server_process, role="server", timeout_s=timeout_s)
+        await wait_for_exit(client_process, role="client", timeout_s=10)
     except Exception as err:
         if server_process.returncode is None:
             try:
@@ -1282,7 +1329,7 @@ async def run_case(
             _case_result(
                 context,
                 status="failed",
-                reason=str(err),
+                reason=_incomplete_case_reason(context, str(err) or err.__class__.__name__),
                 server_exit_code=server_process.returncode,
                 client_exit_code=None if client_process is None else client_process.returncode,
             ),
@@ -1298,10 +1345,13 @@ async def run_case(
             _case_result(
                 context,
                 status="failed",
-                reason=_missing_summary_reason(
-                    context=context,
-                    server_process=server_process,
-                    client_process=client_process,
+                reason=_incomplete_case_reason(
+                    context,
+                    _missing_summary_reason(
+                        context=context,
+                        server_process=server_process,
+                        client_process=client_process,
+                    ),
                 ),
                 server_exit_code=server_process.returncode,
                 client_exit_code=None if client_process is None else client_process.returncode,
