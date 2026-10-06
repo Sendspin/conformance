@@ -84,11 +84,15 @@ def _baseline_stamps_revisions(baseline: list[dict[str, object]]) -> bool:
 def require_scenario_revisions(current: list[dict[str, object]]) -> None:
     """Raise when the local run did not stamp a scenario revision on every result row."""
     missing = sorted(
-        {str(result["scenario_id"]) for result in current if "scenario_revision" not in result}
+        {
+            str(result["scenario_id"])
+            for result in current
+            if not isinstance(result.get("scenario_revision"), int)
+        }
     )
     if missing:
         raise ValueError(
-            "Local results carry no scenario_revision for: "
+            "Local results carry no integer scenario_revision for: "
             + ", ".join(missing)
             + ". Every scenario must declare one; see ScenarioSpec.scenario_revision."
         )

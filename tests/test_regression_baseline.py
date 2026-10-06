@@ -295,6 +295,16 @@ class RequireSpecRevisionsTest(unittest.TestCase):
         self.assertIn("server-initiated-pcm", str(caught.exception))
         self.assertNotIn("server-initiated-flac", str(caught.exception))
 
+    def test_an_explicit_null_is_rejected_rather_than_exempted(self) -> None:
+        """A null is present but is not a revision, so it must never reach the comparison."""
+        # `_row` omits the field for None, and the key being present is exactly
+        # what makes this row slip past a check that only looks for the key.
+        row = _row(scenario_id="server-initiated-pcm", status="failed")
+        row["scenario_revision"] = None
+        with self.assertRaises(ValueError) as caught:
+            require_scenario_revisions([row])
+        self.assertIn("server-initiated-pcm", str(caught.exception))
+
 
 class ResultRowTest(unittest.TestCase):
     """The revision has to reach the row, or the check above has nothing to read."""
