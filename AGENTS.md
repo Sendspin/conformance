@@ -149,6 +149,29 @@ After building the report, CI compares local results against the live published 
 
 If the baseline is unreachable (first publish, network error), the check is skipped silently.
 
+Changing what a scenario does — tightening its assertions, or altering the
+stimulus it drives the pair with — turns its cells red by design, which is not a
+regression. Each `ScenarioSpec` carries a `scenario_revision`, stamped onto every
+result row, and a cell is exempt from comparison when its baseline row carries a
+different revision. Exempt cells are always printed, with their reason.
+
+A baseline published before the field existed carries no revision on any row, so
+every cell is exempt for that one release. That exemption retires itself: once
+*any* baseline row carries a revision, a row missing one is read as a broken
+contract rather than an old publish, and the cell keeps its protection. A local
+result row missing a revision fails the check outright — it is written by the
+harness in the same checkout, so its absence is a bug, not a migration. The
+blanket is re-armable: replacing the published baseline with one built from a
+checkout that predates the field exempts every cell again for that release. It
+announces itself — the whole matrix prints the migration reason — and closing it
+costs more than the risk.
+
+Bumping `scenario_revision` on the one scenario that changed is the deliberate
+act that resets its baseline; every other scenario in the same run
+keeps full protection. Do not add a waiver file, allowlist or PR-label escape
+hatch — the baseline is live and remote, so any such list goes stale on the next
+merge.
+
 ## Repository map
 
 ### Harness code

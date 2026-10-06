@@ -459,6 +459,7 @@ def _case_result(
         client_impl=context.client_impl,
         status=status,
         reason=reason,
+        scenario_revision=context.scenario.scenario_revision,
         case_dir=str(context.case_dir),
         server_exit_code=server_exit_code,
         client_exit_code=client_exit_code,

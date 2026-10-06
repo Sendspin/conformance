@@ -5,6 +5,12 @@ Fetches the current index.json from the live GitHub Pages site and compares it
 against a local results directory.  A *regression* is any case that was
 ``passed`` in the baseline but is no longer ``passed`` in the local run.
 
+A cell is exempt when its baseline row was produced by a different version of the
+scenario: the baseline row's ``scenario_revision`` differs from the current row's.
+A baseline published before the field existed carries none at all and exempts
+every cell, until the first publish that stamps it.  Every other cell keeps full
+protection.
+
 Exit codes:
     0 – no regressions detected (or baseline unavailable)
     1 – one or more regressions found
@@ -32,6 +38,11 @@ if str(SRC) not in sys.path:
 
 from conformance.io import read_json
 
+BUMP_HINT = (
+    "If a scenario changed deliberately, bump its `scenario_revision` in "
+    "src/conformance/scenarios.py to reset its baseline."
+)
+
 BASELINE_URL = (
     "https://sendspin.github.io/conformance/data/index.json"
 )
@@ -58,23 +69,116 @@ def fetch_baseline(url: str, timeout: int = 30) -> list[dict[str, object]] | Non
         return None
 
 
+def _baseline_passed_index(
+    baseline: list[dict[str, object]],
+) -> dict[tuple[str, str, str], dict[str, object]]:
+    """Index the baseline rows that passed, by matrix cell."""
+    return {_case_key(result): result for result in baseline if result["status"] == "passed"}
+
+
+def _baseline_stamps_revisions(baseline: list[dict[str, object]]) -> bool:
+    """Report whether the published baseline carries scenario revisions at all."""
+    return any("scenario_revision" in result for result in baseline)
+
+
+def require_scenario_revisions(current: list[dict[str, object]]) -> None:
+    """Raise when the local run did not stamp a scenario revision on every result row."""
+    missing = sorted(
+        {str(result["scenario_id"]) for result in current if "scenario_revision" not in result}
+    )
+    if missing:
+        raise ValueError(
+            "Local results carry no scenario_revision for: "
+            + ", ".join(missing)
+            + ". Every scenario must declare one; see ScenarioSpec.scenario_revision."
+        )
+
+
+def exemption_reason(
+    baseline_result: dict[str, object],
+    current_result: dict[str, object],
+    *,
+    baseline_is_stamped: bool,
+) -> str | None:
+    """
+    Explain why a baseline row is not comparable to the current one, if it is not.
+
+    Returns None when both rows were produced by the same version of the scenario
+    and the cell therefore keeps full regression protection.
+
+    `baseline_is_stamped` says whether the published baseline carries the field at
+    all.  A baseline published before it existed cannot be compared to anything, so
+    every cell is exempt for that one release; once the baseline does carry the
+    field, a row missing it is a broken contract rather than an old publish, and
+    the cell keeps its protection instead of quietly losing it.
+    """
+    if "scenario_revision" not in baseline_result:
+        return None if baseline_is_stamped else "baseline predates scenario revision stamping"
+    if baseline_result["scenario_revision"] != current_result["scenario_revision"]:
+        return "scenario revision changed since the baseline"
+    return None
+
+
 def detect_regressions(
     baseline: list[dict[str, object]],
     current: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    """Return current results that regressed from a passed baseline."""
-    baseline_passed: dict[tuple[str, str, str], dict[str, object]] = {}
-    for result in baseline:
-        key = _case_key(result)
-        if result["status"] == "passed":
-            baseline_passed[key] = result
+    """Return current results that regressed from a comparable passed baseline."""
+    baseline_passed = _baseline_passed_index(baseline)
+    baseline_is_stamped = _baseline_stamps_revisions(baseline)
 
     regressions: list[dict[str, object]] = []
     for result in current:
-        key = _case_key(result)
-        if key in baseline_passed and result["status"] != "passed":
+        baseline_result = baseline_passed.get(_case_key(result))
+        if baseline_result is None:
+            continue
+        reason = exemption_reason(
+            baseline_result, result, baseline_is_stamped=baseline_is_stamped
+        )
+        if reason is not None:
+            continue
+        if result["status"] != "passed":
             regressions.append(result)
     return regressions
+
+
+def exempt_cases(
+    baseline: list[dict[str, object]],
+    current: list[dict[str, object]],
+) -> list[tuple[dict[str, object], str]]:
+    """
+    Return the results a regression would have been reported for, with the reason.
+
+    A cell that is still passing suppressed nothing, so it is left out — the list
+    exists to show what the exemption actually cost in protection.
+    """
+    baseline_passed = _baseline_passed_index(baseline)
+    baseline_is_stamped = _baseline_stamps_revisions(baseline)
+
+    exempt: list[tuple[dict[str, object], str]] = []
+    for result in current:
+        baseline_result = baseline_passed.get(_case_key(result))
+        if baseline_result is None or result["status"] == "passed":
+            continue
+        reason = exemption_reason(
+            baseline_result, result, baseline_is_stamped=baseline_is_stamped
+        )
+        if reason is not None:
+            exempt.append((result, reason))
+    return exempt
+
+
+def format_exemption_summary(exempt: list[tuple[dict[str, object], str]]) -> str:
+    """Format exempt cells as one line per reason, naming the scenarios involved."""
+    by_reason: dict[str, list[str]] = {}
+    for result, reason in exempt:
+        by_reason.setdefault(reason, []).append(str(result["scenario_id"]))
+
+    return "\n".join(
+        f"  {len(scenarios)} cell(s) exempt — {reason}: "
+        f"{', '.join(sorted(set(scenarios)))}"
+        for reason, scenarios in sorted(by_reason.items())
+    )
 
 
 def format_regression_table(regressions: list[dict[str, object]]) -> str:
@@ -94,6 +198,8 @@ def format_github_summary(regressions: list[dict[str, object]]) -> str:
         "## Conformance regressions detected",
         "",
         f"**{len(regressions)}** test(s) that previously passed are now failing.",
+        "",
+        BUMP_HINT,
         "",
         "| Scenario | Server | Client | Status |",
         "| --- | --- | --- | --- |",
@@ -165,6 +271,11 @@ def main() -> int:
         return 1
 
     current_results: list[dict[str, object]] = list(read_json(index_path)["results"])
+    try:
+        require_scenario_revisions(current_results)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     print(f"Local results: {len(current_results)} cases", flush=True)
 
     baseline = fetch_baseline(args.baseline_url)
@@ -178,6 +289,14 @@ def main() -> int:
         flush=True,
     )
 
+    exempt = exempt_cases(baseline, current_results)
+    if exempt:
+        print(
+            "Exempt from comparison (would otherwise be reported as regressions):\n"
+            f"{format_exemption_summary(exempt)}",
+            flush=True,
+        )
+
     regressions = detect_regressions(baseline, current_results)
 
     if not regressions:
@@ -186,7 +305,8 @@ def main() -> int:
 
     print(
         f"\n{len(regressions)} regression(s) detected:\n"
-        f"{format_regression_table(regressions)}\n",
+        f"{format_regression_table(regressions)}\n"
+        f"{BUMP_HINT}\n",
         flush=True,
     )
 
