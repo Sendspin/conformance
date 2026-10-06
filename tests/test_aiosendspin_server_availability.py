@@ -22,6 +22,11 @@ class WaitForClientAvailableTests(unittest.IsolatedAsyncioTestCase):
 
         await asyncio.wait_for(_wait_for_client_available(client, timeout_s=5.0), timeout=1.0)
 
+    async def test_an_available_client_passes_with_no_time_left(self) -> None:
+        client = SimpleNamespace(name="client", available=True)
+
+        await _wait_for_client_available(client, timeout_s=-1.0)
+
     async def test_waits_until_the_client_reports_available(self) -> None:
         client = SimpleNamespace(name="client", available=False)
         waiter = asyncio.create_task(_wait_for_client_available(client, timeout_s=5.0))
