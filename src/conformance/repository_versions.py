@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 from .implementations import IMPLEMENTATIONS, SUPPORTING_REPOS, resolve_repo_path
@@ -212,8 +212,14 @@ def collect_repository_versions(
     *,
     environment_id: str | None = None,
     environment_name: str | None = None,
+    resolve_repo: Callable[[str], Path | None] = resolve_repo_path,
 ) -> list[dict[str, Any]]:
-    """Collect revision metadata for the spec and the implementations a report covers."""
+    """
+    Collect revision metadata for the spec and the implementations a report covers.
+
+    `resolve_repo` maps a repository directory name to its checkout, or to None
+    when there is none; an entry without a checkout is reported as unavailable.
+    """
     environments = _environment_entries(
         environment_id=environment_id,
         environment_name=environment_name,
@@ -229,7 +235,7 @@ def collect_repository_versions(
         _repository_entry(
             key="spec",
             display_name="Sendspin spec",
-            repo_path=resolve_repo_path(spec_dirname),
+            repo_path=resolve_repo(spec_dirname),
             remote_url=spec_remote_url,
             environments=environments,
         )
@@ -241,7 +247,7 @@ def collect_repository_versions(
         entry = _repository_entry(
             key=implementation_name,
             display_name=specification.display_name,
-            repo_path=resolve_repo_path(specification.repo_dirname),
+            repo_path=resolve_repo(specification.repo_dirname),
             remote_url=specification.remote_url,
             environments=environments,
         )
