@@ -145,6 +145,11 @@ class ScenarioSpec:
     preferred_codec: str
     required_role_families: tuple[RoleFamily, ...]
     verification_mode: VerificationMode
+    # Bumped whenever this scenario's stimulus or assertions change, which makes
+    # every published result for it incomparable to the ones a new run produces.
+    # `scripts/detect_regressions.py` exempts a cell whose baseline carries a
+    # different revision, so a deliberate tightening does not read as breakage.
+    scenario_revision: int
     requires_request_format: bool = False
     requires_legacy_unencrypted: bool = False
     extra_cli_args: tuple[tuple[str, str], ...] = field(default_factory=tuple)
@@ -171,6 +176,7 @@ class CaseResult:
     client_impl: str
     status: CaseStatus
     reason: str
+    scenario_revision: int
     case_dir: str
     server_exit_code: int | None = None
     client_exit_code: int | None = None
