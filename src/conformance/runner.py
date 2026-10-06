@@ -713,12 +713,13 @@ def _compare_controller_summaries(
             f"expected={expected!r} server={received!r} client={sent!r}",
         )
 
-    # repeat/shuffle are controller-role state; the client must observe and report
-    # them. They are mandatory here (and must never appear in the metadata scenario).
+    # volume/muted/repeat/shuffle are controller-role state; the client must observe
+    # and report them, and RC1 makes all four mandatory. repeat/shuffle must never
+    # appear in the metadata scenario.
     received_state = client_summary.get("controller", {}).get("received_state")
     if not isinstance(received_state, dict):
         return False, "Client summary shows no controller state"
-    for field in ("repeat", "shuffle"):
+    for field in ("volume", "muted", "repeat", "shuffle"):
         if field not in received_state:
             return False, f"Client controller state is missing {field}"
         expected_value = server_controller.get(field)
@@ -730,8 +731,55 @@ def _compare_controller_summaries(
                 f"server={expected_value!r} client={received_value!r}",
             )
 
+    ok, reason = _compare_controller_supported_commands(server_controller, received_state)
+    if not ok:
+        return False, reason
+
+    # RC1: a command MUST be one of the values listed in supported_commands from the
+    # latest controller state the client received. received_state is the client's
+    # final state, so this holds only while a scenario advertises one stable set;
+    # a scenario that mutates the set mid-session needs a send-time snapshot instead.
     command_name = expected.get("command") if isinstance(expected, dict) else None
+    if command_name not in received_state["supported_commands"]:
+        return (
+            False,
+            f"Controller command {command_name!r} is absent from the "
+            "supported_commands the client observed",
+        )
     return True, f"Controller command matched ({command_name})"
+
+
+def _compare_controller_supported_commands(
+    server_controller: dict[str, Any],
+    received_state: dict[str, Any],
+) -> tuple[bool, str]:
+    """
+    Require the client to have observed exactly the command set the server advertised.
+
+    RC1 makes `supported_commands` a free subset of the command vocabulary, so the
+    only thing to assert is that both ends agree on it; which commands a server
+    chooses to offer is its own business.
+    """
+    advertised = server_controller.get("supported_commands")
+    if not isinstance(advertised, list):
+        return False, "Server summary shows no advertised supported_commands"
+    if "supported_commands" not in received_state:
+        return False, "Client controller state is missing supported_commands"
+    observed = received_state.get("supported_commands")
+    if not isinstance(observed, list):
+        return False, "Client controller state reports no supported_commands list"
+
+    unobserved = sorted(set(advertised) - set(observed))
+    unadvertised = sorted(set(observed) - set(advertised))
+    if not unobserved and not unadvertised:
+        return True, "Controller supported_commands match"
+
+    details = []
+    if unobserved:
+        details.append(f"advertised but not observed: {unobserved}")
+    if unadvertised:
+        details.append(f"observed but not advertised: {unadvertised}")
+    return False, "Controller supported_commands mismatch: " + "; ".join(details)
 
 
 def _compare_artwork_summaries(

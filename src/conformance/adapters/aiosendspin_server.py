@@ -656,6 +656,32 @@ async def _run_metadata_scenario(args: argparse.Namespace, *, client: Any) -> di
     return {"metadata": {"expected": expected}}
 
 
+def _controller_state_from_message(message: Any) -> dict[str, Any] | None:
+    """
+    Return the controller state a `server/state` message carries, or None.
+
+    None covers every message that advertises no controller state: another
+    message type, and a `server/state` whose controller field is absent (an
+    `UndefinedField` sentinel rather than None) or explicitly null, as the
+    repeat/shuffle back-compat mirror emits alongside the controller push.
+    """
+    from aiosendspin.models.controller import ControllerStatePayload
+    from aiosendspin.models.core import ServerStateMessage
+
+    if not isinstance(message, ServerStateMessage):
+        return None
+    controller = message.payload.controller
+    if not isinstance(controller, ControllerStatePayload):
+        return None
+    return {
+        "supported_commands": sorted(command.value for command in controller.supported_commands),
+        "volume": controller.volume,
+        "muted": controller.muted,
+        "repeat": controller.repeat.value,
+        "shuffle": controller.shuffle,
+    }
+
+
 async def _run_controller_scenario(args: argparse.Namespace, *, client: Any) -> dict[str, Any]:
     from aiosendspin.models.types import MediaCommand, RepeatMode
     from aiosendspin.server.roles.controller import ControllerGroupRole
@@ -666,11 +692,26 @@ async def _run_controller_scenario(args: argparse.Namespace, *, client: Any) -> 
 
     expected_command = _controller_command_payload(args.controller_command)
     event_future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+    advertised_state: dict[str, Any] | None = None
 
     def on_group_event(_group: Any, event: Any) -> None:
         command = _controller_event_to_command(event)
         if command is not None and not event_future.done():
             event_future.set_result(command)
+
+    # Role state reaches the client through send_role_message; Role.send_message
+    # delegates to it. Capturing the message rather than reading the role back
+    # reports what was advertised instead of what this adapter assumed.
+    original_send_role_message = client.send_role_message
+
+    def send_role_message_wrapper(role: str, message: Any) -> None:
+        nonlocal advertised_state
+        state = _controller_state_from_message(message)
+        if state is not None:
+            advertised_state = state
+        original_send_role_message(role, message)
+
+    client.send_role_message = send_role_message_wrapper  # type: ignore[method-assign]
 
     unsubscribe = client.group.add_event_listener(on_group_event)
     try:
@@ -680,23 +721,21 @@ async def _run_controller_scenario(args: argparse.Namespace, *, client: Any) -> 
         controller_group_role.set_shuffle(_bool_from_cli(args.controller_shuffle))
         controller_group_role.set_supported_commands([MediaCommand(args.controller_command)])
         received_command = await asyncio.wait_for(event_future, timeout=args.timeout_seconds)
+        # Stay wrapped until the client is gone, so a command that mutates
+        # controller state leaves both sides reporting the same latest state.
+        await asyncio.sleep(0.2)
+        await _disconnect_client(client)
     finally:
         unsubscribe()
+        client.send_role_message = original_send_role_message  # type: ignore[method-assign]
 
-    await asyncio.sleep(0.2)
-    await _disconnect_client(client)
-    protocol_commands = {MediaCommand.VOLUME, MediaCommand.MUTE, MediaCommand.SWITCH}
-    app_commands = {MediaCommand(args.controller_command)}
-    all_commands = sorted((protocol_commands | app_commands), key=lambda c: c.value)
+    if advertised_state is None:
+        raise RuntimeError("Server never sent a controller state to advertise")
     return {
         "controller": {
             "expected_command": expected_command,
             "received_command": received_command,
-            "supported_commands": [command.value for command in all_commands],
-            "volume": controller_group_role.volume,
-            "muted": controller_group_role.muted,
-            "repeat": controller_group_role.repeat.value,
-            "shuffle": controller_group_role.shuffle,
+            **advertised_state,
         }
     }
 

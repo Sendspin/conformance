@@ -137,7 +137,7 @@ SERVER_INITIATED_CONTROLLER = ScenarioSpec(
     preferred_codec="none",
     required_role_families=("controller",),
     verification_mode="controller",
-    scenario_revision=1,
+    scenario_revision=2,
     extra_cli_args=(
         ("controller_command", "next"),
         ("controller_repeat", "all"),
