@@ -159,6 +159,21 @@ def _normalize_metadata_state(metadata: Any) -> dict[str, Any] | None:
     }
 
 
+def _metadata_timestamp_us(metadata: Any) -> int | None:
+    """Return the `timestamp` a `server/state` metadata object carries, or None if it has none.
+
+    Read as a required attribute, like the other mandatory fields the sibling
+    normalizers take directly: the runner reads a None here as a server that
+    omitted the timestamp, so an SDK that renamed the field should raise rather
+    than report every server as non-conformant.
+    """
+    timestamp = metadata.timestamp
+    # bool is an int subclass, and the wire value reaches here unvalidated.
+    if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+        return None
+    return timestamp
+
+
 def _normalize_controller_state(controller: Any) -> dict[str, Any] | None:
     if controller is None:
         return None
@@ -206,6 +221,7 @@ async def _run(args: argparse.Namespace) -> int:
     metadata_state: dict[str, Any] = {
         "received": None,
         "update_count": 0,
+        "first_object_state": None,
     }
     controller_state: dict[str, Any] = {
         "received_state": None,
@@ -416,6 +432,19 @@ async def _run(args: argparse.Namespace) -> int:
         def on_metadata(payload: Any) -> None:
             metadata_state["update_count"] += 1
             metadata_state["received"] = _normalize_metadata_state(payload.metadata)
+            # The role activates before the scenario sets a track, and the
+            # state the SDK sends for it then takes one of two shapes the
+            # harness has to handle, since either aiosendspin revision may be
+            # the one cloned. A timestamp-only metadata object has a timestamp,
+            # so it is recorded here and is the state the matrix judges. An
+            # explicit null object has none, and the requirement applies only to
+            # an object that has one, so it is passed over and the judged state
+            # becomes the next one that really carries metadata.
+            if payload.metadata is not None and metadata_state["first_object_state"] is None:
+                metadata_state["first_object_state"] = {
+                    "update_index": metadata_state["update_count"],
+                    "timestamp_us": _metadata_timestamp_us(payload.metadata),
+                }
 
         client.add_metadata_listener(on_metadata)
 
@@ -596,6 +625,7 @@ async def _run(args: argparse.Namespace) -> int:
         summary["metadata"] = {
             "update_count": metadata_state["update_count"],
             "received": metadata_state["received"],
+            "first_object_state": metadata_state["first_object_state"],
         }
     elif args.scenario_id in {"client-initiated-controller", "server-initiated-controller"}:
         summary["controller"] = {

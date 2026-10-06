@@ -670,6 +670,104 @@ def _compare_encoded_audio_summaries(
     return True, f"{codec_label} chunk bytes match exactly"
 
 
+def _microseconds(value: Any) -> int | None:
+    """Return a microsecond summary field as an int, or None when it is unusable."""
+    # bool is an int subclass, and a summary field can hold any JSON value.
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _first_metadata_state_verdict(
+    server_summary: dict[str, Any],
+    client_summary: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """Judge the first metadata-carrying `server/state`, as (evaluated, violation).
+
+    `violation` is why the state breaks the spec, or None when it does not.
+    `evaluated` reports whether both halves of the evidence were present to
+    judge at all, so a caller can distinguish a rule that held from one that
+    never ran.
+
+    The first `server/state` sent for a role on a connection MUST carry a past
+    or present `timestamp` if the role object has one, so the client is brought
+    up to date before any scheduled update follows. A future timestamp is a
+    scheduled update, which leaves a freshly connected client holding state it
+    must not display yet and nothing to show in the meantime.
+
+    Both numbers are read in the server's own clock domain: the stamp the
+    client received verbatim, against a clock reading the server adapter took
+    once that same state had been stamped. So the comparison is exact and needs
+    neither clock synchronization nor a tolerance. Judging it from the client's
+    time filter instead is not an option, because that filter needs two samples
+    to converge and the first metadata state arrives before the second lands.
+
+    The bound is read once the frame carrying that state is on the wire, not
+    when the send was queued. A reading taken before transmission would call a
+    timestamp future when it was already past by the time it went out, and so
+    blame a conformant server; a later reading can only be more permissive.
+
+    Both sides describe the first metadata-carrying state independently, so the
+    two are required to name the same timestamp before the bound is applied. If
+    they differ, the client was looking at a state the server did not record and
+    there is no bound that belongs to it, so nothing is judged.
+
+    None means there is nothing to report, which deliberately covers both no
+    violation and no evidence this harness could read, as
+    `declared_formats.undeclared_format_violation` does: an adapter that does
+    not record its side yet is not thereby non-conformant. Only `aiosendspin`
+    records both sides today. A client that reports the observation without a
+    `timestamp_us` key is read the same way, so an adapter can publish which
+    observation was first without being taken to claim anything about its
+    timestamp.
+
+    A `timestamp_us` of None is a violation rather than missing evidence,
+    because the adapter reports having seen the object and found no timestamp on
+    it. That branch is unreachable through `aiosendspin`, whose model makes
+    `timestamp` required and so drops an object without one while parsing; such
+    a case fails its zero-update check first.
+
+    The spec puts this requirement on any role object carrying a `timestamp`,
+    which is `color` as well as `metadata`. There is no `color` scenario in the
+    matrix, so this reads the metadata summary directly rather than generalizing
+    over roles for a single caller.
+    """
+    first_state = client_summary.get("metadata", {}).get("first_object_state")
+    if not isinstance(first_state, dict):
+        return False, None
+    if "timestamp_us" not in first_state:
+        return False, None
+
+    if first_state["timestamp_us"] is None:
+        return True, (
+            "The first server/state carrying a metadata object had no timestamp; "
+            "the spec requires one so the client is current before any scheduled update"
+        )
+
+    stamped_us = _microseconds(first_state["timestamp_us"])
+    if stamped_us is None:
+        return False, None
+
+    sent = server_summary.get("metadata", {}).get("first_state_sent")
+    if not isinstance(sent, dict):
+        return False, None
+    sent_us = _microseconds(sent.get("timestamp_us"))
+    bound_us = _microseconds(sent.get("bound_us"))
+    if sent_us is None or bound_us is None:
+        return False, None
+    if stamped_us != sent_us:
+        return False, None
+
+    if stamped_us > bound_us:
+        return True, (
+            "The first server/state carrying a metadata object was scheduled "
+            f"{(stamped_us - bound_us) / 1_000:.1f} ms ahead of the server clock "
+            f"(timestamp={stamped_us}, server clock once sent={bound_us}); "
+            "the spec requires a past or present timestamp"
+        )
+    return True, None
+
+
 def _compare_metadata_summaries(
     server_summary: dict[str, Any],
     client_summary: dict[str, Any],
@@ -684,9 +782,16 @@ def _compare_metadata_summaries(
     update_count = int(client_summary.get("metadata", {}).get("update_count") or 0)
     if update_count <= 0:
         return False, "Client summary shows zero metadata updates"
-    if expected == received:
-        return True, "Metadata snapshot matches"
-    return False, f"Metadata mismatch: server={expected!r} client={received!r}"
+    if expected != received:
+        return False, f"Metadata mismatch: server={expected!r} client={received!r}"
+    checked, violation = _first_metadata_state_verdict(server_summary, client_summary)
+    if violation is not None:
+        return False, violation
+    if checked:
+        return True, (
+            "Metadata snapshot matches and the first state carried a past or present timestamp"
+        )
+    return True, "Metadata snapshot matches"
 
 
 def _compare_controller_summaries(

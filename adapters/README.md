@@ -25,6 +25,45 @@ Every server adapter MUST report an `activation` field in its summary: the first
 shape as `peer_hello`. Report `null` only when the server sent none. Never reconstruct it
 from adapter arguments or SDK state.
 
+## Metadata scenario summary fields
+
+The spec requires the first `server/state` sent for a role on a connection to
+carry a past or present `timestamp` when the role object has one, so the client
+is current before any scheduled update follows. The matrix checks that from two
+fields, both optional: a case where either side is absent is not judged, because
+an unreadable claim is not evidence against an implementation.
+
+- **client**, `metadata.first_object_state`: `{"update_index": N,
+  "timestamp_us": T}` for the first `server/state` that carried a metadata
+  object. A state whose object is an explicit null carries no timestamp and so
+  is passed over; `update_index` is the 1-based position among the states the
+  client observed, which makes any skipped ones visible. `timestamp_us` is the
+  object's `timestamp` as received, or `null` if it carried none — report the
+  key only if the adapter reads the field, since `null` is taken to mean the
+  server omitted it.
+- **server**, `metadata.first_state_sent`: `{"timestamp_us": T, "bound_us": B}`
+  for the first `server/state` the server sent carrying a metadata object with a
+  timestamp. `timestamp_us` is the timestamp as it went out on the wire, and
+  `bound_us` is a reading of the server's own clock. Both are in the server's
+  clock domain, so they need no relation to any other implementation's clock.
+
+  **Take the clock reading after the state is on the wire, never before.** The
+  reading has to be an upper limit on when that frame was really sent, and only
+  a later reading is sound: a reading taken before transmission calls a
+  timestamp future when it was already past by the time it went out, and so
+  fails a conformant server. A reading taken later can only make the check more
+  permissive. A send call that merely queues the message has not sent it, so
+  reading the clock when it returns is too early.
+
+  Do not block waiting for the queue to drain. Observe the write where it
+  happens and report nothing when it was not seen: the matrix judges nothing
+  rather than failing the case, which keeps the adapter inside the case budget
+  if the client goes away.
+
+The matrix requires both sides to name the same `timestamp_us` before applying
+the bound, so the two are known to describe the same state. If they differ,
+nothing is judged.
+
 ## Protocol evidence contract
 
 Protocol scenarios are authoritative conformance tests, not audio-rendering tests. For

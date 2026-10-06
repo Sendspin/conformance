@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw
 from conformance.adapters._aiosendspin_protocol_evidence import (
     ProtocolEvidenceCollector,
     SentActivationRecorder,
+    SentMetadataStateRecorder,
     record_activation_evidence_server,
     record_handshake_evidence_server,
     record_player_stream_evidence,
@@ -655,7 +656,12 @@ async def _run_protocol_baseline_scenario(
     return {"protocol": collector.to_summary_fragment()}
 
 
-async def _run_metadata_scenario(args: argparse.Namespace, *, client: Any) -> dict[str, Any]:
+async def _run_metadata_scenario(
+    args: argparse.Namespace,
+    *,
+    sent_metadata_states: Any,
+    client: Any,
+) -> dict[str, Any]:
     from aiosendspin.server.roles.metadata import MetadataGroupRole
 
     metadata_group_role = client.group.group_role("metadata")
@@ -676,8 +682,20 @@ async def _run_metadata_scenario(args: argparse.Namespace, *, client: Any) -> di
         playback_speed=args.metadata_playback_speed,
     )
     await asyncio.sleep(0.5)
+    # The recorder has been watching the transport since before this client
+    # connected, so by now it holds the first metadata-carrying state that
+    # actually went out, whether the role sent it while activating or the update
+    # above produced it. Reading it after the settle rather than waiting on the
+    # send queue keeps this inside the case budget: a client that went away
+    # leaves it unset, and the matrix then judges nothing instead of hanging.
+    first_state_sent = sent_metadata_states.first_metadata_state()
     await _disconnect_client(client)
-    return {"metadata": {"expected": expected}}
+    return {
+        "metadata": {
+            "expected": expected,
+            "first_state_sent": first_state_sent,
+        }
+    }
 
 
 def _controller_state_from_message(message: Any) -> dict[str, Any] | None:
@@ -800,6 +818,7 @@ async def _scenario_payload(
     *,
     server: Any,
     client: Any,
+    sent_metadata_states: Any,
     handshake_timestamps: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     if args.scenario_id in {
@@ -827,7 +846,11 @@ async def _scenario_payload(
             handshake_end_ts=handshake_end_ts,
         )
     if args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}:
-        return await _run_metadata_scenario(args, client=client)
+        return await _run_metadata_scenario(
+            args,
+            sent_metadata_states=sent_metadata_states,
+            client=client,
+        )
     if args.scenario_id in {"client-initiated-controller", "server-initiated-controller"}:
         return await _run_controller_scenario(args, client=client)
     if args.scenario_id in {"client-initiated-artwork", "server-initiated-artwork"}:
@@ -863,6 +886,14 @@ async def _run(args: argparse.Namespace) -> int:
     )
     server_id = server.id
     sent_activations = SentActivationRecorder()
+    # Watches the transport from here, because the first metadata-carrying
+    # server/state can go out during connection bring-up, before the adapter
+    # holds the client.
+    sent_metadata_states = (
+        SentMetadataStateRecorder(server.clock)
+        if args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}
+        else None
+    )
 
     try:
         await server.start_server(
@@ -917,6 +948,7 @@ async def _run(args: argparse.Namespace) -> int:
             args,
             server=server,
             client=client,
+            sent_metadata_states=sent_metadata_states,
             handshake_timestamps=(handshake_start_ts, handshake_end_ts),
         )
         summary = {
