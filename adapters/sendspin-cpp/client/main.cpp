@@ -3,7 +3,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -14,19 +13,24 @@
 #include <thread>
 #include <vector>
 
-#define private public
+#include "sendspin/artwork_role.h"
 #include "sendspin/client.h"
-#undef private
+#include "sendspin/controller_role.h"
+#include "sendspin/metadata_role.h"
+#include "sendspin/player_role.h"
 
 #include <ArduinoJson.h>
 #include <openssl/evp.h>
 
-#include "connection.h"
-#include "connection_manager.h"
-
 using namespace sendspin;
 
-static constexpr size_t BINARY_HEADER_SIZE = 9;
+// sendspin-cpp decrypts and consumes audio chunks inside the library and exposes no public
+// hook for them. PlayerRoleListener::on_audio_write() is the synchronized playback output,
+// with priming and hard-sync silence added and late chunks dropped, so it is not the audio
+// the server transported and cannot stand in for it.
+static const char* const AUDIO_NOT_OBSERVABLE_REASON =
+    "sendspin-cpp exposes no public hook for transported audio chunks, so the adapter cannot "
+    "report the received audio hashes";
 
 struct Args {
     std::string client_name;
@@ -117,81 +121,17 @@ private:
     EVP_MD_CTX* ctx_;
 };
 
-class FloatPcmHasher {
-public:
-    void update_from_pcm_bytes(const uint8_t* data, size_t len, int bit_depth) {
-        if (bit_depth == 16) {
-            for (size_t i = 0; i + 1 < len; i += 2) {
-                int16_t sample =
-                    int16_t(uint16_t(data[i]) | (uint16_t(data[i + 1]) << 8));
-                push_sample(float(sample) / 32768.0f);
-            }
-        } else if (bit_depth == 24) {
-            for (size_t i = 0; i + 2 < len; i += 3) {
-                int32_t value =
-                    int32_t(data[i]) | (int32_t(data[i + 1]) << 8) |
-                    (int32_t(data[i + 2]) << 16);
-                if (value & 0x800000) {
-                    value |= ~0x00FFFFFF;
-                }
-                push_sample(float(value) / 8388608.0f);
-            }
-        } else if (bit_depth == 32) {
-            for (size_t i = 0; i + 3 < len; i += 4) {
-                int32_t sample = int32_t(uint32_t(data[i]) | (uint32_t(data[i + 1]) << 8) |
-                                         (uint32_t(data[i + 2]) << 16) |
-                                         (uint32_t(data[i + 3]) << 24));
-                push_sample(float(sample) / 2147483648.0f);
-            }
-        }
-    }
-
-    std::string hexdigest() const {
-        return hasher_.hexdigest();
-    }
-
-    size_t sample_count() const {
-        return sample_count_;
-    }
-
-private:
-    void push_sample(float sample) {
-        uint8_t bytes[4];
-        std::memcpy(bytes, &sample, sizeof(bytes));
-        hasher_.update(bytes, sizeof(bytes));
-        sample_count_++;
-    }
-
-    Sha256Hasher hasher_;
-    size_t sample_count_{0};
-};
-
 struct PeerInfo {
     std::string server_id;
     std::string server_name;
-    std::string connection_reason;
 };
 
 struct SessionState {
     mutable std::mutex mu;
+    // The id the client presents on the wire, derived by the library from its identity.
+    std::string client_id;
     std::optional<PeerInfo> peer;
     std::optional<ServerPlayerStreamObject> stream;
-
-    FloatPcmHasher pcm_hasher;
-    Sha256Hasher encoded_hasher;
-    size_t received_sample_count{0};
-    int audio_chunk_count{0};
-    bool hash_pcm_from_payload{false};
-
-    // Bit depth read off the wire from stream/start. The SDK's parsed stream params reach
-    // this adapter on the main loop, but audio frames are observed on the receive thread,
-    // so the parsed copy is not reliably populated yet when the first chunk lands. Both
-    // callbacks dispatch from the receive thread in wire order, so a depth taken there is
-    // always in place before the audio it describes.
-    bool stream_start_seen{false};
-    std::optional<int> wire_bit_depth;
-    int chunks_before_stream_start{0};
-    int chunks_without_bit_depth{0};
 
     int metadata_update_count{0};
     std::optional<ServerMetadataStateObject> metadata;
@@ -203,8 +143,6 @@ struct SessionState {
     int artwork_count{0};
     Sha256Hasher artwork_hasher;
     size_t artwork_byte_count{0};
-
-    SendspinConnection* hooked_connection{nullptr};
 };
 
 static bool is_player_scenario(const std::string& id) {
@@ -351,8 +289,54 @@ static std::optional<SendspinImageFormat> parse_image_format(const std::string& 
     if (raw == "png") {
         return SendspinImageFormat::PNG;
     }
-    if (raw == "bmp") {
-        return SendspinImageFormat::BMP;
+    return std::nullopt;
+}
+
+static const char* codec_name(SendspinCodecFormat codec) {
+    switch (codec) {
+        case SendspinCodecFormat::FLAC:
+            return "flac";
+        case SendspinCodecFormat::OPUS:
+            return "opus";
+        case SendspinCodecFormat::PCM:
+            return "pcm";
+        case SendspinCodecFormat::UNSUPPORTED:
+            break;
+    }
+    return "unsupported";
+}
+
+static const char* repeat_mode_name(SendspinRepeatMode mode) {
+    switch (mode) {
+        case SendspinRepeatMode::OFF:
+            return "off";
+        case SendspinRepeatMode::ONE:
+            return "one";
+        case SendspinRepeatMode::ALL:
+            return "all";
+    }
+    return "off";
+}
+
+// Wire names of the controller commands, indexed by SendspinControllerCommand.
+static constexpr const char* CONTROLLER_COMMAND_NAMES[] = {
+    "play",       "pause",      "stop",    "next",      "previous", "volume", "mute",
+    "repeat_off", "repeat_one", "repeat_all", "shuffle", "unshuffle", "switch", "seek",
+    "seek_relative",
+};
+
+static const char* controller_command_name(SendspinControllerCommand command) {
+    const auto index = static_cast<size_t>(command);
+    return index < std::size(CONTROLLER_COMMAND_NAMES) ? CONTROLLER_COMMAND_NAMES[index]
+                                                       : "unknown";
+}
+
+static std::optional<SendspinControllerCommand> controller_command_from_name(
+    const std::string& name) {
+    for (size_t i = 0; i < std::size(CONTROLLER_COMMAND_NAMES); i++) {
+        if (name == CONTROLLER_COMMAND_NAMES[i]) {
+            return static_cast<SendspinControllerCommand>(i);
+        }
     }
     return std::nullopt;
 }
@@ -394,8 +378,6 @@ public:
         // flowing, but do not hash it: this buffer is the output of the real-time
         // sync task, which injects initial-sync silence and soft-sync sample
         // interpolation, so it is not byte-identical to the transported PCM.
-        // The canonical PCM hash is computed from the wire payload instead (see
-        // install_binary_observer), where PCM frames are carried verbatim.
         return length;
     }
 
@@ -438,7 +420,7 @@ public:
         if (command_sent_) {
             return;
         }
-        auto target = controller_command_from_string(target_command_);
+        auto target = controller_command_from_name(target_command_);
         if (!target.has_value()) {
             return;
         }
@@ -448,7 +430,10 @@ public:
         if (!supported) {
             return;
         }
-        controller_.send_command(target.value());
+        // true means queued for the protocol task, which is as far as the library reports.
+        if (!controller_.send_command({.command = target.value()})) {
+            return;
+        }
         state_.sent_controller_command = target_command_;
         command_sent_ = true;
     }
@@ -482,7 +467,6 @@ private:
 
 static SendspinClientConfig build_client_config(const Args& args) {
     SendspinClientConfig config;
-    config.client_id = args.client_id;
     config.name = args.client_name;
     config.product_name = "sendspin-cpp Conformance Client";
     config.manufacturer = "Sendspin Conformance";
@@ -532,73 +516,6 @@ static ArtworkRoleConfig build_artwork_config(const Args& args) {
     return config;
 }
 
-static SendspinConnection* current_connection(SendspinClient& client) {
-    if (client.connection_manager_ == nullptr) {
-        return nullptr;
-    }
-    return client.connection_manager_->current();
-}
-
-static void install_binary_observer(SendspinClient& client, SessionState& state) {
-    SendspinConnection* conn = current_connection(client);
-    if (conn == nullptr || conn == state.hooked_connection) {
-        return;
-    }
-    auto original_json = conn->on_json_message_cb;
-    conn->on_json_message_cb = [&state, original_json](SendspinConnection* current,
-                                                      const char* data, size_t len,
-                                                      int64_t receive_time) {
-        JsonDocument doc;
-        if (deserializeJson(doc, data, len) == DeserializationError::Ok &&
-            doc["type"] == "stream/start") {
-            JsonVariantConst depth = doc["payload"]["player"]["bit_depth"];
-            std::lock_guard<std::mutex> lock(state.mu);
-            state.stream_start_seen = true;
-            // Only depths the hasher can actually unpack; anything else leaves
-            // wire_bit_depth unset so the chunks are counted rather than misread.
-            if (depth.is<int>() && (depth == 16 || depth == 24 || depth == 32)) {
-                state.wire_bit_depth = depth.as<int>();
-            }
-        }
-        if (original_json) {
-            original_json(current, data, len, receive_time);
-        }
-    };
-
-    auto original_binary = conn->on_binary_message_cb;
-    conn->on_binary_message_cb =
-        [&state, original_binary](SendspinConnection* current, uint8_t* payload, size_t len) {
-            if (payload != nullptr && len > BINARY_HEADER_SIZE &&
-                payload[0] == SENDSPIN_BINARY_PLAYER_AUDIO) {
-                const uint8_t* audio = payload + BINARY_HEADER_SIZE;
-                size_t audio_len = len - BINARY_HEADER_SIZE;
-                std::lock_guard<std::mutex> lock(state.mu);
-                state.audio_chunk_count++;
-                state.encoded_hasher.update(audio, audio_len);
-                if (!state.stream_start_seen) {
-                    state.chunks_before_stream_start++;
-                }
-                if (state.hash_pcm_from_payload) {
-                    // For PCM the wire payload carries decoded samples verbatim, so
-                    // hashing it reproduces the server's canonical PCM exactly. Without a
-                    // usable depth the chunk cannot be interpreted at all; count it rather
-                    // than guessing a width and folding nonsense into the hash.
-                    if (state.wire_bit_depth.has_value()) {
-                        state.pcm_hasher.update_from_pcm_bytes(audio, audio_len,
-                                                               state.wire_bit_depth.value());
-                        state.received_sample_count = state.pcm_hasher.sample_count();
-                    } else {
-                        state.chunks_without_bit_depth++;
-                    }
-                }
-            }
-            if (original_binary) {
-                original_binary(current, payload, len);
-            }
-        };
-    state.hooked_connection = conn;
-}
-
 static JsonDocument build_summary(const Args& args, const SessionState& state,
                                   const std::string& status, const std::string& reason) {
     JsonDocument doc;
@@ -614,16 +531,21 @@ static JsonDocument build_summary(const Args& args, const SessionState& state,
     doc["initiator_role"] = args.initiator_role;
     doc["preferred_codec"] = args.preferred_codec;
     doc["client_name"] = args.client_name;
-    doc["client_id"] = args.client_id;
 
     std::lock_guard<std::mutex> lock(state.mu);
+
+    if (state.client_id.empty()) {
+        doc["client_id"] = nullptr;
+    } else {
+        doc["client_id"] = state.client_id;
+    }
 
     if (state.peer.has_value()) {
         auto server = doc["server"].to<JsonObject>();
         server["server_id"] = state.peer->server_id;
         server["name"] = state.peer->server_name;
         server["version"] = 1;
-        server["connection_reason"] = state.peer->connection_reason;
+        server["connection_reason"] = nullptr;
     } else {
         doc["server"] = nullptr;
     }
@@ -631,7 +553,7 @@ static JsonDocument build_summary(const Args& args, const SessionState& state,
     if (state.stream.has_value()) {
         auto stream = doc["stream"].to<JsonObject>();
         if (state.stream->codec.has_value()) {
-            stream["codec"] = to_cstr(state.stream->codec.value());
+            stream["codec"] = codec_name(state.stream->codec.value());
         } else {
             stream["codec"] = nullptr;
         }
@@ -657,25 +579,10 @@ static JsonDocument build_summary(const Args& args, const SessionState& state,
 
     if (is_player_scenario(args.scenario_id)) {
         auto audio = doc["audio"].to<JsonObject>();
-        audio["audio_chunk_count"] = state.audio_chunk_count;
-        audio["chunks_before_stream_start"] = state.chunks_before_stream_start;
-        audio["chunks_without_bit_depth"] = state.chunks_without_bit_depth;
-        if (state.wire_bit_depth.has_value()) {
-            audio["hash_bit_depth"] = state.wire_bit_depth.value();
-        } else {
-            audio["hash_bit_depth"] = nullptr;
-        }
-        if (state.audio_chunk_count > 0) {
-            audio["received_encoded_sha256"] = state.encoded_hasher.hexdigest();
-        } else {
-            audio["received_encoded_sha256"] = nullptr;
-        }
-        if (state.received_sample_count > 0) {
-            audio["received_pcm_sha256"] = state.pcm_hasher.hexdigest();
-        } else {
-            audio["received_pcm_sha256"] = nullptr;
-        }
-        audio["received_sample_count"] = state.received_sample_count;
+        audio["audio_chunk_count"] = nullptr;
+        audio["received_encoded_sha256"] = nullptr;
+        audio["received_pcm_sha256"] = nullptr;
+        audio["received_sample_count"] = nullptr;
     } else if (is_metadata_scenario(args.scenario_id)) {
         auto metadata = doc["metadata"].to<JsonObject>();
         metadata["update_count"] = state.metadata_update_count;
@@ -713,11 +620,11 @@ static JsonDocument build_summary(const Args& args, const SessionState& state,
             auto received = controller["received_state"].to<JsonObject>();
             auto commands = received["supported_commands"].to<JsonArray>();
             for (const auto& command : state.controller_state->supported_commands) {
-                commands.add(to_cstr(command));
+                commands.add(controller_command_name(command));
             }
             received["volume"] = state.controller_state->volume;
             received["muted"] = state.controller_state->muted;
-            received["repeat"] = to_cstr(state.controller_state->repeat);
+            received["repeat"] = repeat_mode_name(state.controller_state->repeat);
             received["shuffle"] = state.controller_state->shuffle;
         } else {
             controller["received_state"] = nullptr;
@@ -762,12 +669,13 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
     SendspinClient::set_log_level(level);
 
     SessionState state;
-    state.hash_pcm_from_payload =
-        is_player_scenario(args.scenario_id) && args.preferred_codec == "pcm";
     SendspinClientConfig config = build_client_config(args);
     SendspinClient client(std::move(config));
     AlwaysReadyNetworkProvider network_provider;
     client.set_network_provider(&network_provider);
+    // The adapter does not derive the harness's deterministic pairing credentials, so the
+    // client is unpaired with every server and takes part only under unpaired access.
+    client.set_unpaired_access_enabled(true);
 
     std::unique_ptr<HashingPlayerListener> player_listener;
     std::unique_ptr<HashingMetadataListener> metadata_listener;
@@ -800,12 +708,13 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
         artwork.set_listener(artwork_listener.get());
     }
 
-    // start_server() reports role startup, not the listener bind: the socket is opened
-    // later from the client loop, and a failure there is retried rather than returned.
-    if (!client.start_server()) {
+    // start() reports role startup, not the listener bind: a failure to bind is retried
+    // by the library rather than returned.
+    if (!client.start()) {
         SessionState empty;
         return emit_summary(args, empty, "error", "Failed to start client roles");
     }
+    state.client_id = client.client_id();
     client.loop();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -815,7 +724,6 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
             return emit_summary(args, empty, "error", "No transport path was configured");
         }
         client.connect_to(connect_url.value());
-        install_binary_observer(client, state);
     }
 
     if (args.initiator_role == "server") {
@@ -827,43 +735,26 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
 
     auto deadline = std::chrono::steady_clock::now() +
                     std::chrono::milliseconds(int64_t(args.timeout_seconds * 1000));
-    bool had_transport_connection = false;
     bool had_handshake = false;
     bool disconnected_after_handshake = false;
-    bool lost_before_handshake = false;
 
     while (std::chrono::steady_clock::now() < deadline) {
-        install_binary_observer(client, state);
         client.loop();
-        install_binary_observer(client, state);
-
-        SendspinConnection* conn = current_connection(client);
-        if (conn != nullptr) {
-            had_transport_connection = true;
-        }
 
         if (client.is_connected()) {
             had_handshake = true;
-            SendspinConnection* current = current_connection(client);
-            if (current != nullptr) {
-                auto server_info = client.get_server_information();
-                PeerInfo peer{
-                    server_info.has_value() && !server_info->server_id.empty()
-                        ? server_info->server_id
-                        : (current->get_server_id().empty() ? args.server_id : current->get_server_id()),
-                    server_info.has_value() && !server_info->name.empty()
-                        ? server_info->name
-                        : args.server_name,
-                    to_cstr(current->get_connection_reason()),
-                };
-                std::lock_guard<std::mutex> lock(state.mu);
-                state.peer = std::move(peer);
-            }
+            auto server_info = client.get_server_information();
+            PeerInfo peer{
+                server_info.has_value() && !server_info->server_id.empty()
+                    ? server_info->server_id
+                    : args.server_id,
+                server_info.has_value() && !server_info->name.empty() ? server_info->name
+                                                                      : args.server_name,
+            };
+            std::lock_guard<std::mutex> lock(state.mu);
+            state.peer = std::move(peer);
         } else if (had_handshake) {
             disconnected_after_handshake = true;
-            break;
-        } else if (had_transport_connection && conn == nullptr) {
-            lost_before_handshake = true;
             break;
         }
 
@@ -875,30 +766,14 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
             client.loop();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        // Chunks the adapter could not interpret leave a hash covering only part of the
-        // stream. Reporting that as ok would send the runner chasing a PCM mismatch, so
-        // name the real cause instead.
-        if (state.chunks_without_bit_depth > 0) {
-            return emit_summary(args, state, "error",
-                                "Received " + std::to_string(state.chunks_without_bit_depth) +
-                                    " audio chunks with no usable stream/start bit depth");
+        if (is_player_scenario(args.scenario_id)) {
+            return emit_summary(args, state, "error", AUDIO_NOT_OBSERVABLE_REASON);
         }
         return emit_summary(args, state, "ok", "");
     }
 
-    if (lost_before_handshake) {
-        return emit_summary(args, state, "error", "Connection closed before handshake completed");
-    }
-
-    if (!had_transport_connection) {
-        if (args.initiator_role == "server") {
-            return emit_summary(args, state, "error", "Timed out waiting for server connection");
-        }
-        return emit_summary(args, state, "error", "Timed out waiting for server connection");
-    }
-
     if (!had_handshake) {
-        return emit_summary(args, state, "error", "Timed out waiting for handshake completion");
+        return emit_summary(args, state, "error", "Timed out waiting for server connection");
     }
 
     return emit_summary(args, state, "error", "Timed out waiting for server disconnect");

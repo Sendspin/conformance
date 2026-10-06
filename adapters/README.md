@@ -13,6 +13,7 @@ Current checked-in adapters:
 - `adapters/sendspin-go/`: real Go adapter source for the current client/server scenario set
 - `adapters/SendspinKit/client/`: real Swift client adapter source for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios
 - `adapters/sendspin-js/client.mjs`: real Node.js client adapter for client-initiated PCM plus the server-initiated PCM, metadata, and controller scenarios, driving the public `SendspinCore` SDK over an adapter-owned WebSocket
+- `adapters/sendspin-cpp/client/`: real C++ client adapter source for the server-initiated metadata, artwork, and controller scenarios, built on the public `SendspinClient` API only. sendspin-cpp exposes no public hook for transported audio chunks, so the player scenarios report the negotiated stream and then fail with that reason instead of an audio hash
 - `adapters/sendspin-rs/client/`: real Rust client adapter source for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios
 - `src/conformance/adapters/placeholder.py`: fail-fast placeholder for unsupported roles
 
