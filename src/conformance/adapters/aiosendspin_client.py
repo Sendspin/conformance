@@ -183,7 +183,7 @@ async def _run(args: argparse.Namespace) -> int:
     _add_repo_to_syspath("aiosendspin")
 
     from aiosendspin.client import ClientListener, SendspinClient
-    from aiosendspin.models.artwork import ArtworkChannel, ClientHelloArtworkSupport
+    from aiosendspin.models.artwork import ArtworkChannel
     from aiosendspin.models.player import ClientHelloPlayerSupport
     from aiosendspin.models.types import (
         MediaCommand,
@@ -282,7 +282,9 @@ async def _run(args: argparse.Namespace) -> int:
         else:
             current_decoder = None
 
-    def on_audio_chunk(timestamp_us: int, payload: bytes, audio_format: Any) -> None:
+    def on_audio_chunk(
+        timestamp_us: int, payload: bytes, audio_format: Any, _send_ahead: int
+    ) -> None:
         audio_chunk_timestamps_us.append(timestamp_us)
         audio_state["chunk_count"] += 1
         encoded_accumulator.extend(payload)
@@ -311,7 +313,7 @@ async def _run(args: argparse.Namespace) -> int:
         artwork_state["received_sha256"] = artwork_hasher.copy().hexdigest()
 
     scenario_roles: list[Any]
-    artwork_support: Any | None = None
+    artwork_channels: list[Any] | None = None
     player_support: Any | None = None
 
     if args.scenario_id in {
@@ -337,16 +339,14 @@ async def _run(args: argparse.Namespace) -> int:
         scenario_roles = [Roles.CONTROLLER]
     elif args.scenario_id in {"client-initiated-artwork", "server-initiated-artwork"}:
         scenario_roles = [Roles.ARTWORK]
-        artwork_support = ClientHelloArtworkSupport(
-            channels=[
-                ArtworkChannel(
-                    source=ArtworkSource.ALBUM,
-                    format=PictureFormat(args.artwork_format.lower()),
-                    width=args.artwork_width,
-                    height=args.artwork_height,
-                )
-            ]
-        )
+        artwork_channels = [
+            ArtworkChannel(
+                source=ArtworkSource.ALBUM,
+                format=PictureFormat(args.artwork_format.lower()),
+                width=args.artwork_width,
+                height=args.artwork_height,
+            )
+        ]
     else:
         write_json(ready_path, {"status": "error"})
         write_json(
@@ -368,7 +368,7 @@ async def _run(args: argparse.Namespace) -> int:
         roles=scenario_roles,
         pairing_store=pairing_store,
         player_support=player_support,
-        artwork_support=artwork_support,
+        artwork_channels=artwork_channels,
     )
 
     client.add_stream_start_listener(on_stream_start)
