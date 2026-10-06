@@ -15,7 +15,6 @@ from typing import Any
 
 from .declared_formats import undeclared_format_violation
 from .environment import resolve_environment
-from .flac import decode_fixture
 from .fixtures import fixture_path
 from .implementations import (
     IMPLEMENTATIONS,
@@ -554,32 +553,25 @@ def _compare_audio_summaries(
     if source_hash == received_hash:
         return True, "PCM hashes match exactly"
 
-    audio = server_audio
-    received_sample_count = int(client_audio["received_sample_count"])
-    fixture = decode_fixture(
-        Path(audio["fixture"]),
-        max_duration_seconds=float(audio.get("clip_seconds") or 5.0),
-    )
-    # Slice and hash in the fixture's own depth, not the negotiated wire depth. The
-    # canonical hash is over float samples, which carry the same value at any depth, so
-    # the comparison holds; using the wire depth against a fixture decoded at another
-    # would take the wrong number of bytes per sample.
-    bytes_per_sample = fixture.bit_depth // 8
-    prefix_pcm = fixture.pcm_bytes[: received_sample_count * bytes_per_sample]
-    from .pcm import FloatPcmHasher
-
-    prefix_hasher = FloatPcmHasher()
-    prefix_hasher.update_from_pcm_bytes(prefix_pcm, bit_depth=fixture.bit_depth)
-    prefix_hash = prefix_hasher.hexdigest()
-    if prefix_hash == received_hash:
-        missing_samples = fixture.frame_count * audio["channels"] - received_sample_count
-        return True, f"PCM prefix matches; trailing samples omitted={missing_samples}"
-
     return (
         False,
-        "PCM hash mismatch: "
+        f"PCM hash mismatch: {_sample_count_detail(server_audio, client_audio)}"
         f"server={source_hash} client={received_hash}",
     )
+
+
+def _sample_count_detail(server_audio: dict[str, Any], client_audio: dict[str, Any]) -> str:
+    """Return how the sent and received sample counts relate, or "" when unreported."""
+    frame_count = server_audio.get("frame_count")
+    channels = server_audio.get("channels")
+    received = client_audio.get("received_sample_count")
+    if not all(type(value) is int for value in (frame_count, channels, received)):
+        return ""
+    sent = frame_count * channels
+    if received == sent:
+        return f"sample counts equal ({sent}), content differs; "
+    direction = "fewer" if received < sent else "more"
+    return f"client received {received} of {sent} samples ({abs(sent - received)} {direction}); "
 
 
 def _stream_codec(summary: dict[str, Any]) -> str | None:
