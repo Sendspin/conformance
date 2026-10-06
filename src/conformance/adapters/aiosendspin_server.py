@@ -134,6 +134,16 @@ async def _wait_for_incoming_client(
     raise TimeoutError(f"Timed out waiting for client {client_name!r}")
 
 
+async def _wait_for_client_available(client: Any, *, timeout_s: float) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        if client.available:
+            return
+        await asyncio.sleep(0.1)
+    raise TimeoutError(f"Timed out waiting for client {client.name!r} to report available")
+
+
 def _expand_pcm_16_to_32(pcm_16_bytes: bytes) -> bytes:
     """Re-pack signed 16-bit little-endian PCM as signed 32-bit little-endian.
 
@@ -425,6 +435,11 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
     client.send_binary = send_binary_wrapper  # type: ignore[method-assign]
 
     try:
+        # The SDK holds stream/start while the client reports unavailable and then
+        # joins it at the playhead, skipping every chunk committed before it.
+        # Scenarios that commit the whole clip upfront would lose its head, so the
+        # stream starts only once the client reports available.
+        await _wait_for_client_available(client, timeout_s=args.timeout_seconds)
         stream = client.group.start_stream()
         audio_format = AudioFormat(
             sample_rate=fixture.sample_rate,
