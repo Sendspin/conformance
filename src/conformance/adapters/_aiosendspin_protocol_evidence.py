@@ -34,6 +34,10 @@ Evidence fidelity by assertion:
   connection bring-up, before the adapter holds the connection, so
   :class:`SentActivationRecorder` wraps ``EncryptedWebSocket.send_str`` at
   class level and keeps the JSON body handed to the encrypting transport.
+- First metadata-carrying ``server/state``: full fidelity, and timed.
+  :class:`SentMetadataStateRecorder` wraps the same transport method, because
+  the timestamp requirement on that state needs a clock reading taken once the
+  frame is really on the wire, which the enqueueing send path cannot give.
 """
 
 from __future__ import annotations
@@ -139,6 +143,77 @@ class SentActivationRecorder:
 
     def uninstall(self) -> None:
         """Restore the SDK transport's own ``send_str``."""
+        self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
+
+
+class SentMetadataStateRecorder:
+    """
+    Records the first ``server/state`` sent carrying a metadata object with a timestamp.
+
+    Wraps ``EncryptedWebSocket.send_str`` for the same reason
+    :class:`SentActivationRecorder` does: these states leave on the SDK's own
+    queue drain rather than from the adapter, so no public hook fires once one
+    is really on the wire. ``send_role_message`` only enqueues.
+
+    The clock is read after the wrapped send returns, so the reading is an upper
+    bound on when the state reached the transport. The direction matters: a
+    reading taken before transmission would call a timestamp future when it was
+    already past by the time the frame went out, and so blame a conformant
+    server. A later reading can only make the check more permissive.
+
+    Installed alongside the activation recorder, the two wrappers nest. Each
+    awaits the send it captured, so both still see every frame, and this one's
+    reading only moves later, which is the safe direction.
+
+    Recording starts on construction, so construct it before the server accepts
+    clients: the first such state can be sent during connection bring-up. The
+    metadata scenarios drive a single client, so the first one seen on any
+    connection is the state being judged.
+    """
+
+    def __init__(self, clock: Any) -> None:
+        from aiosendspin.noise.wire import EncryptedWebSocket
+
+        self._clock = clock
+        self._transport_class = EncryptedWebSocket
+        self._original_send_str = EncryptedWebSocket.send_str
+        self._first: dict[str, int] | None = None
+
+        async def send_str(transport: Any, data: str) -> None:
+            await self._original_send_str(transport, data)
+            # Every JSON control body passes through here, so only bodies naming
+            # the message type are parsed.
+            if self._first is not None or '"server/state"' not in data:
+                return
+            message = json.loads(data)
+            if message.get("type") != "server/state":
+                return
+            metadata = (message.get("payload") or {}).get("metadata")
+            if not isinstance(metadata, dict):
+                return
+            timestamp_us = metadata.get("timestamp")
+            # bool is an int subclass, and an object without a timestamp carries
+            # no requirement, so it is left for a later state to satisfy.
+            if isinstance(timestamp_us, bool) or not isinstance(timestamp_us, int):
+                return
+            self._first = {"timestamp_us": timestamp_us, "bound_us": self._clock.now_us()}
+
+        EncryptedWebSocket.send_str = send_str  # type: ignore[method-assign]
+
+    def first_metadata_state(self) -> dict[str, int] | None:
+        """
+        Return the first metadata-carrying ``server/state`` as sent, or None.
+
+        The mapping is ``{"timestamp_us": ..., "bound_us": ...}``: the timestamp
+        that went out on the wire, and a reading of the server's clock taken
+        once that frame had been written. None means no such state was
+        observed, which covers a legacy unencrypted connection and a client that
+        went away before the queue drained.
+        """
+        return None if self._first is None else dict(self._first)
+
+    def uninstall(self) -> None:
+        """Restore the ``send_str`` this recorder wrapped."""
         self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
 
 

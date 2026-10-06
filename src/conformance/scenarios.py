@@ -114,13 +114,14 @@ SERVER_INITIATED_METADATA = ScenarioSpec(
     description=(
         "Start the server first, then the client. The client advertises a listener, the "
         "server connects in, sends a metadata state update, disconnects, and the matrix "
-        "compares a normalized metadata snapshot."
+        "compares a normalized metadata snapshot and checks that the first state carrying "
+        "a metadata object bore a past or present timestamp."
     ),
     initiator_role="server",
     preferred_codec="none",
     required_role_families=("metadata",),
     verification_mode="metadata",
-    scenario_revision=1,
+    scenario_revision=2,
     extra_cli_args=METADATA_EXTRA_CLI_ARGS,
 )
 

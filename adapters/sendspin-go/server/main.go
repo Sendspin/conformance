@@ -318,10 +318,23 @@ func runSession(
 		}
 		return mergeMaps(baseSummary, summary), nil
 	case conformance.IsMetadataScenario(parsed.ScenarioID):
-		if err := sc.Send("server/state", metadataStateMessage(parsed)); err != nil {
+		// This adapter sends no state while activating, so this is the first
+		// metadata-carrying state and the one the matrix judges.
+		state := metadataStateMessage(parsed)
+		stateTimestampUs := state.Metadata.Timestamp
+		if err := sc.Send("server/state", state); err != nil {
 			return nil, err
 		}
 		time.Sleep(200 * time.Millisecond)
+		// Read after the settle, not after Send: Send only enqueues onto the
+		// writer goroutine's channel, so a reading taken when it returns can
+		// precede the actual write and would call a timestamp future when it
+		// was already past by the time the frame went out. There is no hook
+		// here for the write itself, so this takes the settle as the point the
+		// state has certainly gone out. That is looser than reading at the
+		// write, and loose is the safe direction: it can only be more
+		// permissive, never fail a conformant server.
+		stateBoundUs := conformance.CurrentMicros()
 		_ = sendClose(conn)
 		<-readDone
 		if err := drainReadError(readErrCh); err != nil {
@@ -330,6 +343,10 @@ func runSession(
 		return mergeMaps(baseSummary, map[string]any{
 			"metadata": map[string]any{
 				"expected": metadataSnapshot(parsed),
+				"first_state_sent": map[string]any{
+					"timestamp_us": stateTimestampUs,
+					"bound_us":     stateBoundUs,
+				},
 			},
 		}), nil
 	case conformance.IsControllerScenario(parsed.ScenarioID):
