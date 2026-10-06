@@ -879,6 +879,32 @@ def _repository_link(label: str, href: str | None, *, mono: bool = False) -> str
     )
 
 
+def _spec_revision_chip(repositories: list[dict[str, Any]]) -> str:
+    """
+    Render a chip naming the spec revision the report was audited against.
+
+    A merged report carries one spec entry per host, so the chip renders only
+    when every host that recorded a revision agrees on it; the repositories
+    table shows the disagreement the chip cannot summarise.
+    """
+    labelled = [
+        repository
+        for repository in repositories
+        if str(repository.get("key") or "") == "spec"
+        and repository.get("available")
+        and isinstance(repository.get("revision_label"), str)
+        and repository.get("revision_label")
+    ]
+    if not labelled or len({entry["revision_label"] for entry in labelled}) > 1:
+        return ""
+
+    label = labelled[0]["revision_label"]
+    commit_url = labelled[0].get("commit_url")
+    if isinstance(commit_url, str) and commit_url:
+        return _external_chip(f"Spec {label}", commit_url)
+    return f"<span class='chip'>{_escape(f'Spec {label}')}</span>"
+
+
 def _repository_versions_section(
     repositories: list[dict[str, Any]],
     *,
@@ -1486,6 +1512,7 @@ def _render_index_page(results: list[dict[str, Any]], *, data_dir: Path) -> str:
             "and client pairings pass the current conformance scenarios."
         ),
         actions=(
+            f"{_spec_revision_chip(repositories)}"
             f"{_external_chip('Conformance source', GITHUB_REPO_URL)}"
             f"{_external_chip('Sendspin-audio.com', SENDSPIN_AUDIO_URL)}"
         ),
