@@ -386,6 +386,32 @@ async def _run(args: argparse.Namespace) -> int:
         client.add_audio_chunk_listener(on_audio_chunk)
         client.add_stream_end_listener(on_stream_end)
 
+        # The SDK applies set_output_delay itself but only dispatches volume and
+        # mute to a listener, so the commands advertised in client/state are
+        # honoured only if the adapter applies them and reports the new state.
+        reported = {"volume": client.initial_volume, "muted": client.initial_muted}
+
+        async def report_player_state() -> None:
+            await client.send_player_state(
+                available=True,
+                volume=reported["volume"],
+                muted=reported["muted"],
+            )
+
+        def on_server_command(payload: Any) -> None:
+            player = getattr(payload, "player", None)
+            if player is None:
+                return
+            if player.command == PlayerCommand.VOLUME and player.volume is not None:
+                reported["volume"] = player.volume
+            elif player.command == PlayerCommand.MUTE and player.mute is not None:
+                reported["muted"] = player.mute
+            else:
+                return
+            asyncio.create_task(report_player_state())
+
+        client.add_server_command_listener(on_server_command)
+
     if args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}:
         def on_metadata(payload: Any) -> None:
             metadata_state["update_count"] += 1
