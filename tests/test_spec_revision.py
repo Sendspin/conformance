@@ -7,34 +7,14 @@ degrades instead of failing the run — are never exercised by the matrix.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import tempfile
 import unittest
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-from conformance.paths import env_repo_override_key
 from conformance.repository_versions import collect_repository_versions
 from conformance.site import _spec_revision_chip
-
-SPEC_OVERRIDE = env_repo_override_key("spec")
-MISSING_CHECKOUT = Path("/nonexistent/spec")
-
-
-@contextmanager
-def _spec_checkout(path: Path) -> Iterator[None]:
-    """Point spec resolution at one path, restoring any real override afterwards."""
-    previous = os.environ.get(SPEC_OVERRIDE)
-    os.environ[SPEC_OVERRIDE] = str(path)
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(SPEC_OVERRIDE, None)
-        else:
-            os.environ[SPEC_OVERRIDE] = previous
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -67,16 +47,15 @@ def _init_repo(repo: Path, *, tag: str | None = None) -> None:
         _git(repo, "tag", tag)
 
 
-def _spec_entry() -> dict[str, Any]:
-    """Return the spec entry, which leads the repository list."""
-    return collect_repository_versions([])[0]
+def _spec_entry(checkout: Path | None) -> dict[str, Any]:
+    """Return the spec entry, which leads the repository list, for one checkout."""
+    return collect_repository_versions([], resolve_repo=lambda dirname: checkout)[0]
 
 
 class SpecRepositoryEntryTest(unittest.TestCase):
     def test_spec_leads_the_repository_list(self) -> None:
         results = [{"server_impl": "aiosendspin", "client_impl": "aiosendspin"}]
-        with _spec_checkout(MISSING_CHECKOUT):
-            repositories = collect_repository_versions(results)
+        repositories = collect_repository_versions(results, resolve_repo=lambda dirname: None)
         self.assertEqual(repositories[0]["key"], "spec")
         self.assertIn("aiosendspin", [entry["key"] for entry in repositories[1:]])
 
@@ -84,8 +63,7 @@ class SpecRepositoryEntryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             _init_repo(repo, tag="1.0.0-rc1")
-            with _spec_checkout(repo):
-                entry = _spec_entry()
+            entry = _spec_entry(repo)
         self.assertTrue(entry["available"])
         self.assertEqual(entry["revision_label"], "1.0.0-rc1")
         self.assertTrue(entry["commit_sha"])
@@ -95,13 +73,11 @@ class SpecRepositoryEntryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             _init_repo(repo)
-            with _spec_checkout(repo):
-                entry = _spec_entry()
+            entry = _spec_entry(repo)
         self.assertEqual(entry["revision_label"], entry["commit_short_sha"])
 
     def test_missing_checkout_degrades_instead_of_failing(self) -> None:
-        with _spec_checkout(MISSING_CHECKOUT):
-            entry = _spec_entry()
+        entry = _spec_entry(None)
         self.assertEqual(entry["key"], "spec")
         self.assertFalse(entry["available"])
         self.assertTrue(entry["reason"])
