@@ -17,15 +17,21 @@ from conformance.scenarios import require_scenario
 
 PCM_16 = {"codec": "pcm", "sample_rate": 8000, "bit_depth": 16, "channels": 1}
 PCM_24 = {"codec": "pcm", "sample_rate": 8000, "bit_depth": 24, "channels": 1}
+FLAC_16 = {"codec": "flac", "sample_rate": 8000, "bit_depth": 16, "channels": 1}
 
 SCENARIO_IDS = ("client-initiated-state-format-pcm", "client-initiated-state-format-flac")
 
 
-def _server_summary(*, received: dict[str, Any] | None) -> dict[str, Any]:
+def _server_summary(
+    *,
+    received: dict[str, Any] | None,
+    stream: dict[str, Any] | None = PCM_16,
+) -> dict[str, Any]:
     return {
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "stream": stream,
         "format_preference": {"received": received},
     }
 
@@ -70,12 +76,13 @@ class FormatPreferenceComparisonTests(unittest.TestCase):
         self.assertIn("client/state", reason)
         self.assertIn("roles/player/v1.md", reason)
 
-    def test_a_server_summary_without_the_evidence_fails(self) -> None:
+    def test_a_server_adapter_that_records_no_evidence_is_a_harness_gap(self) -> None:
+        """An adapter that cannot say what it received is not evidence against a client."""
         server = _server_summary(received=PCM_16)
         del server["format_preference"]
         matches, reason = _compare_summaries(self.scenario, server, _client_summary())
         self.assertFalse(matches)
-        self.assertIn("client/state", reason)
+        self.assertIn("Harness gap", reason)
 
     def test_a_preference_the_client_did_not_report_fails(self) -> None:
         matches, reason = _compare_summaries(
@@ -88,18 +95,45 @@ class FormatPreferenceComparisonTests(unittest.TestCase):
     def test_a_received_preference_the_server_never_applied_fails(self) -> None:
         matches, reason = _compare_summaries(
             self.scenario,
-            _server_summary(received=PCM_16),
+            _server_summary(received=PCM_16, stream=PCM_24),
             _client_summary(final=None, stream_start_count=1),
         )
         self.assertFalse(matches)
-        self.assertIn("stream/start", reason)
-        self.assertIn("Format preference", reason)
+        self.assertIn("Server kept the stream format", reason)
+        self.assertIn("SHOULD", reason)
+
+    def test_a_change_the_server_sent_but_the_client_missed_blames_the_client(self) -> None:
+        matches, reason = _compare_summaries(
+            self.scenario,
+            _server_summary(received=PCM_16, stream=PCM_16),
+            _client_summary(final=None, stream_start_count=1),
+        )
+        self.assertFalse(matches)
+        self.assertIn("client did not observe", reason)
+
+    def test_a_client_summary_without_a_renegotiation_block_fails(self) -> None:
+        client = _client_summary()
+        del client["renegotiation"]
+        matches, reason = _compare_summaries(
+            self.scenario, _server_summary(received=PCM_16), client
+        )
+        self.assertFalse(matches)
+        self.assertIn("renegotiation block", reason)
+
+    def test_a_new_format_other_than_the_preferred_one_fails(self) -> None:
+        matches, reason = _compare_summaries(
+            self.scenario,
+            _server_summary(received=PCM_16, stream=FLAC_16),
+            _client_summary(final=FLAC_16),
+        )
+        self.assertFalse(matches)
+        self.assertIn("does not match", reason)
 
 
 class FormatPreferenceMatrixTests(unittest.TestCase):
-    """No implementation can opt out of the scenarios."""
+    """The scenarios carry no capability flag of their own to opt out with."""
 
-    def test_every_client_that_can_dial_out_as_a_player_is_judged(self) -> None:
+    def test_only_the_generic_initiator_role_and_codec_traits_gate_a_client(self) -> None:
         for scenario_id in SCENARIO_IDS:
             scenario = require_scenario(scenario_id)
             expected = [
@@ -107,6 +141,7 @@ class FormatPreferenceMatrixTests(unittest.TestCase):
                 for name, spec in sorted(IMPLEMENTATIONS.items())
                 if spec.client.supports_client_initiated
                 and "player" in spec.client.supported_role_families
+                and spec.client.supports_codec(scenario.preferred_codec)
             ]
             with self.subTest(scenario=scenario_id):
                 self.assertEqual(

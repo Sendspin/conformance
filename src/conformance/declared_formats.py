@@ -193,7 +193,7 @@ def _negotiated_formats(
 ) -> list[dict[str, Any]]:
     """Return every audio format the case negotiated, tagged with its source.
 
-    The server records the format it emitted in `stream/start`. Renegotiation
+    The server records the format it emitted in `stream/start`. Format-preference
     scenarios emit two and only the client keeps both, so both sides are read
     and each observation names the summary field it came from.
     """

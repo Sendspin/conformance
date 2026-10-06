@@ -1077,7 +1077,13 @@ def _compare_format_preference_summaries(
     # The preference has to be observed on the server side of the wire. A client
     # reporting that it asked for a format does not show which message carried it.
     preference = server_summary.get("format_preference")
-    received = preference.get("received") if isinstance(preference, dict) else None
+    if not isinstance(preference, dict):
+        return (
+            False,
+            "Harness gap: the server adapter does not record the format preference "
+            "it receives in client/state",
+        )
+    received = preference.get("received")
     if not isinstance(received, dict):
         return (
             False,
@@ -1103,11 +1109,19 @@ def _compare_format_preference_summaries(
     stream_start_count = int(renegotiation.get("stream_start_count") or 0)
     final = renegotiation.get("final_format")
     if stream_start_count < 2 or not isinstance(final, dict):
+        sent = server_summary.get("stream")
+        if isinstance(sent, dict) and _format_matches(sent, requested):
+            return (
+                False,
+                f"Server sent a stream/start in the preferred {_format_label(requested)} "
+                "but the client did not observe the stream change format "
+                f"(stream_start_count={stream_start_count})",
+            )
         return (
             False,
-            "Server did not send a new stream/start after the client/state format "
-            f"changed (stream_start_count={stream_start_count}; roles/player/v1.md, "
-            "Format preference)",
+            "Server kept the stream format after the client/state preference changed, "
+            "where roles/player/v1.md says it SHOULD select the preferred format "
+            f"(stream_start_count={stream_start_count})",
         )
 
     if not _format_matches(final, requested):

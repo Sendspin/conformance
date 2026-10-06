@@ -100,7 +100,7 @@ pass status does not establish protocol conformance.
 
 The `client-initiated-state-format-*` scenarios judge the `format` field of the
 `client/state` player object, so the evidence has to show which message carried the
-preference. Both adapters add a block to their summary:
+preference. Each adapter adds its own block to its summary. The server's:
 
 ```json
 {
@@ -113,6 +113,8 @@ preference. Both adapters add a block to their summary:
 The server records the last `format` it received in a `client/state` player object,
 or `null` when none arrived. A format requested through any other message must not be
 recorded here.
+
+The client's:
 
 ```json
 {

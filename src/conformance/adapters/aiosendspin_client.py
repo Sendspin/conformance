@@ -109,12 +109,18 @@ def _supported_formats(preferred_codec: str, *, scenario_id: str = "") -> list[A
     # then prefers the second through client/state.
     if scenario_id == "client-initiated-state-format-pcm":
         return [
-            SupportedAudioFormat(codec=codec, channels=1, sample_rate=8_000, bit_depth=24),
-            SupportedAudioFormat(codec=codec, channels=1, sample_rate=8_000, bit_depth=16),
+            SupportedAudioFormat(
+                codec=AudioCodec.PCM, channels=1, sample_rate=8_000, bit_depth=24
+            ),
+            SupportedAudioFormat(
+                codec=AudioCodec.PCM, channels=1, sample_rate=8_000, bit_depth=16
+            ),
         ]
     if scenario_id == "client-initiated-state-format-flac":
         return [
-            SupportedAudioFormat(codec=codec, channels=1, sample_rate=8_000, bit_depth=16),
+            SupportedAudioFormat(
+                codec=AudioCodec.PCM, channels=1, sample_rate=8_000, bit_depth=16
+            ),
             SupportedAudioFormat(
                 codec=AudioCodec.FLAC, channels=1, sample_rate=8_000, bit_depth=16
             ),

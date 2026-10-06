@@ -860,7 +860,7 @@ async def _scenario_payload(
     }:
         # The server streams source PCM and the player role re-encodes to whatever
         # format the client negotiates, including a mid-stream client/state format
-        # change, so no renegotiation-specific server logic is required here.
+        # change, so every player scenario shares one streaming path.
         return await _run_audio_scenario(args, server=server, client=client)
     if args.scenario_id == "server-initiated-protocol-baseline-v1":
         assert handshake_timestamps is not None

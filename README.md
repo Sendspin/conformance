@@ -29,7 +29,7 @@ Current scenarios:
 
 The OPUS scenario is currently exercised only by the `SendspinKit` and `sendspin-cpp` clients against the `aiosendspin` server until other implementations opt in via `supports_opus`.
 
-The `client-initiated-state-format-*` scenarios run for every client, with no capability flag to opt out: RC1 gives every player the `client/state` `format` preference, so a client that never sends one shows as a failed case. Only the `aiosendspin` client adapter drives them today.
+The `client-initiated-state-format-*` scenarios have no capability flag of their own: RC1 gives every player the `client/state` `format` preference, so a client that never sends one shows as a failed case. The FLAC variant still needs a client that can list FLAC (`supports_flac`). Only the `aiosendspin` client adapter drives them today.
 
 Unsupported client roles use fail-fast adapters that emit a summary and exit non-zero. Unsupported server roles are filtered out before case creation, so the matrix only shows server rows that can actually run a scenario.
 

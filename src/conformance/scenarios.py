@@ -219,7 +219,7 @@ CLIENT_INITIATED_STATE_FORMAT_FLAC = ScenarioSpec(
         "observed a new stream/start in the FLAC format."
     ),
     initiator_role="client",
-    preferred_codec="pcm",
+    preferred_codec="flac",
     required_role_families=("player",),
     verification_mode="format-preference",
     scenario_revision=1,
