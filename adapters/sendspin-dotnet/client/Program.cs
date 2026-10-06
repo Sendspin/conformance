@@ -269,7 +269,7 @@ void HandleGroupState(GroupState group, Func<Task>? sendControllerCommand)
         return;
     }
 
-    receivedControllerState = NormalizeController(group, options.ControllerCommand);
+    receivedControllerState = NormalizeController(group);
     if (sentControllerCommand is not null || sendControllerCommand is null)
     {
         return;
@@ -324,11 +324,11 @@ static Dictionary<string, object?> NormalizeMetadata(TrackMetadata metadata)
     };
 }
 
-static Dictionary<string, object?> NormalizeController(GroupState group, string command)
+static Dictionary<string, object?> NormalizeController(GroupState group)
 {
     return new Dictionary<string, object?>
     {
-        ["supported_commands"] = new[] { command },
+        ["supported_commands"] = group.SupportedCommands,
         ["volume"] = group.Volume,
         ["muted"] = group.Muted,
         // repeat/shuffle are controller-role state, carried on GroupState in SDK v9.
