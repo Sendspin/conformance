@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from .implementations import IMPLEMENTATIONS, resolve_repo_path
+from .implementations import IMPLEMENTATIONS, SUPPORTING_REPOS, resolve_repo_path
 from .io import write_json
 from .paths import repo_root
 
@@ -82,6 +82,18 @@ def _head_details(repo: Path) -> tuple[str | None, str | None, str | None, str |
         return None, None, None, None
     commit_sha, short_sha, subject, committed_at = raw.split("\x00", 3)
     return commit_sha, short_sha, subject, committed_at
+
+
+def _revision_label(repo: Path) -> str | None:
+    """
+    Return a human-readable label for the checked-out revision.
+
+    The tag when HEAD sits on one (`1.0.0-rc1`), the nearest tag plus a distance
+    when it does not (`1.0.0-rc1-5-gabc1234`), otherwise the short sha. A
+    checkout with uncommitted changes gains a `-dirty` suffix, so the label is
+    not always a resolvable ref.
+    """
+    return _run_git(repo, "describe", "--tags", "--always", "--dirty")
 
 
 def _latest_tag(repo: Path) -> str | None:
@@ -161,6 +173,7 @@ def _repository_entry(
         _run_git(repo_path, "remote", "get-url", "origin") or remote_url,
     )
     commit_sha, short_sha, subject, committed_at = _head_details(repo_path)
+    revision_label = _revision_label(repo_path)
     latest_tag = _latest_tag(repo_path)
     commits_ahead = None if latest_tag is None else _ahead_of_tag(repo_path, latest_tag)
     repo_url, commit_url = _commit_urls(origin_url, commit_sha)
@@ -174,6 +187,7 @@ def _repository_entry(
             "commit_subject": subject,
             "committed_at": committed_at,
             "commit_url": commit_url,
+            "revision_label": revision_label,
             "latest_release_tag": latest_tag,
             "commits_ahead_of_release": commits_ahead,
             "release_url": (
@@ -199,7 +213,7 @@ def collect_repository_versions(
     environment_id: str | None = None,
     environment_name: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Collect revision metadata for the repos represented in one report."""
+    """Collect revision metadata for the spec and the implementations a report covers."""
     environments = _environment_entries(
         environment_id=environment_id,
         environment_name=environment_name,
@@ -210,7 +224,15 @@ def collect_repository_versions(
         or "https://github.com/Sendspin/conformance.git"
     )
     conformance_commit_sha, _, _, _ = _head_details(conformance_repo)
+    spec_dirname, spec_remote_url = SUPPORTING_REPOS["spec"]
     repositories: list[dict[str, Any]] = [
+        _repository_entry(
+            key="spec",
+            display_name="Sendspin spec",
+            repo_path=resolve_repo_path(spec_dirname),
+            remote_url=spec_remote_url,
+            environments=environments,
+        )
     ]
     for implementation_name in _used_implementation_names(results):
         specification = IMPLEMENTATIONS.get(implementation_name)

@@ -87,6 +87,12 @@ Cross-run metadata such as build logs and repository revisions also live under
 so a merged multi-host run regenerates it rather than merging it. It carries a
 `schema_version`; downstream consumers should check it.
 
+`repositories.json` leads with a `spec` entry recording the revision of the
+Sendspin spec the run was audited against, followed by one entry per
+implementation the run covered. Every entry carries `revision_label`, a
+`git describe` label that is a tag when the checkout sits on one. A merged
+multi-host run keeps one entry per host, so `spec` is not unique there.
+
 Do not reintroduce SPA-style routing or inline all case details onto scenario pages.
 
 ### Report behavior
