@@ -18,7 +18,7 @@ CLIENT_INITIATED_PCM = ScenarioSpec(
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="audio-pcm",
-    scenario_revision=1,
+    scenario_revision=2,
 )
 
 
@@ -35,7 +35,7 @@ SERVER_INITIATED_PCM = ScenarioSpec(
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="audio-pcm",
-    scenario_revision=1,
+    scenario_revision=2,
 )
 
 
@@ -183,7 +183,7 @@ SERVER_INITIATED_PCM_24BIT = ScenarioSpec(
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="audio-pcm",
-    scenario_revision=1,
+    scenario_revision=2,
 )
 
 
@@ -240,7 +240,7 @@ SERVER_INITIATED_LEGACY_UNENCRYPTED = ScenarioSpec(
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="audio-pcm",
-    scenario_revision=1,
+    scenario_revision=2,
     requires_legacy_unencrypted=True,
 )
 
