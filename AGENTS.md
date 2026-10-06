@@ -119,9 +119,12 @@ Important fields to preserve where available:
 - `initiator_role`
 - `preferred_codec`
 - `peer_hello`
+- `activation` (server summaries)
 - audio hash fields
 
 `peer_hello` should contain the full hello message received from the other party whenever capture is possible.
+
+`activation` should contain the first `server/activate` the server sent, as it went on the wire and in the same `{type, payload}` shape as `peer_hello`. It is `null` only when the server sent none, and is never reconstructed from adapter arguments or SDK state.
 
 ### Audio fixture
 

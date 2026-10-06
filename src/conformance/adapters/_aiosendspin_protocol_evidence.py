@@ -2,7 +2,8 @@
 
 Wraps the aiosendspin SDK's connection objects from outside (no SDK changes)
 to populate ``summary["protocol"]`` per the contract in
-:mod:`conformance.protocol`. This is deliberately a monkey-patch: aiosendspin
+:mod:`conformance.protocol`, and ``summary["activation"]`` with the initial
+``server/activate``. This is deliberately a monkey-patch: aiosendspin
 does not yet expose a first-class tracing hook (tracked in
 https://github.com/Sendspin/conformance/issues/111), so this module reaches
 into private/semi-public attributes and is expected to need maintenance as
@@ -29,10 +30,15 @@ Evidence fidelity by assertion:
   are observed directly by wrapping ``send_binary``/``send_message`` (server)
   and the audio-chunk/stream-start listeners (client), both of which fire
   well after handshake/activation and are stable public/semi-public hooks.
+- Initial ``server/activate``: full fidelity. The SDK sends it during
+  connection bring-up, before the adapter holds the connection, so
+  :class:`SentActivationRecorder` wraps ``EncryptedWebSocket.send_str`` at
+  class level and keeps the JSON body handed to the encrypting transport.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -81,6 +87,59 @@ class ProtocolEvidenceCollector:
                 for assertion_id, recorder in self._assertions.items()
             },
         }
+
+
+class SentActivationRecorder:
+    """
+    Records the first ``server/activate`` sent on each encrypted connection.
+
+    Recording starts on construction and covers every connection the process
+    opens afterwards, so construct it before the server starts accepting
+    clients. Call :meth:`uninstall` to stop recording.
+    """
+
+    def __init__(self) -> None:
+        from aiosendspin.noise.wire import EncryptedWebSocket
+
+        self._transport_class = EncryptedWebSocket
+        self._original_send_str = EncryptedWebSocket.send_str
+        self._first_by_socket: dict[Any, dict[str, Any]] = {}
+
+        async def send_str(transport: Any, data: str) -> None:
+            await self._original_send_str(transport, data)
+            # Every JSON control body, including each server/time, passes through
+            # here, so only bodies naming the message type are parsed.
+            if '"server/activate"' not in data:
+                return
+            message = json.loads(data)
+            if message.get("type") == "server/activate":
+                # A pairing re-handshake swaps the transport but keeps the socket.
+                self._first_by_socket.setdefault(transport._ws, message)
+
+        EncryptedWebSocket.send_str = send_str  # type: ignore[method-assign]
+
+    def initial_activation(self, connection: Any) -> dict[str, Any] | None:
+        """
+        Return the first ``server/activate`` sent on a server-side ``SendspinConnection``.
+
+        The message is the ``{"type": ..., "payload": ...}`` body as sent.
+        Returns ``None`` for an unencrypted legacy connection, where the SDK
+        sends no ``server/activate``. Raises RuntimeError when an encrypted
+        connection has no recorded message: the SDK cannot activate a client
+        without sending one, so that means the recorder missed it.
+        """
+        socket = connection._wsock_server or connection._wsock_client
+        message = self._first_by_socket.get(socket)
+        if message is None and connection.is_encrypted:
+            raise RuntimeError(
+                "No server/activate was recorded for an encrypted connection; "
+                "the aiosendspin send path no longer reaches EncryptedWebSocket.send_str"
+            )
+        return message
+
+    def uninstall(self) -> None:
+        """Restore the SDK transport's own ``send_str``."""
+        self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
 
 
 def record_handshake_evidence_server(

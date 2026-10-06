@@ -510,6 +510,9 @@ CLAIM_PILL_UNVERIFIED = "status-pill border-dashed border-retro-line/60 bg-trans
 
 DECLARED_FORMAT_COLUMNS = ("Declared format", "Claim status", "Declared in", "Exercised by")
 
+# Shown for every recorded server/activate, present in the payload or not.
+ACTIVATION_PAYLOAD_FIELDS = ("activities", "active_roles")
+
 GITHUB_REPO_URL = "https://github.com/balloob-travel/conformance"
 SENDSPIN_AUDIO_URL = "https://sendspin-audio.com/"
 SCENARIOS_REPO_PATH = "src/conformance/scenarios.py"
@@ -1949,6 +1952,83 @@ def _render_scenario_page(
     )
 
 
+def _activation_value(value: Any) -> str:
+    if value == []:
+        return "<span class='text-sm subtle-copy'>empty list</span>"
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        tags = "".join(
+            "<span class='rounded-md border border-retro-line/60 px-2 py-1 font-mono text-[13px]'>"
+            f"{_escape(item)}</span>"
+            for item in value
+        )
+        return f"<span class='flex flex-wrap justify-end gap-1.5'>{tags}</span>"
+    return f"<span class='font-mono text-[13px]'>{_escape(json.dumps(value))}</span>"
+
+
+def _activation_rows(activation: Any) -> str:
+    payload = activation.get("payload") if isinstance(activation, dict) else None
+    if not isinstance(payload, dict):
+        # Not shaped like a message, so it is shown whole rather than dropped.
+        fields = [("Recorded value", _activation_value(activation))]
+    else:
+        fields = [
+            (
+                name,
+                _activation_value(payload[name])
+                if name in payload
+                else "<span class='text-sm subtle-copy'>not in the message</span>",
+            )
+            for name in ACTIVATION_PAYLOAD_FIELDS
+        ]
+        fields += [
+            (name, _activation_value(payload[name]))
+            for name in sorted(payload)
+            if name not in ACTIVATION_PAYLOAD_FIELDS
+        ]
+    return "".join(
+        "<div class='keyval-row'>"
+        f"<span class='font-mono text-[13px] muted-copy'>{_escape(name)}</span>"
+        f"{value}"
+        "</div>"
+        for name, value in fields
+    )
+
+
+def _render_activation_section(server_summary: Any, *, label: str) -> str:
+    """
+    Render the initial ``server/activate`` recorded in a server summary.
+
+    Returns an empty string when the summary has no ``activation`` field, so a
+    server that reported nothing is not shown as having sent no activation.
+    """
+    if not isinstance(server_summary, dict) or "activation" not in server_summary:
+        return ""
+    activation = server_summary["activation"]
+    message_type = "<span class='font-mono text-[13px]'>server/activate</span>"
+    if activation is None:
+        content = (
+            "<div class='surface-inset px-4 py-3 text-sm'>"
+            f"<p class='font-semibold'>No {message_type} observed</p>"
+            f"<p class='mt-2 subtle-copy'>The {_escape(label)} server sent no {message_type} on "
+            "this connection, according to its adapter.</p>"
+            "</div>"
+        )
+    else:
+        content = f"<div class='keyval'>{_activation_rows(activation)}</div>"
+    return (
+        "<section class='surface p-5 sm:p-6'>"
+        "<p class='eyebrow'>Server activation</p>"
+        f"<h2 class='mt-2 text-2xl'>Initial {message_type}</h2>"
+        "<p class='mt-3 max-w-3xl text-sm leading-6 subtle-copy'>"
+        f"What the {_escape(label)} server's own adapter recorded for its first {message_type} "
+        "on this connection. It is reported as sent and is not checked against the "
+        "specification, so it has no bearing on this case's status."
+        "</p>"
+        f"<div class='mt-5'>{content}</div>"
+        "</section>"
+    )
+
+
 def _render_case_page(
     result: dict[str, Any],
     *,
@@ -1965,6 +2045,8 @@ def _render_case_page(
     status = _display_status(result)
     server_label = _implementation_label(server_impl)
     client_label = _implementation_label(client_impl)
+    server_summary_path = case_dir / "server-summary.json"
+    server_summary = read_json(server_summary_path) if server_summary_path.exists() else None
 
     summary_tab = f"{case_name}--summary"
     server_tab = f"{case_name}--server"
@@ -2045,6 +2127,7 @@ def _render_case_page(
         "</aside>"
         "<main class='space-y-6'>"
         f"{_page_header(accent='case', breadcrumb=breadcrumb, kicker='Case', title=f'{server_label} -> {client_label}', description=_scenario_description(scenario_id), meta=header_meta)}"
+        f"{_render_activation_section(server_summary, label=server_label)}"
         "<section class='surface p-4 sm:p-5' data-tabset>"
         "<div>"
         "<p class='eyebrow'>Inspection</p>"
