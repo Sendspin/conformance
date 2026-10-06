@@ -29,6 +29,7 @@ def _server_summary(
     declared: list[Any] | None,
     stream: dict[str, Any] | None,
     include_player_support: bool = True,
+    received_preference: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a server summary that passes encoded-bytes verification on its own."""
     payload: dict[str, Any] = {"name": "synthetic-client"}
@@ -41,6 +42,7 @@ def _server_summary(
         "peer_hello": {"type": "client/hello", "payload": payload},
         "stream": stream,
         "audio": {"sent_audio_chunk_count": 4, "sent_encoded_sha256": ENCODED_SHA},
+        "format_preference": {"received": received_preference},
     }
 
 
@@ -213,19 +215,21 @@ class CompareSummariesTest(unittest.TestCase):
         self.assertIn("zero FLAC audio chunks sent", reason)
 
     def test_renegotiation_passes_when_both_formats_were_declared(self) -> None:
-        scenario = require_scenario("client-initiated-request-format-pcm")
+        scenario = require_scenario("client-initiated-state-format-pcm")
         matches, reason = _compare_summaries(
             scenario,
-            _server_summary(declared=[PCM_24, PCM_16], stream=PCM_16),
+            _server_summary(
+                declared=[PCM_24, PCM_16], stream=PCM_16, received_preference=PCM_24
+            ),
             _renegotiation_client_summary(initial=PCM_16, final=PCM_24),
         )
         self.assertTrue(matches, reason)
 
     def test_renegotiation_fails_when_only_one_format_was_declared(self) -> None:
-        scenario = require_scenario("client-initiated-request-format-pcm")
+        scenario = require_scenario("client-initiated-state-format-pcm")
         matches, reason = _compare_summaries(
             scenario,
-            _server_summary(declared=[PCM_16], stream=PCM_16),
+            _server_summary(declared=[PCM_16], stream=PCM_16, received_preference=PCM_24),
             _renegotiation_client_summary(initial=PCM_16, final=PCM_24),
         )
         self.assertFalse(matches)

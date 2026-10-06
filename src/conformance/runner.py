@@ -1065,7 +1065,7 @@ def _formats_equal(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return all(left.get(key) == right.get(key) for key in AUDIO_FORMAT_FIELDS)
 
 
-def _compare_renegotiation_summaries(
+def _compare_format_preference_summaries(
     server_summary: dict[str, Any],
     client_summary: dict[str, Any],
 ) -> tuple[bool, str]:
@@ -1073,6 +1073,17 @@ def _compare_renegotiation_summaries(
         return False, f"Server summary status is {server_summary.get('status')!r}"
     if client_summary.get("status") != "ok":
         return False, f"Client summary status is {client_summary.get('status')!r}"
+
+    # The preference has to be observed on the server side of the wire. A client
+    # reporting that it asked for a format does not show which message carried it.
+    preference = server_summary.get("format_preference")
+    received = preference.get("received") if isinstance(preference, dict) else None
+    if not isinstance(received, dict):
+        return (
+            False,
+            "Server received no player format preference in client/state "
+            "(roles/player/v1.md, client/state player object `format`)",
+        )
 
     renegotiation = client_summary.get("renegotiation")
     if not isinstance(renegotiation, dict):
@@ -1082,13 +1093,21 @@ def _compare_renegotiation_summaries(
     if not isinstance(requested, dict):
         return False, "Client did not record a requested format"
 
+    if not _format_matches(received, requested):
+        return (
+            False,
+            f"Server received client/state format {_format_label(received)} but the "
+            f"client reports preferring {_format_label(requested)}",
+        )
+
     stream_start_count = int(renegotiation.get("stream_start_count") or 0)
     final = renegotiation.get("final_format")
     if stream_start_count < 2 or not isinstance(final, dict):
         return (
             False,
-            "Server did not re-emit stream/start after the request "
-            f"(stream_start_count={stream_start_count})",
+            "Server did not send a new stream/start after the client/state format "
+            f"changed (stream_start_count={stream_start_count}; roles/player/v1.md, "
+            "Format preference)",
         )
 
     if not _format_matches(final, requested):
@@ -1158,8 +1177,8 @@ def _dispatch_comparison(
         return _compare_controller_summaries(server_summary, client_summary)
     if scenario.verification_mode == "artwork":
         return _compare_artwork_summaries(server_summary, client_summary)
-    if scenario.verification_mode == "format-renegotiation":
-        return _compare_renegotiation_summaries(server_summary, client_summary)
+    if scenario.verification_mode == "format-preference":
+        return _compare_format_preference_summaries(server_summary, client_summary)
     raise ValueError(f"Unsupported verification mode: {scenario.verification_mode}")
 
 

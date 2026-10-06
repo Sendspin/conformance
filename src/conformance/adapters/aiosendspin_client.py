@@ -104,6 +104,21 @@ def _supported_formats(preferred_codec: str, *, scenario_id: str = "") -> list[A
                 bit_depth=24,
             ),
         ]
+    # The format-preference scenarios list exactly two entries at the fixture's
+    # native rate and channels: the server starts on the first, and the client
+    # then prefers the second through client/state.
+    if scenario_id == "client-initiated-state-format-pcm":
+        return [
+            SupportedAudioFormat(codec=codec, channels=1, sample_rate=8_000, bit_depth=24),
+            SupportedAudioFormat(codec=codec, channels=1, sample_rate=8_000, bit_depth=16),
+        ]
+    if scenario_id == "client-initiated-state-format-flac":
+        return [
+            SupportedAudioFormat(codec=codec, channels=1, sample_rate=8_000, bit_depth=16),
+            SupportedAudioFormat(
+                codec=AudioCodec.FLAC, channels=1, sample_rate=8_000, bit_depth=16
+            ),
+        ]
     return [
         SupportedAudioFormat(
             codec=codec,
@@ -236,6 +251,16 @@ async def _run(args: argparse.Namespace) -> int:
     }
     artwork_hasher = sha256()
     audio_chunk_timestamps_us: list[int] = []
+    format_preference_scenario = args.scenario_id in {
+        "client-initiated-state-format-pcm",
+        "client-initiated-state-format-flac",
+    }
+    renegotiation_state: dict[str, Any] = {
+        "stream_start_count": 0,
+        "requested": None,
+        "initial_format": None,
+        "final_format": None,
+    }
 
     def flush_decoder() -> None:
         nonlocal current_decoder
@@ -314,6 +339,37 @@ async def _run(args: argparse.Namespace) -> int:
     def on_stream_end(_roles: list[str] | None) -> None:
         flush_decoder()
 
+    def on_format_preference_chunk(
+        _timestamp_us: int, _payload: bytes, audio_format: Any, _send_ahead: int
+    ) -> None:
+        # The SDK does not notify stream-start listeners when a stream/start
+        # changes the format of an active stream; the change shows only in the
+        # format attached to the chunks that follow it.
+        stream_format = {
+            "codec": audio_format.codec.value,
+            "sample_rate": audio_format.pcm_format.sample_rate,
+            "channels": audio_format.pcm_format.channels,
+            "bit_depth": audio_format.pcm_format.bit_depth,
+        }
+        current = renegotiation_state["final_format"] or renegotiation_state["initial_format"]
+        if stream_format == current:
+            return
+        renegotiation_state["stream_start_count"] += 1
+        if current is not None:
+            renegotiation_state["final_format"] = stream_format
+            return
+        # The first format is the server's own pick from the priority list;
+        # only now does the client state a different preference.
+        renegotiation_state["initial_format"] = stream_format
+        preferred = player_support.supported_formats[1]
+        renegotiation_state["requested"] = {
+            "codec": preferred.codec.value,
+            "sample_rate": preferred.sample_rate,
+            "channels": preferred.channels,
+            "bit_depth": preferred.bit_depth,
+        }
+        asyncio.create_task(client.set_preferred_format(preferred))
+
     def on_artwork_chunk(channel: int, data: bytes) -> None:
         artwork_state["channel"] = channel
         artwork_state["received_count"] += 1
@@ -334,6 +390,8 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-opus",
         "server-initiated-legacy-unencrypted",
         "server-initiated-protocol-baseline-v1",
+        "client-initiated-state-format-pcm",
+        "client-initiated-state-format-flac",
     }:
         try:
             player_support = ClientHelloPlayerSupport(
@@ -368,7 +426,10 @@ async def _run(args: argparse.Namespace) -> int:
             summary_path,
             {
                 "status": "error",
-                "reason": f"Unsupported scenario for aiosendspin client adapter: {args.scenario_id}",
+                "reason": (
+                    "Harness gap, not a protocol result: the aiosendspin client adapter "
+                    f"has no CLI surface for scenario {args.scenario_id}"
+                ),
             },
         )
         return 1
@@ -427,6 +488,9 @@ async def _run(args: argparse.Namespace) -> int:
             asyncio.create_task(report_player_state())
 
         client.add_server_command_listener(on_server_command)
+
+    if format_preference_scenario:
+        client.add_audio_chunk_listener(on_format_preference_chunk)
 
     if args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}:
         def on_metadata(payload: Any) -> None:
@@ -578,6 +642,9 @@ async def _run(args: argparse.Namespace) -> int:
             "received_pcm_sha256": received_hasher.hexdigest(),
             "received_sample_count": received_hasher.sample_count,
         }
+    elif format_preference_scenario:
+        summary["stream"] = audio_state["stream"]
+        summary["renegotiation"] = renegotiation_state
     elif args.scenario_id == "server-initiated-protocol-baseline-v1":
         collector = ProtocolEvidenceCollector()
         connection = captured_connection[0]
