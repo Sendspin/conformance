@@ -124,6 +124,8 @@ function interleaveSamples(channelSamples) {
 class AdapterState {
   constructor() {
     this.peerHello = null;
+    this.lastTextFrame = null;
+    this.binaryFrameCount = 0;
     this.readyWritten = false;
     this.streamFormat = null;
     this.audioChunkCount = 0;
@@ -137,19 +139,36 @@ class AdapterState {
   }
 }
 
-function observeServerHello(webSocket, state) {
+function observeServerFrames(webSocket, state) {
   webSocket.addEventListener("message", (event) => {
-    if (typeof event.data !== "string") return;
+    if (typeof event.data !== "string") {
+      state.binaryFrameCount += 1;
+      return;
+    }
+    state.lastTextFrame = "an unparseable text frame";
     let parsed;
     try {
       parsed = JSON.parse(event.data);
     } catch {
       return;
     }
+    state.lastTextFrame =
+      typeof parsed?.type === "string" ? parsed.type : "an untyped text frame";
     if (parsed?.type === "server/hello") {
       state.peerHello = parsed;
     }
   });
+}
+
+// SendspinCore's handshake is text frames only and everything it accepts
+// afterwards is binary, so a socket that closed without a binary frame
+// never carried a session.
+function sessionFailure(state) {
+  if (state.binaryFrameCount > 0) return null;
+  if (state.lastTextFrame === null) {
+    return "Transport closed while awaiting server/init: the server sent nothing";
+  }
+  return `Transport closed after ${state.lastTextFrame} without any binary frame from the server`;
 }
 
 function buildCore({ args, webSocket, state }) {
@@ -307,7 +326,7 @@ async function runClientInitiated(args, state, timeoutSeconds) {
     timeoutSeconds,
   );
   const webSocket = new WsWebSocket(serverUrl);
-  observeServerHello(webSocket, state);
+  observeServerFrames(webSocket, state);
   const core = buildCore({ args, webSocket, state });
   await core.connect();
   try {
@@ -333,7 +352,7 @@ async function runServerInitiated(args, state, timeoutSeconds) {
     registerEndpoint(args.registry, args["client-name"], url);
     ensureReadyWritten(args, state, { url });
     const webSocket = await waitForConnection(wss, timeoutSeconds);
-    observeServerHello(webSocket, state);
+    observeServerFrames(webSocket, state);
     const core = buildCore({ args, webSocket, state });
     await core.connect();
     try {
@@ -362,6 +381,10 @@ async function main() {
       await runClientInitiated(args, state, timeoutSeconds);
     } else {
       await runServerInitiated(args, state, timeoutSeconds);
+    }
+    const failure = sessionFailure(state);
+    if (failure !== null) {
+      throw new Error(failure);
     }
     const summary = buildSuccessSummary(args, state);
     writeJson(args.summary, summary);
