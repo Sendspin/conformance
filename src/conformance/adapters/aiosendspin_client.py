@@ -85,20 +85,13 @@ def _supported_formats(preferred_codec: str, *, scenario_id: str = "") -> list[A
     if codec is None:
         raise ValueError(f"Unsupported preferred codec: {preferred_codec}")
     if preferred_codec == "opus":
-        return [
-            SupportedAudioFormat(
-                codec=codec,
-                channels=1,
-                sample_rate=48_000,
-                bit_depth=16,
-            ),
-            SupportedAudioFormat(
-                codec=codec,
-                channels=2,
-                sample_rate=48_000,
-                bit_depth=16,
-            ),
-        ]
+        # The registry marks this client `supports_opus=False`, so the runner
+        # fail-fasts the opus case before the adapter is launched.
+        raise ValueError(
+            "aiosendspin decodes PCM and FLAC only, so an opus-only list is "
+            "entirely undecodable and it cannot advertise opus alongside the pcm "
+            "or flac entry roles/player/v1.md requires"
+        )
     if scenario_id == "server-initiated-pcm-24bit":
         # Match the fixture's native rate/channels so the SDK does not resample
         # during the round trip; only the bit depth changes, which preserves
@@ -315,6 +308,7 @@ async def _run(args: argparse.Namespace) -> int:
     scenario_roles: list[Any]
     artwork_channels: list[Any] | None = None
     player_support: Any | None = None
+    state_supported_commands: list[Any] | None = None
 
     if args.scenario_id in {
         "client-initiated-pcm",
@@ -325,13 +319,18 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-legacy-unencrypted",
         "server-initiated-protocol-baseline-v1",
     }:
-        player_support = ClientHelloPlayerSupport(
-            supported_formats=_supported_formats(
-                args.preferred_codec, scenario_id=args.scenario_id
-            ),
-            buffer_capacity=2_000_000,
-            supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
-        )
+        try:
+            player_support = ClientHelloPlayerSupport(
+                supported_formats=_supported_formats(
+                    args.preferred_codec, scenario_id=args.scenario_id
+                ),
+                buffer_capacity=2_000_000,
+            )
+        except ValueError as err:
+            write_json(ready_path, {"status": "error"})
+            write_json(summary_path, {"status": "error", "reason": str(err)})
+            return 1
+        state_supported_commands = [PlayerCommand.VOLUME, PlayerCommand.MUTE]
         scenario_roles = [Roles.PLAYER]
     elif args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}:
         scenario_roles = [Roles.METADATA]
@@ -369,6 +368,7 @@ async def _run(args: argparse.Namespace) -> int:
         pairing_store=pairing_store,
         player_support=player_support,
         artwork_channels=artwork_channels,
+        state_supported_commands=state_supported_commands,
     )
 
     client.add_stream_start_listener(on_stream_start)
