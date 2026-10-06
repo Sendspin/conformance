@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw
 
 from conformance.adapters._aiosendspin_protocol_evidence import (
     ProtocolEvidenceCollector,
+    SentActivationRecorder,
     record_activation_evidence_server,
     record_handshake_evidence_server,
     record_player_stream_evidence,
@@ -301,6 +302,7 @@ def _base_summary(
     server_id: str,
     discovery_method: str,
     client: Any,
+    activation: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "status": "ok",
@@ -316,6 +318,7 @@ def _base_summary(
             "type": "client/hello",
             "payload": client.info.to_dict(),
         },
+        "activation": activation,
         "client": _client_snapshot(client),
     }
 
@@ -796,6 +799,7 @@ async def _run(args: argparse.Namespace) -> int:
         allow_noncompliant_clients=args.scenario_id != "server-initiated-protocol-baseline-v1",
     )
     server_id = server.id
+    sent_activations = SentActivationRecorder()
 
     try:
         await server.start_server(
@@ -841,6 +845,11 @@ async def _run(args: argparse.Namespace) -> int:
             )
             handshake_end_ts = time.time()
 
+        # Every scenario ends by disconnecting the client, which detaches its connection.
+        connection = client.connection
+        if connection is None:
+            raise RuntimeError("Client has no active connection to read the server/activate from")
+
         payload = await _scenario_payload(
             args,
             server=server,
@@ -848,7 +857,13 @@ async def _run(args: argparse.Namespace) -> int:
             handshake_timestamps=(handshake_start_ts, handshake_end_ts),
         )
         summary = {
-            **_base_summary(args, server_id=server_id, discovery_method=discovery_method, client=client),
+            **_base_summary(
+                args,
+                server_id=server_id,
+                discovery_method=discovery_method,
+                client=client,
+                activation=sent_activations.initial_activation(connection),
+            ),
             **payload,
         }
         write_json(summary_path, summary)

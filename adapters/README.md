@@ -18,6 +18,13 @@ Current checked-in adapters:
 
 Current placeholders in the matrix are modeled in `src/conformance/implementations.py` and fail immediately with a summary explaining why the role is unavailable for a scenario.
 
+## Initial activation
+
+Every server adapter MUST report an `activation` field in its summary: the first
+`server/activate` it sent, as it went on the wire, in the same `{"type": ..., "payload": ...}`
+shape as `peer_hello`. Report `null` only when the server sent none. Never reconstruct it
+from adapter arguments or SDK state.
+
 ## Protocol evidence contract
 
 Protocol scenarios are authoritative conformance tests, not audio-rendering tests. For

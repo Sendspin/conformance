@@ -302,6 +302,7 @@ func runSession(
 		"preferred_codec":  parsed.PreferredCodec,
 		"discovery_method": discoveryMethod,
 		"peer_hello":       rawPeerHello,
+		"activation":       nil, // server/hello above carries active_roles; no server/activate is ever sent
 		"client": map[string]any{
 			"client_id":       hello.ClientID,
 			"name":            hello.Name,
