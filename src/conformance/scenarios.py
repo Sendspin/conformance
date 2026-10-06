@@ -66,13 +66,16 @@ SERVER_INITIATED_FLAC = ScenarioSpec(
         "from almost_silent.flac, the client advertises a listener and FLAC as its only "
         "supported audio format, the server connects in, uses the SDK to encode the PCM "
         "into FLAC, streams it to the client, and the matrix compares the transported "
-        "FLAC header and chunk bytes as received by the client."
+        "FLAC header and chunk bytes as received by the client. Where the client reports "
+        "the audio it decoded and the stream kept the source's sample rate and channel "
+        "count, the matrix also compares its canonical PCM hash against the source clip, "
+        "so a stream that arrived intact but incomplete fails."
     ),
     initiator_role="server",
     preferred_codec="flac",
     required_role_families=("player",),
     verification_mode="audio-encoded-bytes",
-    scenario_revision=1,
+    scenario_revision=2,
 )
 
 
