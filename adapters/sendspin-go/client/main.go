@@ -197,7 +197,6 @@ func runOutboundProtocolClient(parsed args, serverURL string) int {
 	if err != nil {
 		return exitWithSummary(parsed, errorSummary(parsed, err.Error(), nil, nil))
 	}
-	peerHello := outboundPeerHello(parsed)
 
 	client := protocol.NewClient(buildProtocolClientConfig(parsed, serverAddr))
 	if err := client.Connect(); err != nil {
@@ -205,8 +204,11 @@ func runOutboundProtocolClient(parsed args, serverURL string) int {
 	}
 	defer client.Close()
 
+	serverHello := client.ServerHello()
+	rawPeerHello := decodeRawJSON(client.RawServerHello())
+
 	if err := client.SendTimeSync(conformance.CurrentMicros()); err != nil {
-		return exitWithSummary(parsed, errorSummary(parsed, fmt.Sprintf("failed to send client/time: %v", err), nil, nil))
+		return exitWithSummary(parsed, errorSummary(parsed, fmt.Sprintf("failed to send client/time: %v", err), rawPeerHello, serverHelloPayload(serverHello)))
 	}
 
 	var currentPlayer *protocol.StreamStartPlayer
@@ -221,15 +223,15 @@ func runOutboundProtocolClient(parsed args, serverURL string) int {
 			currentPlayer = start.Player
 		case chunk := <-client.AudioChunks:
 			if currentPlayer == nil {
-				return exitWithSummary(parsed, errorSummary(parsed, "received audio before stream/start", serverHelloPayload(peerHello), serverHelloPayload(peerHello)))
+				return exitWithSummary(parsed, errorSummary(parsed, "received audio before stream/start", rawPeerHello, serverHelloPayload(serverHello)))
 			}
 			_, _ = encodedHasher.Write(chunk.Data)
 			if strings.EqualFold(currentPlayer.Codec, "pcm") {
 				if err := pcmHasher.UpdateFromPCMBytes(chunk.Data, currentPlayer.BitDepth); err != nil {
-					return exitWithSummary(parsed, errorSummary(parsed, err.Error(), serverHelloPayload(peerHello), serverHelloPayload(peerHello)))
+					return exitWithSummary(parsed, errorSummary(parsed, err.Error(), rawPeerHello, serverHelloPayload(serverHello)))
 				}
 			} else if !strings.EqualFold(currentPlayer.Codec, "flac") {
-				return exitWithSummary(parsed, errorSummary(parsed, fmt.Sprintf("unsupported audio codec %q", currentPlayer.Codec), serverHelloPayload(peerHello), serverHelloPayload(peerHello)))
+				return exitWithSummary(parsed, errorSummary(parsed, fmt.Sprintf("unsupported audio codec %q", currentPlayer.Codec), rawPeerHello, serverHelloPayload(serverHello)))
 			}
 			audioChunkCount++
 		case <-client.ServerState:
@@ -237,7 +239,7 @@ func runOutboundProtocolClient(parsed args, serverURL string) int {
 		case <-client.StreamEnd:
 		case <-client.Done():
 			if audioChunkCount == 0 {
-				return exitWithSummary(parsed, errorSummary(parsed, "client received zero audio chunks", serverHelloPayload(peerHello), serverHelloPayload(peerHello)))
+				return exitWithSummary(parsed, errorSummary(parsed, "client received zero audio chunks", rawPeerHello, serverHelloPayload(serverHello)))
 			}
 			return exitWithSummary(parsed, map[string]any{
 				"status":          "ok",
@@ -248,8 +250,8 @@ func runOutboundProtocolClient(parsed args, serverURL string) int {
 				"preferred_codec": parsed.PreferredCodec,
 				"client_name":     parsed.ClientName,
 				"client_id":       parsed.ClientID,
-				"peer_hello":      serverHelloPayload(peerHello),
-				"server":          serverHelloPayload(peerHello),
+				"peer_hello":      rawPeerHello,
+				"server":          serverHelloPayload(serverHello),
 				"stream":          normalizeStreamStart(currentPlayer),
 				"audio": map[string]any{
 					"audio_chunk_count":       audioChunkCount,
@@ -259,7 +261,7 @@ func runOutboundProtocolClient(parsed args, serverURL string) int {
 				},
 			})
 		case <-timeout:
-			return exitWithSummary(parsed, errorSummary(parsed, fmt.Sprintf("timed out waiting for server disconnect in %s", parsed.ScenarioID), serverHelloPayload(peerHello), serverHelloPayload(peerHello)))
+			return exitWithSummary(parsed, errorSummary(parsed, fmt.Sprintf("timed out waiting for server disconnect in %s", parsed.ScenarioID), rawPeerHello, serverHelloPayload(serverHello)))
 		}
 	}
 }
@@ -499,16 +501,6 @@ func protocolServerAddr(serverURL string) (string, error) {
 		return "", fmt.Errorf("registry endpoint %q did not include a host", serverURL)
 	}
 	return parsed.Host, nil
-}
-
-func outboundPeerHello(parsed args) *protocol.ServerHello {
-	return &protocol.ServerHello{
-		ServerID:         parsed.ServerID,
-		Name:             parsed.ServerName,
-		Version:          1,
-		ActiveRoles:      []string{"player@v1"},
-		ConnectionReason: "playback",
-	}
 }
 
 func playerFormats(preferredCodec string) []protocol.AudioFormat {
