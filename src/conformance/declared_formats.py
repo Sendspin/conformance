@@ -6,10 +6,12 @@ those declarations to the formats the matrix really negotiated, so an untested
 claim is visible as such instead of hiding behind a green case.
 
 The join is mostly observational: it reports what a client claimed and what the
-wire carried. The one verdict drawn from it is `undeclared_format_violation`,
-which asserts the spec MUST that a negotiated format be one the client listed.
-It still says nothing about whether a scenario got the format it set out to
-test, which is not recorded in machine-readable form anywhere yet.
+wire carried. Two verdicts are drawn from it. `undeclared_format_violation`
+asserts the spec MUST that a negotiated format be one the client listed, and
+applies to every case. `format_priority_violation` asserts that the server
+picked the first entry of a list offering it a choice, and applies only to a
+scenario built around that choice. Whether any other scenario got the format it
+set out to test is not recorded in machine-readable form anywhere yet.
 """
 
 from __future__ import annotations
@@ -25,6 +27,9 @@ from .models import AUDIO_FORMAT_FIELDS
 SCHEMA_VERSION = 1
 
 PLAYER_SUPPORT_KEY = "player@v1_support"
+
+# The codecs every server supports, one of which every player has to list.
+MANDATORY_CODECS = ("flac", "pcm")
 
 FormatKey = tuple[Any, ...]
 
@@ -138,6 +143,70 @@ def undeclared_format_violation(
     )
     offered = ", ".join(format_label(audio_format) for audio_format in declared)
     return f"Negotiated format not declared by the client: {observed}; declared: {offered}"
+
+
+def format_priority_violation(
+    server_summary: dict[str, Any],
+    *,
+    preferred_codec: str,
+) -> str | None:
+    """Return why the case did not show the server honouring the client's priority, or None.
+
+    For a scenario whose client lists `preferred_codec` first with a pcm or flac
+    entry behind it. Two things are judged:
+
+    - The stimulus. The declared list has to lead with `preferred_codec` and
+      carry a pcm or flac entry, which the spec requires of every player. A list
+      of one has no priority for the server to honour, and a list without the
+      mandatory entry is a `client/hello` no conformant client sends.
+    - The selection. The spec says a server SHOULD pick the highest-priority
+      entry it can produce, and only servers that can produce `preferred_codec`
+      reach such a scenario, so a server that streamed one of the lower entries
+      did not honour the priority. The spec ranks a `format` the player prefers
+      in `client/state` above the list order; no client adapter sets one in a
+      scenario that applies this rule, so the list order is what decides.
+
+    Unlike `undeclared_format_violation`, a declaration this harness cannot read
+    is reported rather than skipped: the declared list is the stimulus here, so
+    without it the case has not been shown to test anything. A missing server
+    stream, or one in a codec the client never listed, is left to the checks
+    that already name those.
+    """
+    declared, unreadable = _declared_formats(server_summary)
+    if unreadable:
+        return (
+            "Client's supported_formats carries an entry that cannot be read as an audio "
+            "format, so the declared priority cannot be checked"
+        )
+    if not declared:
+        return (
+            "The server summary records no supported_formats from client/hello, so the "
+            "declared priority cannot be checked"
+        )
+
+    codec_label = preferred_codec.upper()
+    offered = ", ".join(format_label(audio_format) for audio_format in declared)
+    codecs = [audio_format["codec"] for audio_format in declared]
+    if codecs[0] != preferred_codec:
+        return (
+            f"Client did not list {codec_label} first, so the case cannot test its "
+            f"priority; declared: {offered}"
+        )
+    if not any(codec in MANDATORY_CODECS for codec in codecs):
+        return (
+            "Client listed no flac or pcm entry, which roles/player/v1.md requires of "
+            f"every player; declared: {offered}"
+        )
+
+    stream = normalized_format(server_summary.get("stream"))
+    if stream is not None and stream["codec"] != preferred_codec and stream["codec"] in codecs:
+        return (
+            f"Server selected {format_label(stream)} although the client listed "
+            f"{codec_label} first; a server that can produce {codec_label} is expected to "
+            "honour supported_formats priority (roles/player/v1.md, SHOULD); "
+            f"declared: {offered}"
+        )
+    return None
 
 
 def _declared_formats(

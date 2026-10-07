@@ -72,6 +72,19 @@ def _client_summary(codec: str = "flac", **audio_overrides: Any) -> dict[str, An
     }
 
 
+def _opus_server_summary() -> dict[str, Any]:
+    """Return a server summary carrying the declared list the opus scenario also reads."""
+    return {
+        **_server_summary("opus"),
+        "peer_hello": {
+            "type": "client/hello",
+            "payload": {
+                "player@v1_support": {"supported_formats": [_stream("opus"), _stream("pcm")]}
+            },
+        },
+    }
+
+
 def _compare_flac(
     server_summary: dict[str, Any],
     client_summary: dict[str, Any],
@@ -199,7 +212,7 @@ class UnjudgedDecodedAudioTests(unittest.TestCase):
         """Opus is lossy, so even a client that decodes it cannot match the source."""
         matches, reason = _compare_summaries(
             require_scenario("server-initiated-opus"),
-            _server_summary("opus"),
+            _opus_server_summary(),
             _client_summary("opus", received_pcm_sha256=OTHER_HASH),
         )
         self.assertTrue(matches)
@@ -215,8 +228,11 @@ class UnjudgedDecodedAudioTests(unittest.TestCase):
                 continue
             with self.subTest(scenario=scenario.id):
                 codec = scenario.preferred_codec
+                server_summary = (
+                    _opus_server_summary() if codec == "opus" else _server_summary(codec)
+                )
                 matches, reason = _compare_summaries(
-                    scenario, _server_summary(codec), _client_summary(codec)
+                    scenario, server_summary, _client_summary(codec)
                 )
                 self.assertTrue(matches)
                 self.assertIn("decoded audio", reason)

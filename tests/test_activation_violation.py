@@ -18,6 +18,9 @@ from conformance.scenarios import require_scenario
 
 PCM_HASH = "a" * 64
 
+OPUS = {"codec": "opus", "sample_rate": 8000, "bit_depth": 16, "channels": 1}
+PCM = {"codec": "pcm", "sample_rate": 8000, "bit_depth": 16, "channels": 1}
+
 
 def _activate(**payload: Any) -> dict[str, Any]:
     return {"type": "server/activate", "payload": payload}
@@ -214,6 +217,45 @@ class CaseVerdictTest(unittest.TestCase):
 
         self.assertFalse(matches)
         self.assertEqual(reason, "Server adapter reported: handshake failed")
+
+
+class FormatPriorityPrecedenceTest(unittest.TestCase):
+    """Neither verdict the opus scenario carries may mask the other."""
+
+    scenario = require_scenario("server-initiated-opus")
+
+    def _verdict(self, declared: list[dict[str, Any]]) -> tuple[bool, str]:
+        encoded = {"sent_audio_chunk_count": 4, "sent_encoded_sha256": "b" * 64}
+        return _compare_summaries(
+            self.scenario,
+            {
+                "status": "ok",
+                "activation": None,
+                "peer_hello": {
+                    "type": "client/hello",
+                    "payload": {"player@v1_support": {"supported_formats": declared}},
+                },
+                "stream": OPUS,
+                "audio": encoded,
+            },
+            {
+                "status": "ok",
+                "stream": OPUS,
+                "audio": {"audio_chunk_count": 4, "received_encoded_sha256": "b" * 64},
+            },
+        )
+
+    def test_a_bad_format_priority_keeps_its_own_reason(self) -> None:
+        matches, reason = self._verdict([PCM, OPUS])
+
+        self.assertFalse(matches)
+        self.assertIn("did not list OPUS first", reason)
+
+    def test_a_sound_format_priority_leaves_the_activation_reason(self) -> None:
+        matches, reason = self._verdict([OPUS, PCM])
+
+        self.assertFalse(matches)
+        self.assertIn("Server sent no initial server/activate", reason)
 
 
 if __name__ == "__main__":
