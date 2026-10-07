@@ -20,6 +20,11 @@ jobs:
   publish-report:
     if: github.repository == 'sendspin/conformance'
     runs-on: macos-26
+    # Only the newest run for a ref is worth finishing. The group is scoped to this
+    # job so that a run which has reached deploy-pages can no longer be cancelled.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
     outputs:
       site_built: ${{ steps.check_site.outputs.site_built }}
       has_regressions: ${{ steps.regressions.outputs.has_regressions }}
@@ -151,6 +156,11 @@ jobs:
     needs: publish-report
     if: github.repository == 'sendspin/conformance' && github.event_name != 'pull_request' && needs.publish-report.outputs.site_built == 'true'
     runs-on: ubuntu-latest
+    # An in-flight deployment is never cancelled. A pending one gives way to a
+    # newer deployment, because only the newest report matters.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
