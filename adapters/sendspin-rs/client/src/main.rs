@@ -677,6 +677,8 @@ where
                                             command: command_type,
                                             volume: None,
                                             mute: None,
+                                            position_ms: None,
+                                            offset_ms: None,
                                         }),
                                     });
                                     let command_json = serde_json::to_string(&command)
