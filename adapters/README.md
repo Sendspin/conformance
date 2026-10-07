@@ -32,6 +32,23 @@ it omits `active_roles`. Which activity sets and roles the matched PSK allows is
 because no summary records which PSK matched. A summary with no `activation` field at all
 is not judged, so omitting the field hides a server from this verdict rather than passing it.
 
+## Group updates
+
+Every server adapter MUST report a `group_updates` field in its summary: every
+`group/update` it sent after its first `server/activate` on the connection, in order, each
+as it went on the wire, in the same `{"type": ..., "payload": ...}` shape. Report an empty
+list only when none followed, which includes a server that sent no `server/activate` for
+one to follow. Never reconstruct an entry from adapter arguments or SDK state.
+
+The matrix draws a verdict from this field on every case: a case fails when the list is
+empty, or when in any entry `playback_state` is not `playing` or `stopped`, or `group_id`
+or `group_name` is missing or not a string. How soon the first message followed the
+`server/activate` is not judged: the spec says "promptly" and gives no bound, so one sent
+at any point in the case counts. Whether a change to a field produced a further message is
+not judged either. A summary with no `group_updates` list fails the case as a harness gap,
+so an adapter that cannot observe the messages cannot pass by staying silent. A server
+whose `activation` is `null` is left to that verdict.
+
 ## Availability trace
 
 Every server adapter MUST report an `availability_trace` field in its summary: each

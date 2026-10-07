@@ -2,9 +2,10 @@
 
 Wraps the aiosendspin SDK's connection objects from outside (no SDK changes)
 to populate ``summary["protocol"]`` per the contract in
-:mod:`conformance.protocol`, and ``summary["activation"]`` with the initial
-``server/activate``. This is deliberately a monkey-patch: aiosendspin
-does not yet expose a first-class tracing hook (tracked in
+:mod:`conformance.protocol`, ``summary["activation"]`` with the initial
+``server/activate``, and ``summary["group_updates"]`` with every
+``group/update`` that followed it. This is deliberately a monkey-patch:
+aiosendspin does not yet expose a first-class tracing hook (tracked in
 https://github.com/Sendspin/conformance/issues/111), so this module reaches
 into private/semi-public attributes and is expected to need maintenance as
 the SDK evolves.
@@ -32,19 +33,21 @@ Evidence fidelity by assertion:
   well after handshake/activation and are stable public/semi-public hooks.
 - Initial ``server/activate``: full fidelity. The SDK sends it during
   connection bring-up, before the adapter holds the connection, so
-  :class:`SentActivationRecorder` wraps ``EncryptedWebSocket.send_str`` at
+  :class:`ControlMessageRecorder` wraps ``EncryptedWebSocket.send_str`` at
   class level and keeps the JSON body handed to the encrypting transport.
+- Every ``group/update`` after that ``server/activate``: full fidelity, from
+  the same wrapper, which is what orders them.
+- ``client/state`` received and ``stream/start`` sent, in order: full fidelity
+  on an encrypted connection, from the same recorder, which also wraps
+  ``EncryptedWebSocket.receive``. The SDK applies a ``client/state`` and sends
+  a ``stream/start`` from its own loops, and its parser rewrites a legacy
+  ``state`` into ``available``, so only the transport shows what arrived and
+  when. An unencrypted legacy connection bypasses that transport and is not
+  observed.
 - First metadata-carrying ``server/state``: full fidelity, and timed.
   :class:`SentMetadataStateRecorder` wraps the same transport method, because
   the timestamp requirement on that state needs a clock reading taken once the
   frame is really on the wire, which the enqueueing send path cannot give.
-- ``client/state`` received and ``stream/start`` sent, in order: full fidelity
-  on an encrypted connection. The SDK applies a ``client/state`` and sends a
-  ``stream/start`` from its own loops, and its parser rewrites a legacy ``state``
-  into ``available``, so only the transport shows what arrived and when.
-  :class:`AvailabilityTraceRecorder` wraps ``EncryptedWebSocket.receive`` and
-  ``EncryptedWebSocket.send_str``. An unencrypted legacy connection bypasses
-  that transport and is not observed.
 - Binary frames as transported: full fidelity on an encrypted connection.
   The SDK builds the audio chunk header in its send-queue drain and strips it
   before any listener runs, so the header exists nowhere an adapter can reach
@@ -63,6 +66,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from conformance.protocol import SPEC_REVISION
+
+_RECORDED_SENT_TYPES = ("server/activate", "group/update", "stream/start")
 
 
 @dataclass
@@ -108,34 +113,88 @@ class ProtocolEvidenceCollector:
         }
 
 
-class SentActivationRecorder:
+class ControlMessageRecorder:
     """
-    Records the first ``server/activate`` sent on each encrypted connection.
+    Records the control messages the matrix judges on every connection, as transported.
 
-    Recording starts on construction and covers every connection the process
-    opens afterwards, so construct it before the server starts accepting
-    clients. Call :meth:`uninstall` to stop recording.
+    That is the first ``server/activate`` sent, every ``group/update`` sent
+    after it, and each ``client/state`` received and ``stream/start`` sent in
+    the order they crossed the transport. One recorder keeps all of them, so
+    each verdict drawn from them reads the same view of the connection.
+
+    Recording starts on construction and covers every encrypted connection the
+    process opens afterwards, so construct it before the server starts
+    accepting clients. Call :meth:`uninstall` to stop recording.
     """
 
     def __init__(self) -> None:
+        from aiohttp import WSMsgType
         from aiosendspin.noise.wire import EncryptedWebSocket
 
         self._transport_class = EncryptedWebSocket
         self._original_send_str = EncryptedWebSocket.send_str
+        self._original_receive = EncryptedWebSocket.receive
         self._first_by_socket: dict[Any, dict[str, Any]] = {}
+        self._group_updates_by_socket: dict[Any, list[dict[str, Any]]] = {}
+        self._availability_by_socket: dict[Any, list[dict[str, Any]]] = {}
 
         async def send_str(transport: Any, data: str) -> None:
-            await self._original_send_str(transport, data)
             # Every JSON control body, including each server/time, passes through
-            # here, so only bodies naming the message type are parsed.
-            if '"server/activate"' not in data:
+            # here, so only bodies naming a recorded message type are parsed.
+            message = (
+                json.loads(data)
+                if any(f'"{name}"' in data for name in _RECORDED_SENT_TYPES)
+                else {}
+            )
+            # A pairing re-handshake swaps the transport but keeps the socket.
+            socket = transport._ws
+            if message.get("type") != "stream/start":
+                await self._original_send_str(transport, data)
+                if message.get("type") == "server/activate":
+                    self._first_by_socket.setdefault(socket, message)
+                elif message.get("type") == "group/update" and socket in self._first_by_socket:
+                    self._group_updates_by_socket.setdefault(socket, []).append(message)
                 return
-            message = json.loads(data)
-            if message.get("type") == "server/activate":
-                # A pairing re-handshake swaps the transport but keeps the socket.
-                self._first_by_socket.setdefault(transport._ws, message)
+            payload = message.get("payload")
+            entry = {
+                "type": "stream/start",
+                "roles": sorted(
+                    role
+                    for role, value in (payload if isinstance(payload, dict) else {}).items()
+                    if isinstance(value, dict)
+                ),
+            }
+            trace = self._availability_by_socket.setdefault(socket, [])
+            # A client/state arriving during the write cannot be placed on either
+            # side of it, so the frame is bracketed rather than given one position.
+            trace.append({**entry, "phase": "sending"})
+            await self._original_send_str(transport, data)
+            trace.append({**entry, "phase": "sent"})
+
+        async def receive(transport: Any) -> Any:
+            received = await self._original_receive(transport)
+            if received.type is not WSMsgType.TEXT:
+                return received
+            # Parsed whatever the text looks like: a client is free to write the
+            # type with its slash escaped, which no substring test finds.
+            try:
+                message = json.loads(received.data)
+            except (TypeError, ValueError):
+                return received
+            if isinstance(message, dict) and message.get("type") == "client/state":
+                payload = message.get("payload")
+                self._availability_by_socket.setdefault(transport._ws, []).append(
+                    {
+                        "type": "client/state",
+                        "available": payload.get("available")
+                        if isinstance(payload, dict)
+                        else None,
+                    }
+                )
+            return received
 
         EncryptedWebSocket.send_str = send_str  # type: ignore[method-assign]
+        EncryptedWebSocket.receive = receive  # type: ignore[method-assign]
 
     def initial_activation(self, connection: Any) -> dict[str, Any] | None:
         """
@@ -156,9 +215,45 @@ class SentActivationRecorder:
             )
         return message
 
+    def group_updates(self, connection: Any) -> list[dict[str, Any]]:
+        """
+        Return every ``group/update`` sent after the first ``server/activate``, in order.
+
+        Each is the ``{"type": ..., "payload": ...}`` body as sent on a
+        server-side ``SendspinConnection``. The list is empty when none had
+        been sent by the time of the call, which covers an unencrypted legacy
+        connection, where no ``server/activate`` precedes anything. A
+        ``group/update`` sent before the first ``server/activate`` is left out.
+        Both message types are seen by one wrapper, so
+        :meth:`initial_activation` raising is what shows these went unobserved.
+        """
+        socket = connection._wsock_server or connection._wsock_client
+        return list(self._group_updates_by_socket.get(socket, ()))
+
+    def availability_trace(self, connection: Any) -> list[dict[str, Any]] | None:
+        """
+        Return each ``client/state`` received and ``stream/start`` sent, oldest first.
+
+        Each entry is ``{"type": "client/state", "available": ...}``, carrying
+        ``available`` as it arrived on the wire, or
+        ``{"type": "stream/start", "phase": "sending" | "sent", "roles": [...]}``,
+        where ``roles`` names the role objects the ``stream/start`` carried.
+        A ``client/state`` is recorded as the transport hands it over, before
+        the SDK acts on it. A ``stream/start`` is recorded as ``sending`` before
+        the transport is given the frame and as ``sent`` once it is written, so
+        a send that raised leaves ``sending`` without a ``sent``.
+
+        Returns ``None`` for a server-side ``SendspinConnection`` neither
+        message was observed on, which covers an unencrypted legacy connection.
+        """
+        socket = connection._wsock_server or connection._wsock_client
+        trace = self._availability_by_socket.get(socket)
+        return None if trace is None else list(trace)
+
     def uninstall(self) -> None:
-        """Restore the SDK transport's own ``send_str``."""
+        """Restore the SDK transport's own ``send_str`` and ``receive``."""
         self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
+        self._transport_class.receive = self._original_receive  # type: ignore[method-assign]
 
 
 class SentMetadataStateRecorder:
@@ -166,7 +261,7 @@ class SentMetadataStateRecorder:
     Records the first ``server/state`` sent carrying a metadata object with a timestamp.
 
     Wraps ``EncryptedWebSocket.send_str`` for the same reason
-    :class:`SentActivationRecorder` does: these states leave on the SDK's own
+    :class:`ControlMessageRecorder` does: these states leave on the SDK's own
     queue drain rather than from the adapter, so no public hook fires once one
     is really on the wire. ``send_role_message`` only enqueues.
 
@@ -176,7 +271,7 @@ class SentMetadataStateRecorder:
     already past by the time the frame went out, and so blame a conformant
     server. A later reading can only make the check more permissive.
 
-    Installed alongside the activation recorder, the two wrappers nest. Each
+    Installed alongside the opening-messages recorder, the two wrappers nest. Each
     awaits the send it captured, so both still see every frame, and this one's
     reading only moves later, which is the safe direction.
 
@@ -230,108 +325,6 @@ class SentMetadataStateRecorder:
     def uninstall(self) -> None:
         """Restore the ``send_str`` this recorder wrapped."""
         self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
-
-
-class AvailabilityTraceRecorder:
-    """
-    Records each ``client/state`` received and ``stream/start`` sent, in order.
-
-    A ``client/state`` is recorded with the ``available`` it carried on the
-    wire, as soon as the transport hands it over and so before the SDK acts on
-    it. A ``stream/start`` is recorded twice, as ``sending`` before the
-    transport is given the frame and as ``sent`` once it has been written,
-    because a state arriving during the write cannot be placed on either side
-    of it. A send that raised leaves ``sending`` without a ``sent``.
-
-    Recording starts on construction and covers every connection the process
-    opens afterwards, so construct it before the server starts accepting
-    clients. Call :meth:`uninstall` to stop recording.
-    """
-
-    def __init__(self) -> None:
-        from aiohttp import WSMsgType
-        from aiosendspin.noise.wire import EncryptedWebSocket
-
-        self._transport_class = EncryptedWebSocket
-        self._original_send_str = EncryptedWebSocket.send_str
-        self._original_receive = EncryptedWebSocket.receive
-        self._trace_by_socket: dict[Any, list[dict[str, Any]]] = {}
-
-        def trace_for(transport: Any) -> list[dict[str, Any]]:
-            # A pairing re-handshake swaps the transport but keeps the socket.
-            return self._trace_by_socket.setdefault(transport._ws, [])
-
-        def message_of_type(data: Any, message_type: str) -> dict[str, Any] | None:
-            try:
-                message = json.loads(data)
-            except (TypeError, ValueError):
-                return None
-            if not isinstance(message, dict) or message.get("type") != message_type:
-                return None
-            return message
-
-        async def send_str(transport: Any, data: str) -> None:
-            # Every JSON control body, including each server/time, passes through
-            # here, so only bodies naming the message type are parsed.
-            message = (
-                message_of_type(data, "stream/start") if '"stream/start"' in data else None
-            )
-            if message is None:
-                await self._original_send_str(transport, data)
-                return
-            payload = message.get("payload")
-            entry = {
-                "type": "stream/start",
-                "roles": sorted(
-                    role
-                    for role, value in (payload if isinstance(payload, dict) else {}).items()
-                    if isinstance(value, dict)
-                ),
-            }
-            trace = trace_for(transport)
-            trace.append({**entry, "phase": "sending"})
-            await self._original_send_str(transport, data)
-            trace.append({**entry, "phase": "sent"})
-
-        async def receive(transport: Any) -> Any:
-            received = await self._original_receive(transport)
-            if received.type is WSMsgType.TEXT:
-                # Parsed whatever the text looks like: a client is free to write
-                # the type with its slash escaped, which no substring test finds.
-                message = message_of_type(received.data, "client/state")
-                if message is not None:
-                    payload = message.get("payload")
-                    trace_for(transport).append(
-                        {
-                            "type": "client/state",
-                            "available": payload.get("available")
-                            if isinstance(payload, dict)
-                            else None,
-                        }
-                    )
-            return received
-
-        EncryptedWebSocket.send_str = send_str  # type: ignore[method-assign]
-        EncryptedWebSocket.receive = receive  # type: ignore[method-assign]
-
-    def trace(self, connection: Any) -> list[dict[str, Any]] | None:
-        """
-        Return the trace of a server-side ``SendspinConnection``, oldest entry first.
-
-        Each entry is ``{"type": "client/state", "available": ...}`` or
-        ``{"type": "stream/start", "phase": "sending" | "sent", "roles": [...]}``,
-        where ``roles`` names the role objects the ``stream/start`` carried.
-        Returns ``None`` for a connection this recorder observed nothing on,
-        which covers an unencrypted legacy connection.
-        """
-        socket = connection._wsock_server or connection._wsock_client
-        trace = self._trace_by_socket.get(socket)
-        return None if trace is None else list(trace)
-
-    def uninstall(self) -> None:
-        """Restore the SDK transport's own ``send_str`` and ``receive``."""
-        self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
-        self._transport_class.receive = self._original_receive  # type: ignore[method-assign]
 
 
 # Spans the RC1 audio chunk header, so the prefix shows every header field. A

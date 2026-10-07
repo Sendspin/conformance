@@ -9,10 +9,18 @@ from typing import Any
 from .chunk_framing import HARNESS_GAP
 
 
+# The revision the protocol-baseline assertions below cite, and the one an
+# adapter's protocol evidence must name. It is not the revision the matrix is
+# audited against: that is the spec checkout each run records in
+# `repositories.json`, and the verdicts applied to every case, which say RC1,
+# are judged against that.
 SPEC_REVISION = "8c9577ea8719ad082d051ec13cc73ef15ed68948"
 
 # The activities RC1 defines. An implementation's own extensions are not in it.
 RC1_ACTIVITIES = frozenset({"pairing", "playback"})
+
+# The group playback states RC1 defines.
+RC1_PLAYBACK_STATES = ("playing", "stopped")
 
 
 @dataclass(frozen=True)
@@ -152,6 +160,81 @@ def activation_violation(server_summary: dict[str, Any]) -> str | None:
     if not defects:
         return None
     return f"Server's initial server/activate {'; '.join(defects)}"
+
+
+def group_update_violation(server_summary: dict[str, Any]) -> str | None:
+    """
+    Return how the server's `group/update` messages break RC1, or None.
+
+    RC1 has the server send a `group/update` after the first `server/activate`
+    on every connection, and has every `group/update` carry all three of its
+    fields, so this is judged on every case. It is asserted against the
+    messages as the server's adapter recorded them: that at least one followed
+    the first `server/activate`, and that in each one `playback_state` is
+    'playing' or 'stopped' and `group_id` and `group_name` are strings.
+
+    RC1 says the first follows "promptly" and gives no bound, so how long the
+    server took is not judged: one sent at any point in the case satisfies it.
+    Whether a change to one of the fields produced a further `group/update` is
+    not judged either.
+
+    None means every recorded `group/update` conforms, with one exception: a
+    server recorded as sending no `server/activate` gave the requirement
+    nothing to follow, and `activation_violation` already reports it.
+
+    A recorded empty list is a server defect: the adapter contract reserves it
+    for a server that sent none. So is a `group/update` with no payload
+    object. A summary with no `group_updates` list, or a list holding some
+    other message, is reported as a harness gap, naming the adapter rather
+    than the implementation.
+    """
+    if "activation" in server_summary and server_summary["activation"] is None:
+        return None
+    group_updates = server_summary.get("group_updates")
+    if not isinstance(group_updates, list):
+        return (
+            f"{HARNESS_GAP}the server adapter does not record the group/update messages "
+            "it sent after its first server/activate"
+        )
+    if not group_updates:
+        return (
+            "Server sent no group/update after its first server/activate; RC1 requires "
+            "the server to send one on every connection"
+        )
+    for index, group_update in enumerate(group_updates, start=1):
+        if not isinstance(group_update, dict) or group_update.get("type") != "group/update":
+            return (
+                f"{HARNESS_GAP}the server adapter recorded something other than a "
+                f"group/update among those sent: {json.dumps(group_update)}"
+            )
+        defects = _group_update_defects(group_update.get("payload"))
+        if defects:
+            return (
+                f"Server's group/update {index} of {len(group_updates)} after "
+                f"server/activate {'; '.join(defects)}"
+            )
+    return None
+
+
+def _group_update_defects(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["carried no payload object, so none of the fields RC1 requires"]
+    defects: list[str] = []
+    if "playback_state" not in payload:
+        defects.append("omitted playback_state, which RC1 requires")
+    elif payload["playback_state"] not in RC1_PLAYBACK_STATES:
+        defects.append(
+            f"declared playback_state {json.dumps(payload['playback_state'])}, where RC1 "
+            "requires 'playing' or 'stopped'"
+        )
+    for name in ("group_id", "group_name"):
+        if name not in payload:
+            defects.append(f"omitted {name}, which RC1 requires")
+        elif not isinstance(payload[name], str):
+            defects.append(
+                f"declared {name} {json.dumps(payload[name])}, where RC1 requires a string"
+            )
+    return defects
 
 
 _GATE_RULE = (

@@ -17,7 +17,7 @@ from unittest import mock
 
 from aiosendspin.noise.wire import EncryptedWebSocket
 
-from conformance.adapters._aiosendspin_protocol_evidence import SentActivationRecorder
+from conformance.adapters._aiosendspin_protocol_evidence import ControlMessageRecorder
 from conformance.site import _render_activation_section
 
 PLAYBACK_ACTIVATE = {
@@ -38,7 +38,7 @@ def _connection(socket: object, *, encrypted: bool = True) -> Any:
     return SimpleNamespace(_wsock_server=socket, _wsock_client=None, is_encrypted=encrypted)
 
 
-class SentActivationRecorderTests(unittest.IsolatedAsyncioTestCase):
+class ControlMessageRecorderTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.sent: list[str] = []
 
@@ -48,7 +48,7 @@ class SentActivationRecorderTests(unittest.IsolatedAsyncioTestCase):
         patcher = mock.patch.object(EncryptedWebSocket, "send_str", send_str)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.recorder = SentActivationRecorder()
+        self.recorder = ControlMessageRecorder()
         self.addCleanup(self.recorder.uninstall)
 
     async def test_reports_the_first_activate_exactly_as_sent(self) -> None:
@@ -147,6 +147,14 @@ class ActivationSectionTests(unittest.TestCase):
 
         self.assertIn("Recorded value", section)
         self.assertIn("&quot;garbled&quot;", section)
+
+    def test_shows_a_recording_of_another_message_whole(self) -> None:
+        recorded = {"type": "server/hello", "payload": PLAYBACK_ACTIVATE["payload"]}
+        section = _render_activation_section({"activation": recorded}, label="aiosendspin")
+
+        self.assertIn("Recorded value", section)
+        self.assertIn("server/hello", section)
+        self.assertNotIn(">activities<", section)
 
 
 if __name__ == "__main__":

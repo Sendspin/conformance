@@ -28,6 +28,13 @@ STREAM = {"codec": "pcm", "sample_rate": 8000, "bit_depth": 16, "channels": 1}
 BYTES_PER_MS = 16
 
 
+# Every server summary carries one, and a case whose summary lacks it never passes.
+GROUP_UPDATE = {
+    "type": "group/update",
+    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+}
+
+
 def _frame(
     duration_ms: int,
     *,
@@ -70,6 +77,7 @@ def _server_summary(
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "group_updates": [GROUP_UPDATE],
         "availability_trace": AVAILABILITY_TRACE,
         "stream": STREAM,
         "audio": {
@@ -428,8 +436,9 @@ class FrameEvidenceTest(unittest.TestCase):
 class ScenarioTest(unittest.TestCase):
     """The scenario is its own baseline key and its rule reaches no other scenario."""
 
-    def test_scenario_uses_its_own_verification_mode(self) -> None:
+    def test_scenario_is_at_revision_three(self) -> None:
         scenario = require_scenario(SCENARIO_ID)
+        self.assertEqual(scenario.scenario_revision, 3)
         self.assertEqual(scenario.verification_mode, "audio-chunk-framing")
         self.assertEqual(scenario.preferred_codec, "pcm")
 

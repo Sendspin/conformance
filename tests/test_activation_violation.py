@@ -28,6 +28,12 @@ def _activate(**payload: Any) -> dict[str, Any]:
 
 PLAYBACK_ACTIVATE = _activate(activities=["playback"], active_roles=["player@v1"])
 
+# Every server summary carries one, and a case whose summary lacks it never passes.
+GROUP_UPDATE = {
+    "type": "group/update",
+    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+}
+
 
 # What a server that held stream/start until the client reported available records.
 AVAILABILITY_TRACE = [
@@ -175,7 +181,12 @@ class CaseVerdictTest(unittest.TestCase):
     def _verdict(self, **server_extra: Any) -> tuple[bool, str]:
         return _compare_summaries(
             self.scenario,
-            _audio_summary("server", availability_trace=AVAILABILITY_TRACE, **server_extra),
+            _audio_summary(
+                "server",
+                group_updates=[GROUP_UPDATE],
+                availability_trace=AVAILABILITY_TRACE,
+                **server_extra,
+            ),
             _audio_summary("client"),
         )
 

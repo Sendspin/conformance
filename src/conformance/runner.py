@@ -31,6 +31,7 @@ from .paths import repo_root
 from .process import close_process_log, collect_process, wait_for_exit, wait_for_file
 from .protocol import (
     activation_violation,
+    group_update_violation,
     protocol_evidence_failure,
     stream_start_gate_violation,
 )
@@ -1187,6 +1188,12 @@ def _compare_summaries(
     # RC1 opens every connection with the server's initial server/activate,
     # whatever the scenario goes on to exercise, so this applies to all of them.
     violation = activation_violation(server_summary)
+    if violation is not None:
+        return False, violation
+    # RC1 also has the server send a group/update after that first
+    # server/activate on every connection, and constrains every one it sends,
+    # so this applies to all of them too.
+    violation = group_update_violation(server_summary)
     if violation is not None:
         return False, violation
     if _STREAMED_ROLE_FAMILIES.intersection(scenario.required_role_families):

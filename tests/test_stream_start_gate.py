@@ -18,7 +18,7 @@ from unittest import mock
 from aiohttp import WSMsgType
 from aiosendspin.noise.wire import EncryptedWebSocket
 
-from conformance.adapters._aiosendspin_protocol_evidence import AvailabilityTraceRecorder
+from conformance.adapters._aiosendspin_protocol_evidence import ControlMessageRecorder
 from conformance.chunk_framing import HARNESS_GAP
 from conformance.protocol import stream_start_gate_violation
 from conformance.runner import _compare_summaries
@@ -28,6 +28,11 @@ PCM_HASH = "a" * 64
 PLAYBACK_ACTIVATE = {
     "type": "server/activate",
     "payload": {"activities": ["playback"], "active_roles": ["player@v1"]},
+}
+
+GROUP_UPDATE = {
+    "type": "group/update",
+    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
 }
 
 NO_AVAILABLE = object()
@@ -165,7 +170,10 @@ class CaseVerdictTest(unittest.TestCase):
     def _verdict(self, scenario_id: str = "server-initiated-pcm", **server: Any) -> tuple[bool, str]:
         return _compare_summaries(
             require_scenario(scenario_id),
-            _audio_summary("server", **{"activation": PLAYBACK_ACTIVATE, **server}),
+            _audio_summary(
+                "server",
+                **{"activation": PLAYBACK_ACTIVATE, "group_updates": [GROUP_UPDATE], **server},
+            ),
             _audio_summary("client"),
         )
 
@@ -197,7 +205,9 @@ class CaseVerdictTest(unittest.TestCase):
     def test_only_scenarios_that_open_a_stream_are_judged(self) -> None:
         with mock.patch("conformance.runner._dispatch_comparison", return_value=(True, "ok")):
             verdicts = {
-                scenario.id: _compare_summaries(scenario, {"status": "ok"}, {"status": "ok"})
+                scenario.id: _compare_summaries(
+                    scenario, {"status": "ok", "group_updates": [GROUP_UPDATE]}, {"status": "ok"}
+                )
                 for scenario in SCENARIO_LIST
             }
 
@@ -223,14 +233,14 @@ def _message(message_type: str, **payload: Any) -> str:
     return json.dumps({"type": message_type, "payload": payload})
 
 
-class AvailabilityTraceRecorderTests(unittest.IsolatedAsyncioTestCase):
+class ControlMessageRecorderTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.incoming: list[Any] = []
-        self.recorder: AvailabilityTraceRecorder
+        self.recorder: ControlMessageRecorder
 
         async def send_str(transport: EncryptedWebSocket, _data: str) -> None:
             # What the recorder holds while the frame is still being written.
-            self.during_send = self.recorder.trace(_connection(transport._ws))
+            self.during_send = self.recorder.availability_trace(_connection(transport._ws))
 
         async def receive(_transport: EncryptedWebSocket) -> Any:
             return self.incoming.pop(0)
@@ -239,7 +249,7 @@ class AvailabilityTraceRecorderTests(unittest.IsolatedAsyncioTestCase):
             patcher = mock.patch.object(EncryptedWebSocket, name, stand_in)
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.recorder = AvailabilityTraceRecorder()
+        self.recorder = ControlMessageRecorder()
         self.addCleanup(self.recorder.uninstall)
 
     async def _receive(self, transport: EncryptedWebSocket, data: Any, kind: Any = WSMsgType.TEXT) -> Any:
@@ -254,8 +264,23 @@ class AvailabilityTraceRecorderTests(unittest.IsolatedAsyncioTestCase):
         await transport.send_str(_message("stream/start", server_transmitted=1, player={}))
 
         self.assertEqual(
-            self.recorder.trace(_connection(socket)),
+            self.recorder.availability_trace(_connection(socket)),
             [_state(False), _state(True), SENDING, SENT],
+        )
+
+    async def test_one_recorder_keeps_every_view_of_a_connection(self) -> None:
+        socket = object()
+        transport = _transport(socket)
+        await transport.send_str(json.dumps(PLAYBACK_ACTIVATE))
+        await transport.send_str(json.dumps(GROUP_UPDATE))
+        await self._receive(transport, _message("client/state", available=True))
+        await transport.send_str(_message("stream/start", player={}))
+
+        connection = _connection(socket)
+        self.assertEqual(self.recorder.initial_activation(connection), PLAYBACK_ACTIVATE)
+        self.assertEqual(self.recorder.group_updates(connection), [GROUP_UPDATE])
+        self.assertEqual(
+            self.recorder.availability_trace(connection), [_state(True), SENDING, SENT]
         )
 
     async def test_a_stream_start_is_marked_sending_until_it_is_written(self) -> None:
@@ -273,7 +298,7 @@ class AvailabilityTraceRecorderTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ConnectionResetError):
                 await _transport(socket).send_str(_message("stream/start", player={}))
 
-        self.assertEqual(self.recorder.trace(_connection(socket)), [SENDING])
+        self.assertEqual(self.recorder.availability_trace(_connection(socket)), [SENDING])
 
     async def test_records_available_as_it_arrived(self) -> None:
         socket = object()
@@ -281,7 +306,7 @@ class AvailabilityTraceRecorderTests(unittest.IsolatedAsyncioTestCase):
         await self._receive(transport, _message("client/state", state="synchronized"))
         await self._receive(transport, _message("client/state", available="yes"))
 
-        self.assertEqual(self.recorder.trace(_connection(socket)), [_state(), _state("yes")])
+        self.assertEqual(self.recorder.availability_trace(_connection(socket)), [_state(), _state("yes")])
 
     async def test_records_a_state_whose_type_was_written_with_an_escaped_slash(self) -> None:
         socket = object()
@@ -289,7 +314,7 @@ class AvailabilityTraceRecorderTests(unittest.IsolatedAsyncioTestCase):
             _transport(socket), '{"type":"client\\/state","payload":{"available":true}}'
         )
 
-        self.assertEqual(self.recorder.trace(_connection(socket)), [_state(True)])
+        self.assertEqual(self.recorder.availability_trace(_connection(socket)), [_state(True)])
 
     async def test_other_messages_are_not_recorded(self) -> None:
         socket = object()
@@ -299,7 +324,7 @@ class AvailabilityTraceRecorderTests(unittest.IsolatedAsyncioTestCase):
         await self._receive(transport, "client/state, but not JSON")
         await transport.send_str(_message("server/state", note="stream/start"))
 
-        self.assertIsNone(self.recorder.trace(_connection(socket)))
+        self.assertIsNone(self.recorder.availability_trace(_connection(socket)))
 
     async def test_returns_what_the_transport_received(self) -> None:
         received = await self._receive(_transport(object()), _message("client/state"))
@@ -311,18 +336,18 @@ class AvailabilityTraceRecorderTests(unittest.IsolatedAsyncioTestCase):
         await self._receive(_transport(first), _message("client/state", available=True))
         await _transport(second).send_str(_message("stream/start", player={}))
 
-        self.assertEqual(self.recorder.trace(_connection(first)), [_state(True)])
-        self.assertEqual(self.recorder.trace(_connection(second)), [SENDING, SENT])
+        self.assertEqual(self.recorder.availability_trace(_connection(first)), [_state(True)])
+        self.assertEqual(self.recorder.availability_trace(_connection(second)), [SENDING, SENT])
 
     def test_a_connection_nothing_was_observed_on_reports_no_trace(self) -> None:
-        self.assertIsNone(self.recorder.trace(_connection(object())))
+        self.assertIsNone(self.recorder.availability_trace(_connection(object())))
 
     async def test_uninstall_stops_recording(self) -> None:
         socket = object()
         self.recorder.uninstall()
         await _transport(socket).send_str(_message("stream/start", player={}))
 
-        self.assertIsNone(self.recorder.trace(_connection(socket)))
+        self.assertIsNone(self.recorder.availability_trace(_connection(socket)))
 
 
 if __name__ == "__main__":
