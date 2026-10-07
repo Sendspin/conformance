@@ -402,10 +402,13 @@ static string? ReadRegistry(string path, string name)
 
 static ClientCapabilities BuildCapabilities(CliOptions options)
 {
+    // The 24-bit scenario offers 24-bit as its only depth, so the server has no
+    // 16-bit entry to stream and the SDK's 24-bit decode path is the one that runs.
+    var pcmBitDepth = options.ScenarioId == "server-initiated-pcm-24bit" ? 24 : 16;
     var audioFormats = options.PreferredCodec.Equals("pcm", StringComparison.OrdinalIgnoreCase)
         ? new List<AudioFormat>
         {
-            new() { Codec = "pcm", SampleRate = 8000, Channels = 1, BitDepth = 16 },
+            new() { Codec = "pcm", SampleRate = 8000, Channels = 1, BitDepth = pcmBitDepth },
         }
         : new List<AudioFormat>
         {
