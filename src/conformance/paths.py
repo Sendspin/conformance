@@ -31,13 +31,17 @@ def repo_override_path(dirname: str) -> Path | None:
     Return the checkout a CONFORMANCE_REPO_* override selects for a repository.
 
     Returns None when no override is set. Raises RepoOverrideError when the
-    override is not an absolute path or names a path that does not exist.
+    override cannot be expanded, is not an absolute path, or names a path that
+    does not exist.
     """
     key = env_repo_override_key(dirname)
     env_value = os.environ.get(key)
     if not env_value:
         return None
-    path = Path(env_value).expanduser()
+    try:
+        path = Path(env_value).expanduser()
+    except RuntimeError as err:
+        raise RepoOverrideError(f"{key}={env_value} names an unknown home directory") from err
     # Adapters run from the repository root, so a relative path would name a
     # different directory there than in the process that was started.
     if not path.is_absolute():

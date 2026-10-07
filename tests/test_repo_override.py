@@ -84,6 +84,15 @@ class RepoOverrideTests(unittest.TestCase):
         self.assertIn("CONFORMANCE_REPO_SPEC", str(raised.exception))
         self.assertIn(relative, str(raised.exception))
 
+    def test_an_override_under_an_unknown_user_fails_as_an_override(self) -> None:
+        value = "~no-such-conformance-user/spec"
+        os.environ["CONFORMANCE_REPO_SPEC"] = value
+        os.environ["CONFORMANCE_REPO_SENDSPIN_RS"] = str(self.missing)
+        with self.assertRaises(RepoOverrideError) as raised:
+            validate_repo_overrides()
+        self.assertIn(f"CONFORMANCE_REPO_SPEC={value}", str(raised.exception))
+        self.assertIn("CONFORMANCE_REPO_SENDSPIN_RS", str(raised.exception))
+
     def test_every_nonexistent_override_is_named_at_once(self) -> None:
         os.environ["CONFORMANCE_REPO_SPEC"] = str(self.missing)
         os.environ["CONFORMANCE_REPO_SENDSPIN_RS"] = str(self.root / "missing" / "rs")
