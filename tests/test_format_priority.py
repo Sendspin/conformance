@@ -46,6 +46,7 @@ def _server_summary(*, declared: Any, stream: dict[str, Any] | None) -> dict[str
         "implementation": "synthetic-server",
         "role": "server",
         "group_updates": [GROUP_UPDATE],
+        "time_exchange": [],
         "availability_trace": AVAILABILITY_TRACE,
         "peer_hello": {
             "type": "client/hello",

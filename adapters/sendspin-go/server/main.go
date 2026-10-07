@@ -90,20 +90,22 @@ type flacTransport struct {
 	SourcePcmSHA256  string
 }
 
-// availabilityTrace is the ordered record of the client/state messages received
-// and the stream/start messages sent, reported as the summary's availability_trace.
-type availabilityTrace struct {
+// messageTrace is an ordered record of messages received and sent. One holds the
+// client/state messages received and the stream/start messages sent, reported as
+// the summary's availability_trace, and another the client/time messages received
+// and the server/time messages sent, reported as its time_exchange.
+type messageTrace struct {
 	mu      sync.Mutex
 	entries []map[string]any
 }
 
-func (t *availabilityTrace) add(entry map[string]any) {
+func (t *messageTrace) add(entry map[string]any) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.entries = append(t.entries, entry)
 }
 
-func (t *availabilityTrace) snapshot() []map[string]any {
+func (t *messageTrace) snapshot() []map[string]any {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return append([]map[string]any{}, t.entries...)
@@ -309,8 +311,9 @@ func runSession(
 	readDone := make(chan struct{})
 	readErrCh := make(chan error, 1)
 	controllerCh := make(chan map[string]any, 1)
-	trace := &availabilityTrace{}
-	go readClientMessages(conn, sc, trace, controllerCh, readDone, readErrCh)
+	trace := &messageTrace{}
+	timeExchange := &messageTrace{}
+	go readClientMessages(conn, sc, trace, timeExchange, controllerCh, readDone, readErrCh)
 
 	baseSummary := map[string]any{
 		"status":           "ok",
@@ -335,6 +338,7 @@ func runSession(
 	// Read once the session is over, so the trace covers all of it.
 	finish := func(scenarioSummary map[string]any) map[string]any {
 		baseSummary["availability_trace"] = trace.snapshot()
+		baseSummary["time_exchange"] = timeExchange.snapshot()
 		return mergeMaps(baseSummary, scenarioSummary)
 	}
 
@@ -457,7 +461,7 @@ func runSession(
 func runPlayerScenario(
 	sc *protocol.ServerConn,
 	conn *websocket.Conn,
-	trace *availabilityTrace,
+	trace *messageTrace,
 	readDone <-chan struct{},
 	readErrCh <-chan error,
 	parsed args,
@@ -630,7 +634,7 @@ func runPlayerScenario(
 // client/state read before the frame went out must not be recorded after it.
 func sendStreamStart(
 	sc *protocol.ServerConn,
-	trace *availabilityTrace,
+	trace *messageTrace,
 	role string,
 	start protocol.StreamStart,
 ) (func(), error) {
@@ -647,7 +651,8 @@ func sendStreamStart(
 func readClientMessages(
 	conn *websocket.Conn,
 	sc *protocol.ServerConn,
-	trace *availabilityTrace,
+	trace *messageTrace,
+	timeExchange *messageTrace,
 	controllerCh chan<- map[string]any,
 	done chan<- struct{},
 	errCh chan<- error,
@@ -681,15 +686,22 @@ func readClientMessages(
 			_ = json.Unmarshal(envelope.Payload, &state)
 			trace.add(map[string]any{"type": "client/state", "available": state["available"]})
 		case "client/time":
+			// The payload as it arrived, before decoding can reject it.
+			timeExchange.add(map[string]any{"type": "client/time", "payload": envelope.Payload})
 			var clientTime protocol.ClientTime
 			if err := json.Unmarshal(envelope.Payload, &clientTime); err != nil {
 				continue
 			}
-			_ = sc.Send("server/time", protocol.ServerTime{
+			serverTime := protocol.ServerTime{
 				ClientTransmitted: clientTime.ClientTransmitted,
 				ServerReceived:    conformance.CurrentMicros(),
 				ServerTransmitted: conformance.CurrentMicros(),
-			})
+			}
+			// ServerConn.Send only enqueues and there is no hook for the write
+			// itself, so this records the reply as accepted for sending.
+			if err := sc.Send("server/time", serverTime); err == nil {
+				timeExchange.add(map[string]any{"type": "server/time", "payload": serverTime})
+			}
 		case "client/command":
 			var command clientCommandPayload
 			if err := json.Unmarshal(envelope.Payload, &command); err != nil {

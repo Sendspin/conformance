@@ -324,6 +324,7 @@ def _base_summary(
     activation: dict[str, Any] | None,
     group_updates: list[dict[str, Any]],
     availability_trace: list[dict[str, Any]] | None,
+    time_exchange: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     return {
         "status": "ok",
@@ -342,6 +343,7 @@ def _base_summary(
         "activation": activation,
         "group_updates": group_updates,
         "availability_trace": availability_trace,
+        "time_exchange": time_exchange,
         "client": _client_snapshot(client),
     }
 
@@ -1024,6 +1026,7 @@ async def _run(args: argparse.Namespace) -> int:
                 # case in which to send them.
                 group_updates=control_messages.group_updates(connection),
                 availability_trace=control_messages.availability_trace(connection),
+                time_exchange=control_messages.time_exchange(connection),
             ),
             **payload,
         }

@@ -47,6 +47,7 @@ def _server_summary(**overrides: Any) -> dict[str, Any]:
         "implementation": "synthetic-server",
         "role": "server",
         "group_updates": [GROUP_UPDATE],
+        "time_exchange": [],
         "availability_trace": AVAILABILITY_TRACE,
         "audio": {**audio, **overrides},
     }

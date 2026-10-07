@@ -55,6 +55,7 @@ def _server_summary(codec: str = "flac", **stream_overrides: Any) -> dict[str, A
         "implementation": "synthetic-server",
         "role": "server",
         "group_updates": [GROUP_UPDATE],
+        "time_exchange": [],
         "availability_trace": AVAILABILITY_TRACE,
         "stream": {
             **_stream(codec, **stream_overrides),

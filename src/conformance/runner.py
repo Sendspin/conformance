@@ -34,6 +34,7 @@ from .protocol import (
     group_update_violation,
     protocol_evidence_failure,
     stream_start_gate_violation,
+    time_exchange_violation,
 )
 from .scenarios import ordered_scenarios, require_scenario
 from .toolchains import find_cargo, find_cmake, find_dotnet, find_go, find_swift
@@ -1200,6 +1201,11 @@ def _compare_summaries(
         violation = stream_start_gate_violation(server_summary)
         if violation is not None:
             return False, violation
+    # Clock sync is core messaging, open to every connection whatever its roles,
+    # so this applies to all of them too.
+    violation = time_exchange_violation(server_summary)
+    if violation is not None:
+        return False, violation
     # Every format the case negotiated must be one the client declared. Modes
     # that negotiate no player stream leave the check with nothing to inspect,
     # so it applies to all of them rather than to a list of audio modes that a

@@ -185,6 +185,7 @@ class CaseVerdictTest(unittest.TestCase):
                 "server",
                 group_updates=[GROUP_UPDATE],
                 availability_trace=AVAILABILITY_TRACE,
+                time_exchange=[],
                 **server_extra,
             ),
             _audio_summary("client"),

@@ -179,6 +179,7 @@ class CaseVerdictTest(unittest.TestCase):
                 "server",
                 activation=ACTIVATE,
                 availability_trace=AVAILABILITY_TRACE,
+                time_exchange=[],
                 **server_extra,
             ),
             _audio_summary("client"),

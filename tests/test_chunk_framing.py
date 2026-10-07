@@ -78,6 +78,7 @@ def _server_summary(
         "implementation": "synthetic-server",
         "role": "server",
         "group_updates": [GROUP_UPDATE],
+        "time_exchange": [],
         "availability_trace": AVAILABILITY_TRACE,
         "stream": STREAM,
         "audio": {
@@ -436,9 +437,9 @@ class FrameEvidenceTest(unittest.TestCase):
 class ScenarioTest(unittest.TestCase):
     """The scenario is its own baseline key and its rule reaches no other scenario."""
 
-    def test_scenario_is_at_revision_three(self) -> None:
+    def test_scenario_is_at_revision_four(self) -> None:
         scenario = require_scenario(SCENARIO_ID)
-        self.assertEqual(scenario.scenario_revision, 3)
+        self.assertEqual(scenario.scenario_revision, 4)
         self.assertEqual(scenario.verification_mode, "audio-chunk-framing")
         self.assertEqual(scenario.preferred_codec, "pcm")
 
