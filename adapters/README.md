@@ -92,6 +92,60 @@ The wait a server owes a newly activated role, for the `client/state` carrying t
 role's object, is not judged: the trace records `available`, not which role objects each
 `client/state` carried.
 
+## Time exchange
+
+Every server adapter MUST report a `time_exchange` field in its summary: each
+`client/time` it received and each `server/time` it sent, in the order it observed them,
+each as it went on the wire, in the same `{"type": ..., "payload": ...}` shape.
+
+```json
+[
+  {"type": "client/time", "payload": {"client_transmitted": 1200}},
+  {"type": "server/time", "payload": {"client_transmitted": 1200, "server_received": 88, "server_transmitted": 91}}
+]
+```
+
+- Record a `client/time` when the message is read, with the payload as it arrived, before
+  the implementation decodes or acts on it.
+- Record a `server/time` once it has been written, and not at all when the write failed.
+  An adapter with no hook on the write records it once the implementation has accepted it
+  for sending.
+- Report an empty list when the client sent no `client/time`, and `null` when the adapter
+  cannot observe these messages. Never reconstruct an entry from adapter arguments or
+  SDK state.
+
+The matrix draws a verdict from this field on every case. A case fails when a
+`server/time` omits `client_transmitted`, `server_received` or `server_transmitted` or
+carries one that is not an integer, when its `client_transmitted` is not the value of a
+`client/time` the server had received and not yet answered, or when its `server_received`
+is later than its `server_transmitted`. The spec does not state that last rule: it follows
+from both being readings of the server's monotonic clock, taken in that order.
+
+A `client/time` left unanswered fails the case when the server answered one it received
+later, or answered none at all. Otherwise it is not judged: the spec gives no bound on the
+response, and a connection can close with a `client/time` still unread. Both halves are
+inferences, each with a case it names wrongly: a server whose only `client/time` arrived
+as the connection closed, and a server that answers out of order and was cut off between
+two replies. A server that stops answering partway through a case is not caught, because
+every `client/time` it ignored trails its last `server/time`.
+
+A `client/time` whose `client_transmitted` is not an integer fails the case naming the
+client. A case in which no `client/time` was sent gives the verdict nothing to judge. A
+`null`, absent or unreadable `time_exchange` fails the case as a harness gap.
+
+Not judged, each for want of evidence or of a rule:
+
+- The timestamp values, against wall-clock time or anything else. The spec says they are
+  "not necessarily based on epoch time".
+- Whether `server_transmitted` was stamped as late as the spec requires. That needs the
+  instant the frame left, which no summary carries.
+- Whether the client's time filter converged. That is client state no message reports.
+
+The sendspin-go server adapter answers `client/time` in its own code, so its
+`time_exchange` records a reply the adapter wrote, not one the sendspin-go library sent.
+It records that reply as the value it handed to the library's send queue, which has no
+hook on the write.
+
 ## Metadata scenario summary fields
 
 The spec requires the first `server/state` sent for a role on a connection to

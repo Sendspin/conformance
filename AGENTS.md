@@ -128,6 +128,7 @@ Important fields to preserve where available:
 - `peer_hello`
 - `activation` (server summaries)
 - `availability_trace` (server summaries)
+- `time_exchange` (server summaries)
 - `group_updates` (server summaries)
 - audio hash fields
 
@@ -146,6 +147,10 @@ Every recorded `group/update` is judged for its fields. The same spec sentence a
 `availability_trace` should contain each `client/state` the server received and each `stream/start` it sent, in the order the adapter observed them, as `adapters/README.md` specifies. It is `null` only when the adapter cannot observe that ordering, and is never reconstructed from what the implementation is expected to do.
 
 `null` or a missing field fails the case as a harness gap: `stream_start_gate_violation` in `src/conformance/protocol.py` judges this field on every scenario that opens a player or artwork stream.
+
+`time_exchange` should contain each `client/time` the server received and each `server/time` it sent, in the order the adapter observed them, each as it went on the wire and in the same `{type, payload}` shape, as `adapters/README.md` specifies. It is an empty list when the client sent no `client/time`, `null` only when the adapter cannot observe the messages, and is never reconstructed from adapter arguments or SDK state.
+
+`time_exchange_violation` in `src/conformance/protocol.py` judges this field on every case. `null` or a missing field fails the case as a harness gap, and an empty list gives it nothing to judge. It does not judge the timestamp values, how late `server_transmitted` was stamped, or whether the client's time filter converged, and `adapters/README.md` gives the reason for each.
 
 ### Audio fixture
 
@@ -193,9 +198,10 @@ costs more than the risk.
 Bumping `scenario_revision` on the one scenario that changed is the deliberate
 act that resets its baseline; every other scenario in the same run
 keeps full protection. A verdict applied to every case, such as
-`activation_violation` or `group_update_violation`, changes the assertions of
-every scenario and so bumps them all, which exempts the whole matrix for that
-one release. A verdict applied to some scenarios, such as
+`activation_violation`, `group_update_violation` or
+`time_exchange_violation`, changes the assertions of every scenario and so
+bumps them all, which exempts the whole matrix for that one release. A
+verdict applied to some scenarios, such as
 `stream_start_gate_violation`, bumps only those. Do not add a
 waiver file, allowlist or PR-label escape hatch — the baseline is live and
 remote, so any such list goes stale on the next merge.
