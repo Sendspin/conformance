@@ -121,6 +121,11 @@ struct CliOptions {
         scenarioID.contains("pcm") || scenarioID.contains("flac") || scenarioID.contains("opus")
             || scenarioID == "server-initiated-protocol-baseline-v1"
             || scenarioID == "server-initiated-legacy-unencrypted"
+            || isChunkFramingScenario
+    }
+
+    var isChunkFramingScenario: Bool {
+        scenarioID == "server-initiated-audio-chunk-framing"
     }
 
     var isFormatPreferenceScenario: Bool {
@@ -327,6 +332,7 @@ actor ConformanceCollector {
     // Audio (player scenarios)
     var pcmHasher = FloatPcmHasher()
     var encodedHasher = RawHasher()
+    var encodedByteCount: Int = 0
     var audioChunkCount: Int = 0
     var streamFormat: AudioFormatSpec?
     var initialStreamFormat: AudioFormatSpec?
@@ -399,6 +405,7 @@ actor ConformanceCollector {
         audioChunkCount += 1
         // Raw encoded bytes (FLAC/Opus verification) need no format to hash.
         encodedHasher.update(data)
+        encodedByteCount += data.count
         // Canonical float32 hashing needs the bit depth.
         // "none" is a harness-level concept for non-audio scenarios that still
         // stream raw PCM — there is no AudioCodec.none in the SDK.
@@ -562,6 +569,12 @@ actor ConformanceCollector {
                 audioDict["received_encoded_sha256"] = encodedHasher.hexdigest()
             } else {
                 audioDict["received_pcm_sha256"] = pcmHasher.hexdigest()
+            }
+            if options.isChunkFramingScenario {
+                audioDict["received_encoded_byte_count"] = encodedByteCount
+                // SendspinKit parses the header off each frame before the chunk
+                // reaches `audioChunks`, so the adapter never holds a raw frame.
+                audioDict["received_chunk_frames"] = NSNull()
             }
             summary["audio"] = audioDict
         }

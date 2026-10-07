@@ -249,6 +249,28 @@ SERVER_INITIATED_LEGACY_UNENCRYPTED = ScenarioSpec(
 )
 
 
+SERVER_INITIATED_AUDIO_CHUNK_FRAMING = ScenarioSpec(
+    id="server-initiated-audio-chunk-framing",
+    display_name="Server initiates connection and frames PCM audio chunks",
+    description=(
+        "Start the server first, then the client. The client advertises a listener and "
+        "PCM as its only supported audio format, the server connects in and streams "
+        "audio derived from almost_silent.flac, and both adapters record each audio "
+        "frame as it crossed the transport. The matrix verifies that every frame is "
+        "message type 4 behind the 13-byte header (type, int64 timestamp, uint32 "
+        "send_ahead), that the client read the same 13 bytes off each one, and that no "
+        "chunk lasted longer than 150 ms or, the final chunk aside, less than 15 ms. "
+        "This test does not compare the audio, and does not judge send_ahead "
+        "saturation, which no adapter can observe."
+    ),
+    initiator_role="server",
+    preferred_codec="pcm",
+    required_role_families=("player",),
+    verification_mode="audio-chunk-framing",
+    scenario_revision=1,
+)
+
+
 SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     CLIENT_INITIATED_PCM,
     SERVER_INITIATED_PCM,
@@ -262,6 +284,7 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     CLIENT_INITIATED_STATE_FORMAT_PCM,
     CLIENT_INITIATED_STATE_FORMAT_FLAC,
     SERVER_INITIATED_LEGACY_UNENCRYPTED,
+    SERVER_INITIATED_AUDIO_CHUNK_FRAMING,
 )
 
 SCENARIOS: dict[str, ScenarioSpec] = {scenario.id: scenario for scenario in SCENARIO_LIST}

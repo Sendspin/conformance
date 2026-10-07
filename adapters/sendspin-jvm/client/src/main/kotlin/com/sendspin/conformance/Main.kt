@@ -358,7 +358,17 @@ private fun buildSummary(config: CliConfig, session: SessionResult, moshi: Moshi
             config.scenarioId.contains("-controller") -> addControllerFields(session)
             config.scenarioId.contains("-artwork") -> addArtworkFields(session)
             isRequestFormatScenario(config.scenarioId) -> addRenegotiationFields(session)
-            else -> addAudioFields(session, config.preferredCodec)
+            else -> {
+                addAudioFields(session, config.preferredCodec)
+                if (config.scenarioId == "server-initiated-audio-chunk-framing") {
+                    // SendSpinClient parses the header off each frame before the chunk
+                    // reaches onAudioChunk, so the adapter never holds a raw frame.
+                    getJSONObject("audio").apply {
+                        put("received_encoded_byte_count", session.encodedBytes.size)
+                        put("received_chunk_frames", JSONObject.NULL)
+                    }
+                }
+            }
         }
     }
 }

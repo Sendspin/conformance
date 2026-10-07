@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from conformance.adapters._aiosendspin_protocol_evidence import (
+    ChunkPayloadSizes,
     ProtocolEvidenceCollector,
+    ReceivedBinaryFrameRecorder,
     record_activation_evidence_client,
     record_handshake_evidence_client,
     record_player_stream_evidence,
@@ -237,6 +239,7 @@ async def _run(args: argparse.Namespace) -> int:
     }
     received_hasher = FloatPcmHasher()
     encoded_accumulator = bytearray()
+    received_payload_sizes = ChunkPayloadSizes()
     current_decoder: StreamingFlacDecoder | None = None
 
     metadata_state: dict[str, Any] = {
@@ -326,6 +329,8 @@ async def _run(args: argparse.Namespace) -> int:
         timestamp_us: int, payload: bytes, audio_format: Any, _send_ahead: int
     ) -> None:
         audio_chunk_timestamps_us.append(timestamp_us)
+        if received_frames is not None:
+            received_payload_sizes.record(timestamp_us, payload)
         audio_state["chunk_count"] += 1
         encoded_accumulator.extend(payload)
         codec = audio_format.codec.value
@@ -396,6 +401,7 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-opus",
         "server-initiated-legacy-unencrypted",
         "server-initiated-protocol-baseline-v1",
+        "server-initiated-audio-chunk-framing",
         "client-initiated-state-format-pcm",
         "client-initiated-state-format-flac",
     }:
@@ -465,6 +471,7 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-opus",
         "server-initiated-legacy-unencrypted",
         "server-initiated-protocol-baseline-v1",
+        "server-initiated-audio-chunk-framing",
     }:
         client.add_audio_chunk_listener(on_audio_chunk)
         client.add_stream_end_listener(on_stream_end)
@@ -538,6 +545,12 @@ async def _run(args: argparse.Namespace) -> int:
 
     client.add_disconnect_listener(record_disconnect)
 
+    # Installed before the client connects, so no frame can arrive ahead of it.
+    received_frames = (
+        ReceivedBinaryFrameRecorder()
+        if args.scenario_id == "server-initiated-audio-chunk-framing"
+        else None
+    )
     handshake_timestamps: list[float] = []
     captured_connection: list[Any] = [None]
 
@@ -647,6 +660,20 @@ async def _run(args: argparse.Namespace) -> int:
             "received_encoded_sha256": sha256_hex(bytes(encoded_accumulator)),
             "received_pcm_sha256": received_hasher.hexdigest(),
             "received_sample_count": received_hasher.sample_count,
+        }
+    elif received_frames is not None:
+        frames = received_frames.frames()
+        summary["stream"] = audio_state["stream"]
+        summary["audio"] = {
+            "audio_chunk_count": audio_state["chunk_count"],
+            "received_encoded_byte_count": len(encoded_accumulator),
+            # Chunks that reached the listener without a frame being recorded
+            # came over a transport the recorder does not watch.
+            "received_chunk_frames": (
+                received_payload_sizes.paired(frames)
+                if frames or not audio_state["chunk_count"]
+                else None
+            ),
         }
     elif format_preference_scenario:
         summary["stream"] = audio_state["stream"]

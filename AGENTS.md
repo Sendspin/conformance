@@ -197,6 +197,7 @@ remote, so any such list goes stale on the next merge.
 - `src/conformance/build.py`: adapter build checks
 - `src/conformance/repository_versions.py`: git revision metadata written into `results/data/repositories.json`
 - `src/conformance/declared_formats.py`: joins client format declarations to the formats the matrix negotiated, written into `results/data/declared-formats.json`
+- `src/conformance/chunk_framing.py`: judges the player audio chunk header and chunk durations from the frames a case transported
 - `src/conformance/merge.py`: merges host-specific raw result directories, including build and repository metadata
 - `src/conformance/site.py`: static site generation
 - `src/conformance/flac.py` and `src/conformance/pcm.py`: canonical decode/hash helpers

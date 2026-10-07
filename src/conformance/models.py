@@ -19,6 +19,7 @@ VerificationMode = Literal[
     "artwork",
     "format-preference",
     "protocol",
+    "audio-chunk-framing",
 ]
 
 # The fields that together identify one audio format on the wire. Anything

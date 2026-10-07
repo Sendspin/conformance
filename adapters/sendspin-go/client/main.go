@@ -290,6 +290,7 @@ func runConnectedSession(parsed args, conn *websocket.Conn) int {
 	pcmHasher := conformance.NewFloatPcmHasher()
 	encodedHasher := sha256.New()
 	audioChunkCount := 0
+	encodedByteCount := 0
 	metadataUpdateCount := 0
 	var receivedMetadata any
 	var receivedControllerState any
@@ -340,6 +341,7 @@ loop:
 				return exitWithSummary(parsed, errorSummary(parsed, "received audio before stream/start", rawPeerHello, serverHelloPayload(serverHello)))
 			}
 			_, _ = encodedHasher.Write(chunk.Data)
+			encodedByteCount += len(chunk.Data)
 			if strings.EqualFold(currentPlayer.Codec, "pcm") {
 				if err := pcmHasher.UpdateFromPCMBytes(chunk.Data, currentPlayer.BitDepth); err != nil {
 					return exitWithSummary(parsed, errorSummary(parsed, err.Error(), rawPeerHello, serverHelloPayload(serverHello)))
@@ -388,12 +390,19 @@ loop:
 			return exitWithSummary(parsed, errorSummary(parsed, "client received zero audio chunks", rawPeerHello, serverHelloPayload(serverHello)))
 		}
 		summary["stream"] = normalizeStreamStart(currentPlayer)
-		summary["audio"] = map[string]any{
+		audio := map[string]any{
 			"audio_chunk_count":       audioChunkCount,
 			"received_encoded_sha256": conformance.HexLower(encodedHasher.Sum(nil)),
 			"received_pcm_sha256":     pcmDigestOrNil(pcmHasher),
 			"received_sample_count":   pcmHasher.SampleCount,
 		}
+		if conformance.IsChunkFramingScenario(parsed.ScenarioID) {
+			audio["received_encoded_byte_count"] = encodedByteCount
+			// protocol.Client parses the header off each frame before the chunk
+			// reaches client.AudioChunks, so the adapter never holds a raw frame.
+			audio["received_chunk_frames"] = nil
+		}
+		summary["audio"] = audio
 	case conformance.IsMetadataScenario(parsed.ScenarioID):
 		summary["metadata"] = map[string]any{
 			"update_count": metadataUpdateCount,
