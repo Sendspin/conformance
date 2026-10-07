@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
+using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Discovery;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol;
@@ -37,6 +38,7 @@ using var loggerFactory = LoggerFactory.Create(builder =>
 });
 
 var pipeline = new HashingAudioPipeline(loggerFactory);
+var identity = SendspinIdentity.Generate();
 var disconnectTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 ConnectionSnapshot? connectedServer = null;
 string? failureReason = null;
@@ -75,7 +77,7 @@ var summary = new Dictionary<string, object?>
     ["initiator_role"] = options.InitiatorRole,
     ["preferred_codec"] = options.PreferredCodec,
     ["client_name"] = options.ClientName,
-    ["client_id"] = options.ClientId,
+    ["client_id"] = identity.PeerId,
     ["server"] = connectedServer,
     ["peer_hello"] = peerHello,
 };
@@ -119,10 +121,10 @@ return failureReason is null ? 0 : 1;
 
 async Task RunListenerClientAsync()
 {
-    var capabilities = BuildCapabilities(options);
+    var clientOptions = BuildClientOptions();
     await using var host = new SendspinHostService(
         loggerFactory,
-        capabilities,
+        clientOptions,
         new ListenerOptions
         {
             Port = options.Port,
@@ -130,13 +132,14 @@ async Task RunListenerClientAsync()
         },
         new AdvertiserOptions
         {
-            ClientId = capabilities.ClientId,
-            PlayerName = capabilities.ClientName,
+            // The server finds this client through the harness registry. Advertising would
+            // let any Sendspin server on the network connect in under unpaired access and
+            // contend with the server under test.
+            Enabled = false,
+            PlayerName = clientOptions.Capabilities.ClientName,
             Port = options.Port,
             Path = options.Path,
-        },
-        pipeline,
-        new KalmanClockSynchronizer(loggerFactory.CreateLogger<KalmanClockSynchronizer>()));
+        });
 
     host.ServerConnected += (_, server) =>
     {
@@ -191,20 +194,13 @@ async Task RunOutboundClientAsync()
     try
     {
         var serverUrl = await WaitForRegistryAsync(options.Registry, options.ServerName, timeout.Token);
-        var capabilities = BuildCapabilities(options);
-        await using var connection = new SendspinConnection(
-            loggerFactory.CreateLogger<SendspinConnection>(),
+        await using var client = SendspinClientService.CreateForDial(
+            loggerFactory,
+            BuildClientOptions(),
             new ConnectionOptions
             {
                 AutoReconnect = false,
             });
-
-        using var client = new SendspinClientService(
-            loggerFactory.CreateLogger<SendspinClientService>(),
-            connection,
-            new KalmanClockSynchronizer(loggerFactory.CreateLogger<KalmanClockSynchronizer>()),
-            capabilities,
-            pipeline);
         client.ServerHelloReceived += (_, payload) => peerHello = ToWireElement(payload);
         client.StreamStartReceived += (_, payload) => CaptureStreamStart(payload);
         client.GroupStateChanged += (_, group) =>
@@ -225,7 +221,7 @@ async Task RunOutboundClientAsync()
         connectedServer = new ConnectionSnapshot(
             client.ServerId ?? "unknown",
             client.ServerName ?? "unknown",
-            client.ConnectionReason);
+            client.LastServerHello?.ConnectionReason);
 
         await disconnectTcs.Task.WaitAsync(timeout.Token);
     }
@@ -238,6 +234,17 @@ async Task RunOutboundClientAsync()
         failureReason ??= ex.Message;
     }
 }
+
+SendspinClientOptions BuildClientOptions() =>
+    new()
+    {
+        // The adapter does not derive the harness's deterministic pairing credentials, so
+        // each run connects as a fresh, unpaired device under unpaired access.
+        Identity = identity,
+        Capabilities = BuildCapabilities(options),
+        AudioPipeline = pipeline,
+        ClockSynchronizer = new KalmanClockSynchronizer(loggerFactory.CreateLogger<KalmanClockSynchronizer>()),
+    };
 
 void CaptureStreamStart(StreamStartPayload payload)
 {
@@ -406,21 +413,21 @@ static ClientCapabilities BuildCapabilities(CliOptions options)
 
     return new ClientCapabilities
     {
-        ClientId = options.ClientId,
         ClientName = options.ClientName,
         Roles = roles,
         BufferCapacity = 2_000_000,
         AudioFormats = audioFormats,
-        ArtworkChannels = new List<ArtworkChannelSpec>
+        ArtworkChannels = new List<ArtworkChannelState>
         {
-            new ArtworkChannelSpec
+            new ArtworkChannelState
             {
                 Source = "album",
                 Format = options.ArtworkFormat,
-                MediaWidth = options.ArtworkWidth,
-                MediaHeight = options.ArtworkHeight,
+                Width = options.ArtworkWidth,
+                Height = options.ArtworkHeight,
             },
         },
+        UnpairedAccessEnabled = true,
         ProductName = "Conformance Dotnet Client",
         Manufacturer = "Sendspin Conformance",
         SoftwareVersion = "0.1.0",
@@ -583,15 +590,16 @@ internal sealed class HashingAudioPipeline : IAudioPipeline
 
     public event EventHandler<AudioPipelineState>? StateChanged;
     public event EventHandler<AudioPipelineError>? ErrorOccurred;
+    public event EventHandler<int>? OutputLatencyChanged;
 
-    public Task StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
+    public Task<AudioPipelineStartOutcome> StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
     {
         _decoder?.Dispose();
         _decoder = _decoderFactory.Create(format);
         _decodeBuffer = new float[_decoder.MaxSamplesPerFrame];
         CurrentFormat = format;
         SetState(AudioPipelineState.Buffering);
-        return Task.CompletedTask;
+        return Task.FromResult(AudioPipelineStartOutcome.Restarted);
     }
 
     public Task StopAsync()
@@ -608,6 +616,8 @@ internal sealed class HashingAudioPipeline : IAudioPipeline
     {
         _decoder?.Reset();
     }
+
+    public void ReanchorTiming() { }
 
     public void ProcessAudioChunk(AudioChunk chunk)
     {
@@ -632,6 +642,8 @@ internal sealed class HashingAudioPipeline : IAudioPipeline
     public void SetVolume(int volume) { }
 
     public void SetMuted(bool muted) { }
+
+    public void SetMinBufferMilliseconds(int minBufferMs) { }
 
     public Task SwitchDeviceAsync(string? deviceId, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;

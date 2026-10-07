@@ -14,5 +14,4 @@ find_package(OpenSSL REQUIRED)
 
 add_executable(conformance-sendspin-cpp-client main.cpp)
 target_link_libraries(conformance-sendspin-cpp-client PRIVATE sendspin)
-target_include_directories(conformance-sendspin-cpp-client PRIVATE ${SENDSPIN_CPP_REPO}/src)
 target_link_libraries(conformance-sendspin-cpp-client PRIVATE OpenSSL::Crypto)
