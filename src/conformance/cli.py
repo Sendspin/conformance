@@ -7,6 +7,8 @@ import asyncio
 from pathlib import Path
 
 from .build import build_adapters, build_failed
+from .implementations import validate_repo_overrides
+from .paths import RepoOverrideError
 from .runner import run_matrix
 from .site import build_site
 
@@ -66,6 +68,8 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
+        if args.command in ("build", "run"):
+            validate_repo_overrides()
         if args.command == "build":
             results = build_adapters(Path(args.report_path) if args.report_path else None)
             _print_build_results(results)
@@ -89,7 +93,7 @@ def main() -> int:
             build_site(Path(args.results_dir), site_dir)
             print(f"Report written to {(site_dir / 'index.html').resolve()}")
             return 0
-    except (FileNotFoundError, ValueError) as err:
+    except (FileNotFoundError, RepoOverrideError, ValueError) as err:
         parser.error(str(err))
     parser.error(f"Unsupported command: {args.command}")
     return 2

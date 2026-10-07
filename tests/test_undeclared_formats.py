@@ -55,6 +55,7 @@ def _server_summary(
         "implementation": "synthetic-server",
         "role": "server",
         "group_updates": [GROUP_UPDATE],
+        "time_exchange": [],
         "availability_trace": AVAILABILITY_TRACE,
         "peer_hello": {"type": "client/hello", "payload": payload},
         "stream": stream,

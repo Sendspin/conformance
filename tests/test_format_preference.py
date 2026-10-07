@@ -47,6 +47,7 @@ def _server_summary(
         "implementation": "synthetic-server",
         "role": "server",
         "group_updates": [GROUP_UPDATE],
+        "time_exchange": [],
         "availability_trace": AVAILABILITY_TRACE,
         "stream": stream,
         "format_preference": {"received": received},

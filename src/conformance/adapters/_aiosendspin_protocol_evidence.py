@@ -3,12 +3,13 @@
 Wraps the aiosendspin SDK's connection objects from outside (no SDK changes)
 to populate ``summary["protocol"]`` per the contract in
 :mod:`conformance.protocol`, ``summary["activation"]`` with the initial
-``server/activate``, and ``summary["group_updates"]`` with every
-``group/update`` that followed it. This is deliberately a monkey-patch:
-aiosendspin does not yet expose a first-class tracing hook (tracked in
-https://github.com/Sendspin/conformance/issues/111), so this module reaches
-into private/semi-public attributes and is expected to need maintenance as
-the SDK evolves.
+``server/activate``, ``summary["group_updates"]`` with every
+``group/update`` that followed it, and ``summary["time_exchange"]`` with each
+``client/time`` received and ``server/time`` sent. This is deliberately a
+monkey-patch: aiosendspin does not yet expose a first-class tracing hook
+(tracked in https://github.com/Sendspin/conformance/issues/111), so this module
+reaches into private/semi-public attributes and is expected to need
+maintenance as the SDK evolves.
 
 Evidence fidelity by assertion:
 
@@ -44,6 +45,10 @@ Evidence fidelity by assertion:
   ``state`` into ``available``, so only the transport shows what arrived and
   when. An unencrypted legacy connection bypasses that transport and is not
   observed.
+- ``client/time`` received and ``server/time`` sent, in order: full fidelity
+  on an encrypted connection, from the same recorder. The SDK fills in
+  ``server_transmitted`` as it dequeues the reply, so only the transport shows
+  the three timestamps that went out.
 - First metadata-carrying ``server/state``: full fidelity, and timed.
   :class:`SentMetadataStateRecorder` wraps the same transport method, because
   the timestamp requirement on that state needs a clock reading taken once the
@@ -67,7 +72,8 @@ from typing import Any
 
 from conformance.protocol import SPEC_REVISION
 
-_RECORDED_SENT_TYPES = ("server/activate", "group/update", "stream/start")
+_RECORDED_SENT_TYPES = ("server/activate", "group/update", "stream/start", "server/time")
+_OTHER_SENT = {"type": "other-sent"}
 
 
 @dataclass
@@ -118,9 +124,10 @@ class ControlMessageRecorder:
     Records the control messages the matrix judges on every connection, as transported.
 
     That is the first ``server/activate`` sent, every ``group/update`` sent
-    after it, and each ``client/state`` received and ``stream/start`` sent in
-    the order they crossed the transport. One recorder keeps all of them, so
-    each verdict drawn from them reads the same view of the connection.
+    after it, each ``client/state`` received and ``stream/start`` sent in the
+    order they crossed the transport, and each ``client/time`` received and
+    ``server/time`` sent, likewise in order. One recorder keeps all of them,
+    so each verdict drawn from them reads the same view of the connection.
 
     Recording starts on construction and covers every encrypted connection the
     process opens afterwards, so construct it before the server starts
@@ -137,10 +144,11 @@ class ControlMessageRecorder:
         self._first_by_socket: dict[Any, dict[str, Any]] = {}
         self._group_updates_by_socket: dict[Any, list[dict[str, Any]]] = {}
         self._availability_by_socket: dict[Any, list[dict[str, Any]]] = {}
+        self._time_exchange_by_socket: dict[Any, list[dict[str, Any]]] = {}
 
         async def send_str(transport: Any, data: str) -> None:
-            # Every JSON control body, including each server/time, passes through
-            # here, so only bodies naming a recorded message type are parsed.
+            # Every JSON control body passes through here, so only bodies naming
+            # a recorded message type are parsed.
             message = (
                 json.loads(data)
                 if any(f'"{name}"' in data for name in _RECORDED_SENT_TYPES)
@@ -148,12 +156,19 @@ class ControlMessageRecorder:
             )
             # A pairing re-handshake swaps the transport but keeps the socket.
             socket = transport._ws
+            # Where the exchange stood when this send began: a client/time read
+            # while the frame is being written was not received before it.
+            began_at = len(self._time_exchange_by_socket.get(socket, ()))
             if message.get("type") != "stream/start":
                 await self._original_send_str(transport, data)
                 if message.get("type") == "server/activate":
                     self._first_by_socket.setdefault(socket, message)
                 elif message.get("type") == "group/update" and socket in self._first_by_socket:
                     self._group_updates_by_socket.setdefault(socket, []).append(message)
+                if message.get("type") == "server/time":
+                    self._time_exchange_by_socket.setdefault(socket, []).append(message)
+                else:
+                    self._record_other_sent(socket, began_at)
                 return
             payload = message.get("payload")
             entry = {
@@ -170,11 +185,15 @@ class ControlMessageRecorder:
             trace.append({**entry, "phase": "sending"})
             await self._original_send_str(transport, data)
             trace.append({**entry, "phase": "sent"})
+            self._record_other_sent(socket, began_at)
 
         async def receive(transport: Any) -> Any:
             received = await self._original_receive(transport)
             if received.type is not WSMsgType.TEXT:
                 return received
+            # Marks the socket as one whose incoming text is observed, so that
+            # no client/time arriving reads as an empty exchange, not an unseen one.
+            time_exchange = self._time_exchange_by_socket.setdefault(transport._ws, [])
             # Parsed whatever the text looks like: a client is free to write the
             # type with its slash escaped, which no substring test finds.
             try:
@@ -191,6 +210,8 @@ class ControlMessageRecorder:
                         else None,
                     }
                 )
+            elif isinstance(message, dict) and message.get("type") == "client/time":
+                time_exchange.append(message)
             return received
 
         EncryptedWebSocket.send_str = send_str  # type: ignore[method-assign]
@@ -250,10 +271,41 @@ class ControlMessageRecorder:
         trace = self._availability_by_socket.get(socket)
         return None if trace is None else list(trace)
 
+    def time_exchange(self, connection: Any) -> list[dict[str, Any]] | None:
+        """
+        Return each ``client/time`` received and ``server/time`` sent, oldest first.
+
+        Each is the ``{"type": ..., "payload": ...}`` body as it crossed the
+        transport on a server-side ``SendspinConnection``. A ``client/time`` is
+        recorded as the transport hands it over, and a ``server/time`` once it
+        is written, so one whose send raised is left out. The list is empty
+        when the client sent no ``client/time``.
+
+        An ``{"type": "other-sent"}`` entry stands for one or more other text
+        messages the server sent. It sits where the first of those sends
+        began, so every ``client/time`` before it had been received by then,
+        and it is recorded only once the send has returned.
+
+        Returns ``None`` for a connection that neither incoming text nor a
+        ``server/time`` was observed on, which covers an unencrypted legacy
+        connection.
+        """
+        socket = connection._wsock_server or connection._wsock_client
+        exchange = self._time_exchange_by_socket.get(socket)
+        return None if exchange is None else list(exchange)
+
     def uninstall(self) -> None:
         """Restore the SDK transport's own ``send_str`` and ``receive``."""
         self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
         self._transport_class.receive = self._original_receive  # type: ignore[method-assign]
+
+    def _record_other_sent(self, socket: Any, began_at: int) -> None:
+        # Nothing precedes position 0 for the entry to follow, and one entry
+        # already speaks for every send between the same two neighbours.
+        exchange = self._time_exchange_by_socket.get(socket)
+        if not began_at or _OTHER_SENT in exchange[began_at - 1 : began_at + 1]:
+            return
+        exchange.insert(began_at, dict(_OTHER_SENT))
 
 
 class SentMetadataStateRecorder:

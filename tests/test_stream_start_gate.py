@@ -172,7 +172,12 @@ class CaseVerdictTest(unittest.TestCase):
             require_scenario(scenario_id),
             _audio_summary(
                 "server",
-                **{"activation": PLAYBACK_ACTIVATE, "group_updates": [GROUP_UPDATE], **server},
+                **{
+                    "activation": PLAYBACK_ACTIVATE,
+                    "group_updates": [GROUP_UPDATE],
+                    "time_exchange": [],
+                    **server,
+                },
             ),
             _audio_summary("client"),
         )
@@ -206,7 +211,9 @@ class CaseVerdictTest(unittest.TestCase):
         with mock.patch("conformance.runner._dispatch_comparison", return_value=(True, "ok")):
             verdicts = {
                 scenario.id: _compare_summaries(
-                    scenario, {"status": "ok", "group_updates": [GROUP_UPDATE]}, {"status": "ok"}
+                    scenario,
+                    {"status": "ok", "group_updates": [GROUP_UPDATE], "time_exchange": []},
+                    {"status": "ok"},
                 )
                 for scenario in SCENARIO_LIST
             }

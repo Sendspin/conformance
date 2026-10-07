@@ -350,6 +350,151 @@ def _gate_violation_reason(latest: Any, *, roles: Any) -> str:
     )
 
 
+_TIME_FIELDS = ("client_transmitted", "server_received", "server_transmitted")
+
+
+def time_exchange_violation(server_summary: dict[str, Any]) -> str | None:
+    """
+    Return how the `client/time` to `server/time` exchange breaks RC1, or None.
+
+    Judged from `time_exchange`, the server adapter's ordered record of each
+    `client/time` it received and each `server/time` it sent, with an
+    `other-sent` entry where the server began sending anything else. Clock sync is
+    core messaging on every connection, so this is judged on every case. Four
+    things are asserted of the server: that each `server/time` carries
+    `client_transmitted`, `server_received` and `server_transmitted` as
+    integers, that its `client_transmitted` is the value of a `client/time`
+    the server had received and not yet answered, that `server_received` is
+    not later than `server_transmitted`, and that no `client/time` went
+    unanswered.
+
+    RC1 does not state the third as a rule. It follows from both timestamps
+    being readings of the server's one monotonic clock, taken at two events
+    that happen in that order.
+
+    RC1 states the last as what the server does ("Once received, the server
+    responds with a `server/time`") and attaches no MUST or SHOULD to it. A
+    case still fails on it, and the reason says which kind of statement it is.
+
+    RC1 gives no bound on how soon the response follows, and a connection can
+    close with a `client/time` still unread. So one left unanswered is a
+    violation only when the record shows the server went on without answering
+    it: it answered a `client/time` it received later, or began sending some
+    other message after receiving it and then received a further `client/time`.
+    No interval is measured. The last `client/time` received is judged on
+    neither count, since a server shutting down may flush what it had queued
+    and close. Nor is one nothing was sent after, however many there are, so a
+    server whose adapter records no `other-sent` entries and that answers none
+    passes. What the record shows is that the server kept reading and sending,
+    not that it had handled the message: one that replies out of order and
+    never sent the earlier reply is named.
+
+    The values themselves are not judged, because RC1 says the timestamps are
+    not necessarily epoch-based. Nor is whether `server_transmitted` was
+    stamped as late as RC1 requires, which needs a transmit instant no summary
+    carries, nor whether the client's time filter converged, which no message
+    reports.
+
+    A `client/time` whose `client_transmitted` is not an integer names the
+    client, which broke its own requirement before the server could echo it.
+
+    None covers a conformant exchange and a case in which the client sent no
+    `client/time`. A summary with no `time_exchange` list, or a list holding
+    anything else, is reported as a harness gap, naming the adapter rather
+    than the implementation.
+    """
+    exchange = server_summary.get("time_exchange")
+    if not isinstance(exchange, list):
+        return (
+            f"{HARNESS_GAP}the server adapter did not record the client/time messages it "
+            "received and the server/time messages it sent, so the exchange cannot be judged"
+        )
+
+    # Position and client_transmitted of each client/time not yet answered.
+    unanswered: list[tuple[int, int]] = []
+    received = 0
+    answered = 0
+    latest_answered = 0
+    # Each client/time the server began sending something else after receiving.
+    passed_over: set[int] = set()
+    for entry in exchange:
+        kind = entry.get("type") if isinstance(entry, dict) else None
+        if kind == "other-sent":
+            passed_over.update(position for position, _ in unanswered)
+            continue
+        if kind not in ("client/time", "server/time"):
+            return (
+                f"{HARNESS_GAP}the server adapter recorded something other than a "
+                f"client/time, server/time or other-sent in the exchange: {json.dumps(entry)}"
+            )
+        payload = entry.get("payload")
+        if kind == "client/time":
+            received += 1
+            sent = payload.get("client_transmitted") if isinstance(payload, dict) else None
+            if not _is_integer(sent):
+                return (
+                    f"Client's client/time {received} carried client_transmitted "
+                    f"{json.dumps(sent)}, where RC1 requires an integer"
+                )
+            unanswered.append((received, sent))
+            continue
+
+        answered += 1
+        defects = _server_time_defects(payload)
+        if defects:
+            return f"Server's server/time {answered} {'; '.join(defects)}"
+        echoed = payload["client_transmitted"]
+        match = next((item for item in unanswered if item[1] == echoed), None)
+        if match is None:
+            return (
+                f"Server's server/time {answered} carried client_transmitted {echoed}, "
+                "which is not the value of any client/time it had received and not yet "
+                "answered; RC1 defines the field as the timestamp received in the client/time"
+            )
+        unanswered.remove(match)
+        latest_answered = max(latest_answered, match[0])
+        if payload["server_received"] > payload["server_transmitted"]:
+            return (
+                f"Server's server/time {answered} carried server_received "
+                f"{payload['server_received']} later than its server_transmitted "
+                f"{payload['server_transmitted']}; both are readings of the server's "
+                "monotonic clock, and it receives the client/time before it responds"
+            )
+
+    for position, _ in unanswered:
+        if position < latest_answered:
+            went_on = "answered one it received later"
+        elif position in passed_over and position < received:
+            went_on = "sent another message after receiving it"
+        else:
+            continue
+        return (
+            f"Server sent no server/time for client/time {position} of {received}, yet "
+            f"{went_on}; RC1 says the server responds to a client/time with a "
+            "server/time, without marking that as a MUST or a SHOULD"
+        )
+    return None
+
+
+def _server_time_defects(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["carried no payload object, so none of the fields RC1 requires"]
+    defects: list[str] = []
+    for name in _TIME_FIELDS:
+        if name not in payload:
+            defects.append(f"omitted {name}, which RC1 requires")
+        elif not _is_integer(payload[name]):
+            defects.append(
+                f"declared {name} {json.dumps(payload[name])}, where RC1 requires an integer"
+            )
+    return defects
+
+
+def _is_integer(value: Any) -> bool:
+    # bool is an int subclass, and JSON true is not a timestamp.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _is_rc1_activity_set(activities: Any) -> bool:
     if not isinstance(activities, list):
         return False
