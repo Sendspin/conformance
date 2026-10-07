@@ -465,6 +465,15 @@ private:
     SessionState& state_;
 };
 
+// Stops the client when the session scope exits. Declared after the listeners and the
+// network provider so the library's threads are joined while those are still alive.
+struct StopOnExit {
+    SendspinClient& client;
+    ~StopOnExit() {
+        client.stop();
+    }
+};
+
 static SendspinClientConfig build_client_config(const Args& args) {
     SendspinClientConfig config;
     config.name = args.client_name;
@@ -714,6 +723,7 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
         SessionState empty;
         return emit_summary(args, empty, "error", "Failed to start client roles");
     }
+    StopOnExit stop_on_exit{client};
     state.client_id = client.client_id();
     client.loop();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
