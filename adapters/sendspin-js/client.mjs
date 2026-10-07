@@ -126,6 +126,7 @@ class AdapterState {
     this.peerHello = null;
     this.lastTextFrame = null;
     this.binaryFrameCount = 0;
+    this.sdkSentEncryptedFrame = false;
     this.readyWritten = false;
     this.streamFormat = null;
     this.audioChunkCount = 0;
@@ -139,7 +140,12 @@ class AdapterState {
   }
 }
 
-function observeServerFrames(webSocket, state) {
+function observeFrames(webSocket, state) {
+  const send = webSocket.send.bind(webSocket);
+  webSocket.send = (data, ...rest) => {
+    if (typeof data !== "string") state.sdkSentEncryptedFrame = true;
+    return send(data, ...rest);
+  };
   webSocket.addEventListener("message", (event) => {
     if (typeof event.data !== "string") {
       state.binaryFrameCount += 1;
@@ -160,15 +166,21 @@ function observeServerFrames(webSocket, state) {
   });
 }
 
-// SendspinCore's handshake is text frames only and everything it accepts
-// afterwards is binary, so a socket that closed without a binary frame
-// never carried a session.
+// SendspinCore exposes no handshake-complete signal, but its own handshake
+// frames are text and it sends an encrypted (binary) frame only in reply to
+// a server message it decrypted and accepted, starting with client/hello
+// for server/hello. A socket that closed before it sent one never carried
+// a session, whatever the server put on the wire.
 function sessionFailure(state) {
-  if (state.binaryFrameCount > 0) return null;
-  if (state.lastTextFrame === null) {
+  if (state.sdkSentEncryptedFrame) return null;
+  if (state.lastTextFrame === null && state.binaryFrameCount === 0) {
     return "Transport closed while awaiting server/init: the server sent nothing";
   }
-  return `Transport closed after ${state.lastTextFrame} without any binary frame from the server`;
+  return (
+    "Transport closed before SendspinCore accepted any server message; " +
+    `last text frame from the server: ${state.lastTextFrame ?? "none"}, ` +
+    `binary frames from the server: ${state.binaryFrameCount}`
+  );
 }
 
 function buildCore({ args, webSocket, state }) {
@@ -326,7 +338,7 @@ async function runClientInitiated(args, state, timeoutSeconds) {
     timeoutSeconds,
   );
   const webSocket = new WsWebSocket(serverUrl);
-  observeServerFrames(webSocket, state);
+  observeFrames(webSocket, state);
   const core = buildCore({ args, webSocket, state });
   await core.connect();
   try {
@@ -352,7 +364,7 @@ async function runServerInitiated(args, state, timeoutSeconds) {
     registerEndpoint(args.registry, args["client-name"], url);
     ensureReadyWritten(args, state, { url });
     const webSocket = await waitForConnection(wss, timeoutSeconds);
-    observeServerFrames(webSocket, state);
+    observeFrames(webSocket, state);
     const core = buildCore({ args, webSocket, state });
     await core.connect();
     try {
