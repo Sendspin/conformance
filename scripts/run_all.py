@@ -18,7 +18,8 @@ if str(SRC) not in sys.path:
 from conformance.build import annotate_build_results, build_selected_adapters, write_build_artifacts
 from conformance.environment import resolve_environment
 from conformance.io import write_json
-from conformance.implementations import selected_build_adapters
+from conformance.implementations import selected_build_adapters, validate_repo_overrides
+from conformance.paths import RepoOverrideError
 from conformance.repository_versions import write_repository_versions
 from conformance.runner import run_matrix
 from conformance.scenarios import ordered_scenarios, require_scenario
@@ -110,6 +111,10 @@ def _print_matrix_results(results: list[dict[str, object]]) -> None:
 
 def main() -> int:
     args = build_parser().parse_args()
+    try:
+        validate_repo_overrides()
+    except RepoOverrideError as err:
+        raise SystemExit(str(err)) from err
     results_dir = Path(args.results_dir)
     site_dir = Path(args.site_dir) if args.site_dir else results_dir
     environment = resolve_environment(

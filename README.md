@@ -67,6 +67,11 @@ That flow:
 - runs the current matrix for the selected host environment
 - generates the static HTML report
 
+To run against a checkout somewhere else, set `CONFORMANCE_REPO_<NAME>` to its
+absolute path, with the repository name upper-cased and `-` written as `_` (for
+example `CONFORMANCE_REPO_SENDSPIN_CLI`). A variable that is set must point at an
+existing path: the harness stops at startup rather than fall back to `repos/<name>`.
+
 ## Useful commands
 
 Run the full harness:

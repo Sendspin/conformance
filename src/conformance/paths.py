@@ -6,6 +6,10 @@ import os
 from pathlib import Path
 
 
+class RepoOverrideError(Exception):
+    """Raised when a CONFORMANCE_REPO_* override does not name an existing checkout."""
+
+
 def repo_root() -> Path:
     """Return the conformance repository root."""
     return Path(__file__).resolve().parents[2]
@@ -22,15 +26,42 @@ def env_repo_override_key(name: str) -> str:
     return f"CONFORMANCE_REPO_{safe}"
 
 
+def repo_override_path(dirname: str) -> Path | None:
+    """
+    Return the checkout a CONFORMANCE_REPO_* override selects for a repository.
+
+    Returns None when no override is set. Raises RepoOverrideError when the
+    override is not an absolute path or names a path that does not exist.
+    """
+    key = env_repo_override_key(dirname)
+    env_value = os.environ.get(key)
+    if not env_value:
+        return None
+    path = Path(env_value).expanduser()
+    # Adapters run from the repository root, so a relative path would name a
+    # different directory there than in the process that was started.
+    if not path.is_absolute():
+        raise RepoOverrideError(f"{key}={env_value} is not an absolute path")
+    path = path.resolve()
+    if not path.exists():
+        raise RepoOverrideError(f"{key}={env_value} points at {path}, which does not exist")
+    return path
+
+
 def candidate_repo_paths(dirname: str) -> list[Path]:
-    """Return candidate locations for a repository checkout."""
-    paths: list[Path] = []
-    env_value = os.environ.get(env_repo_override_key(dirname))
-    if env_value:
-        paths.append(Path(env_value).expanduser().resolve())
-    paths.append((repo_root() / "repos" / dirname).resolve())
-    paths.append((workspace_root() / dirname).resolve())
-    return paths
+    """
+    Return candidate locations for a repository checkout.
+
+    A CONFORMANCE_REPO_* override is the only candidate when it is set. Raises
+    RepoOverrideError when it is not an absolute path to something that exists.
+    """
+    override = repo_override_path(dirname)
+    if override is not None:
+        return [override]
+    return [
+        (repo_root() / "repos" / dirname).resolve(),
+        (workspace_root() / dirname).resolve(),
+    ]
 
 
 def first_existing_path(paths: list[Path]) -> Path | None:

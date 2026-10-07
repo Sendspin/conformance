@@ -5,7 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from .models import ImplementationSpec, RoleName, RoleSpec, ScenarioSpec
-from .paths import candidate_repo_paths, first_existing_path, repo_root
+from .paths import (
+    RepoOverrideError,
+    candidate_repo_paths,
+    first_existing_path,
+    repo_override_path,
+    repo_root,
+)
 
 
 IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
@@ -290,6 +296,27 @@ def implementations_for_scenario(
             scenario=scenario,
         )
     ]
+
+
+def validate_repo_overrides() -> None:
+    """
+    Check every CONFORMANCE_REPO_* override for a known repository.
+
+    Raises one RepoOverrideError naming each override that is not an absolute
+    path to something that exists.
+    """
+    dirnames = [spec.repo_dirname for spec in IMPLEMENTATIONS.values()]
+    dirnames.extend(dirname for dirname, _ in SUPPORTING_REPOS.values())
+    problems: list[str] = []
+    for dirname in dirnames:
+        try:
+            repo_override_path(dirname)
+        except RepoOverrideError as err:
+            problems.append(str(err))
+    if problems:
+        raise RepoOverrideError(
+            "Repository override does not resolve to a checkout: " + "; ".join(problems)
+        )
 
 
 def resolve_repo_path(dirname: str) -> Path | None:
