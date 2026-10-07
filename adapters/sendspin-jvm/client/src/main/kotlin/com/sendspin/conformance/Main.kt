@@ -322,7 +322,11 @@ private suspend fun runClientInitiated(
     val serverHello = client.serverHello.first { it != null }!!
 
     if (config.scenarioId == "client-initiated-controller") {
-        client.controllerState.first { it != null }
+        // Wait for a controller state that explicitly advertises the expected command — sending
+        // before the server includes the command in supported_commands causes it to reject it.
+        while (client.controllerState.value?.supportedCommands?.contains(config.controllerCommand) != true) {
+            kotlinx.coroutines.delay(10)
+        }
         client.sendControllerCommand(config.controllerCommand)
         onCommandSent(config.controllerCommand)
     }
