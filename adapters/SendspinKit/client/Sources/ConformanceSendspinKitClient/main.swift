@@ -369,9 +369,14 @@ actor ConformanceCollector {
     }
 
     /// Terminal status reported in the summary. Stays "ok" for a clean run;
-    /// set to "timeout" when the run is cut short so the harness sees a failure
-    /// with a clear reason instead of a missing summary.
+    /// set to "timeout" when the run is cut short, or "error" when it fails,
+    /// so the harness sees a failure with a clear reason instead of a missing
+    /// summary.
     var runStatus: String = "ok"
+
+    /// Why the run failed, reported as the summary's `reason`. Nil for a run
+    /// that did not fail.
+    var failureReason: String?
 
     init(options: CliOptions) {
         self.options = options
@@ -379,6 +384,11 @@ actor ConformanceCollector {
 
     func setRunStatus(_ status: String) {
         runStatus = status
+    }
+
+    func recordFailure(_ reason: String) {
+        runStatus = "error"
+        failureReason = reason
     }
 
     func recordAudioChunk(data: Data, serverTimestamp: Int64) {
@@ -478,6 +488,9 @@ actor ConformanceCollector {
             "client_name": options.clientName,
             "client_id": options.clientID,
         ]
+        if let failureReason {
+            summary["reason"] = failureReason
+        }
 
         if let hello = peerHello {
             summary["peer_hello"] = [
@@ -896,17 +909,47 @@ func acceptInboundConnection(
 @main
 struct ConformanceSendspinKitClient {
     static func main() async {
+        let options: CliOptions
         do {
-            try await run()
+            options = try CliOptions.parse(Array(CommandLine.arguments.dropFirst()))
+        } catch {
+            // Without --summary there is nowhere to report to.
+            fputs("FATAL: \(error)\n", stderr)
+            Foundation.exit(1)
+        }
+        let collector = ConformanceCollector(options: options)
+        do {
+            try await run(options: options, collector: collector)
         } catch {
             fputs("FATAL: \(error)\n", stderr)
+            let reason = error is AdapterError ? "\(error)" : String(reflecting: error)
+            await collector.recordFailure("SendspinKit client adapter failed: \(reason)")
+            do {
+                try await writeSummary(options: options, collector: collector)
+            } catch {
+                fputs("FATAL: could not write summary: \(error)\n", stderr)
+            }
             Foundation.exit(1)
         }
     }
 
-    static func run() async throws {
-        let options = try CliOptions.parse(Array(CommandLine.arguments.dropFirst()))
-        let collector = ConformanceCollector(options: options)
+    static func writeSummary(options: CliOptions, collector: ConformanceCollector) async throws {
+        let summaryData = try await collector.buildSummaryJSON()
+        let summaryURL = URL(fileURLWithPath: options.summaryPath)
+        try FileManager.default.createDirectory(
+            at: summaryURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try summaryData.write(to: summaryURL)
+
+        // Also print to stdout for debugging
+        FileHandle.standardOutput.write(summaryData)
+        FileHandle.standardOutput.write(Data([0x0A]))
+
+        fputs("[ADAPTER] Summary written to \(options.summaryPath)\n", stderr)
+    }
+
+    static func run(options: CliOptions, collector: ConformanceCollector) async throws {
 
         // Build the client with the right roles for this scenario
         let roles = options.requiredRoles
@@ -1191,20 +1234,7 @@ struct ConformanceSendspinKitClient {
         }
         await client.disconnect(reason: .shutdown)
 
-        // Write summary
-        let summaryData = try await collector.buildSummaryJSON()
-        let summaryURL = URL(fileURLWithPath: options.summaryPath)
-        try FileManager.default.createDirectory(
-            at: summaryURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try summaryData.write(to: summaryURL)
-
-        // Also print to stdout for debugging
-        FileHandle.standardOutput.write(summaryData)
-        FileHandle.standardOutput.write(Data([0x0A]))
-
-        fputs("[ADAPTER] Summary written to \(options.summaryPath)\n", stderr)
+        try await writeSummary(options: options, collector: collector)
 
         // Exit immediately — NWListener/NWConnection teardown during process exit
         // can trigger SIGTRAP if continuations or state handlers fire after the
