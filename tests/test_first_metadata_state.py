@@ -40,6 +40,13 @@ SENT_BOUND_US = SENT_STAMP_US + 40
 SCHEDULED_STAMP_US = SENT_BOUND_US + 3_000_000
 
 
+# Every server summary carries one, and a case whose summary lacks it never passes.
+GROUP_UPDATE = {
+    "type": "group/update",
+    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+}
+
+
 def _server_summary(*, sent: Any = None, include_sent: bool = True) -> dict[str, Any]:
     metadata: dict[str, Any] = {"expected": SNAPSHOT}
     if include_sent:
@@ -52,6 +59,7 @@ def _server_summary(*, sent: Any = None, include_sent: bool = True) -> dict[str,
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "group_update": GROUP_UPDATE,
         "metadata": metadata,
     }
 

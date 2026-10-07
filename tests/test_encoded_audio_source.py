@@ -30,6 +30,13 @@ CHUNK_COUNT = 69
 DROPPED_SAMPLES = 1_152
 
 
+# Every server summary carries one, and a case whose summary lacks it never passes.
+GROUP_UPDATE = {
+    "type": "group/update",
+    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+}
+
+
 def _stream(codec: str, **overrides: Any) -> dict[str, Any]:
     return {"codec": codec, "sample_rate": 8_000, "channels": 1, "bit_depth": 16, **overrides}
 
@@ -39,6 +46,7 @@ def _server_summary(codec: str = "flac", **stream_overrides: Any) -> dict[str, A
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "group_update": GROUP_UPDATE,
         "stream": {
             **_stream(codec, **stream_overrides),
             "codec_header_sha256": HEADER_HASH,

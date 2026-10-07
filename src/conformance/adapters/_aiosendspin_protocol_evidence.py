@@ -2,9 +2,10 @@
 
 Wraps the aiosendspin SDK's connection objects from outside (no SDK changes)
 to populate ``summary["protocol"]`` per the contract in
-:mod:`conformance.protocol`, and ``summary["activation"]`` with the initial
-``server/activate``. This is deliberately a monkey-patch: aiosendspin
-does not yet expose a first-class tracing hook (tracked in
+:mod:`conformance.protocol`, ``summary["activation"]`` with the initial
+``server/activate``, and ``summary["group_update"]`` with the first
+``group/update`` that followed it. This is deliberately a monkey-patch:
+aiosendspin does not yet expose a first-class tracing hook (tracked in
 https://github.com/Sendspin/conformance/issues/111), so this module reaches
 into private/semi-public attributes and is expected to need maintenance as
 the SDK evolves.
@@ -32,8 +33,10 @@ Evidence fidelity by assertion:
   well after handshake/activation and are stable public/semi-public hooks.
 - Initial ``server/activate``: full fidelity. The SDK sends it during
   connection bring-up, before the adapter holds the connection, so
-  :class:`SentActivationRecorder` wraps ``EncryptedWebSocket.send_str`` at
+  :class:`SentOpeningMessagesRecorder` wraps ``EncryptedWebSocket.send_str`` at
   class level and keeps the JSON body handed to the encrypting transport.
+- First ``group/update`` after that ``server/activate``: full fidelity, from
+  the same wrapper, which is what orders the two.
 - First metadata-carrying ``server/state``: full fidelity, and timed.
   :class:`SentMetadataStateRecorder` wraps the same transport method, because
   the timestamp requirement on that state needs a clock reading taken once the
@@ -101,13 +104,14 @@ class ProtocolEvidenceCollector:
         }
 
 
-class SentActivationRecorder:
+class SentOpeningMessagesRecorder:
     """
-    Records the first ``server/activate`` sent on each encrypted connection.
+    Records what opened each encrypted connection, as the server sent it.
 
-    Recording starts on construction and covers every connection the process
-    opens afterwards, so construct it before the server starts accepting
-    clients. Call :meth:`uninstall` to stop recording.
+    That is the first ``server/activate``, and the first ``group/update`` sent
+    after it. Recording starts on construction and covers every connection the
+    process opens afterwards, so construct it before the server starts
+    accepting clients. Call :meth:`uninstall` to stop recording.
     """
 
     def __init__(self) -> None:
@@ -116,17 +120,21 @@ class SentActivationRecorder:
         self._transport_class = EncryptedWebSocket
         self._original_send_str = EncryptedWebSocket.send_str
         self._first_by_socket: dict[Any, dict[str, Any]] = {}
+        self._first_group_update_by_socket: dict[Any, dict[str, Any]] = {}
 
         async def send_str(transport: Any, data: str) -> None:
             await self._original_send_str(transport, data)
             # Every JSON control body, including each server/time, passes through
-            # here, so only bodies naming the message type are parsed.
-            if '"server/activate"' not in data:
+            # here, so only bodies naming a recorded message type are parsed.
+            if '"server/activate"' not in data and '"group/update"' not in data:
                 return
             message = json.loads(data)
+            # A pairing re-handshake swaps the transport but keeps the socket.
+            socket = transport._ws
             if message.get("type") == "server/activate":
-                # A pairing re-handshake swaps the transport but keeps the socket.
-                self._first_by_socket.setdefault(transport._ws, message)
+                self._first_by_socket.setdefault(socket, message)
+            elif message.get("type") == "group/update" and socket in self._first_by_socket:
+                self._first_group_update_by_socket.setdefault(socket, message)
 
         EncryptedWebSocket.send_str = send_str  # type: ignore[method-assign]
 
@@ -149,6 +157,21 @@ class SentActivationRecorder:
             )
         return message
 
+    def first_group_update(self, connection: Any) -> dict[str, Any] | None:
+        """
+        Return the first ``group/update`` sent after the first ``server/activate``.
+
+        The message is the ``{"type": ..., "payload": ...}`` body as sent on a
+        server-side ``SendspinConnection``. Returns ``None`` when none had been
+        sent by the time of the call, which covers an unencrypted legacy
+        connection, where no ``server/activate`` precedes anything. A
+        ``group/update`` sent before the first ``server/activate`` is not the
+        one this returns. Both messages are seen by one wrapper, so
+        :meth:`initial_activation` raising is what shows this one went unobserved.
+        """
+        socket = connection._wsock_server or connection._wsock_client
+        return self._first_group_update_by_socket.get(socket)
+
     def uninstall(self) -> None:
         """Restore the SDK transport's own ``send_str``."""
         self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
@@ -159,7 +182,7 @@ class SentMetadataStateRecorder:
     Records the first ``server/state`` sent carrying a metadata object with a timestamp.
 
     Wraps ``EncryptedWebSocket.send_str`` for the same reason
-    :class:`SentActivationRecorder` does: these states leave on the SDK's own
+    :class:`SentOpeningMessagesRecorder` does: these states leave on the SDK's own
     queue drain rather than from the adapter, so no public hook fires once one
     is really on the wire. ``send_role_message`` only enqueues.
 
@@ -169,7 +192,7 @@ class SentMetadataStateRecorder:
     already past by the time the frame went out, and so blame a conformant
     server. A later reading can only make the check more permissive.
 
-    Installed alongside the activation recorder, the two wrappers nest. Each
+    Installed alongside the opening-messages recorder, the two wrappers nest. Each
     awaits the send it captured, so both still see every frame, and this one's
     reading only moves later, which is the safe direction.
 

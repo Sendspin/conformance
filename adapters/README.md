@@ -32,6 +32,22 @@ it omits `active_roles`. Which activity sets and roles the matched PSK allows is
 because no summary records which PSK matched. A summary with no `activation` field at all
 is not judged, so omitting the field hides a server from this verdict rather than passing it.
 
+## First group update
+
+Every server adapter MUST report a `group_update` field in its summary: the first
+`group/update` it sent after its first `server/activate` on the connection, as it went on
+the wire, in the same `{"type": ..., "payload": ...}` shape. Report `null` only when none
+followed, which includes a server that sent no `server/activate` for one to follow. Never
+reconstruct it from adapter arguments or SDK state.
+
+The matrix draws a verdict from this field on every case: a case fails when it is `null`,
+when `playback_state` is not `playing` or `stopped`, or when `group_id` or `group_name` is
+missing or not a string. How soon the message followed the `server/activate` is not judged:
+the spec says "promptly" and gives no bound, so one sent at any point in the case counts.
+A summary with no `group_update` field fails the case as a harness gap, so an adapter that
+cannot observe the message cannot pass by staying silent. A server whose `activation` is
+`null` is left to that verdict.
+
 ## Metadata scenario summary fields
 
 The spec requires the first `server/state` sent for a role on a connection to

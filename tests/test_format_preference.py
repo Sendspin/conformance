@@ -22,6 +22,13 @@ FLAC_16 = {"codec": "flac", "sample_rate": 8000, "bit_depth": 16, "channels": 1}
 SCENARIO_IDS = ("client-initiated-state-format-pcm", "client-initiated-state-format-flac")
 
 
+# Every server summary carries one, and a case whose summary lacks it never passes.
+GROUP_UPDATE = {
+    "type": "group/update",
+    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+}
+
+
 def _server_summary(
     *,
     received: dict[str, Any] | None,
@@ -31,6 +38,7 @@ def _server_summary(
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "group_update": GROUP_UPDATE,
         "stream": stream,
         "format_preference": {"received": received},
     }

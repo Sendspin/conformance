@@ -29,7 +29,7 @@ from .io import read_json, write_json
 from .models import AUDIO_FORMAT_FIELDS, CaseResult, RoleName, ScenarioSpec
 from .paths import repo_root
 from .process import close_process_log, collect_process, wait_for_exit, wait_for_file
-from .protocol import activation_violation, protocol_evidence_failure
+from .protocol import activation_violation, group_update_violation, protocol_evidence_failure
 from .scenarios import ordered_scenarios, require_scenario
 from .toolchains import find_cargo, find_cmake, find_dotnet, find_go, find_swift
 
@@ -1179,6 +1179,11 @@ def _compare_summaries(
     # RC1 opens every connection with the server's initial server/activate,
     # whatever the scenario goes on to exercise, so this applies to all of them.
     violation = activation_violation(server_summary)
+    if violation is not None:
+        return False, violation
+    # RC1 also has the server send a group/update after that first
+    # server/activate on every connection, so this applies to all of them too.
+    violation = group_update_violation(server_summary)
     if violation is not None:
         return False, violation
     # Every format the case negotiated must be one the client declared. Modes

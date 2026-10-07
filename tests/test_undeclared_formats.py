@@ -24,6 +24,13 @@ PCM_24 = {"codec": "pcm", "sample_rate": 8000, "bit_depth": 24, "channels": 1}
 ENCODED_SHA = "b" * 64
 
 
+# Every server summary carries one, and a case whose summary lacks it never passes.
+GROUP_UPDATE = {
+    "type": "group/update",
+    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+}
+
+
 def _server_summary(
     *,
     declared: list[Any] | None,
@@ -39,6 +46,7 @@ def _server_summary(
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "group_update": GROUP_UPDATE,
         "peer_hello": {"type": "client/hello", "payload": payload},
         "stream": stream,
         "audio": {"sent_audio_chunk_count": 4, "sent_encoded_sha256": ENCODED_SHA},

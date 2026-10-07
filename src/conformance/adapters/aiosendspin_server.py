@@ -17,9 +17,9 @@ from PIL import Image, ImageDraw
 from conformance.adapters._aiosendspin_protocol_evidence import (
     ChunkPayloadSizes,
     ProtocolEvidenceCollector,
-    SentActivationRecorder,
     SentBinaryFrameRecorder,
     SentMetadataStateRecorder,
+    SentOpeningMessagesRecorder,
     record_activation_evidence_server,
     record_handshake_evidence_server,
     record_player_stream_evidence,
@@ -322,6 +322,7 @@ def _base_summary(
     discovery_method: str,
     client: Any,
     activation: dict[str, Any] | None,
+    group_update: dict[str, Any] | None,
 ) -> dict[str, Any]:
     return {
         "status": "ok",
@@ -338,6 +339,7 @@ def _base_summary(
             "payload": client.info.to_dict(),
         },
         "activation": activation,
+        "group_update": group_update,
         "client": _client_snapshot(client),
     }
 
@@ -943,7 +945,7 @@ async def _run(args: argparse.Namespace) -> int:
         allow_noncompliant_clients=args.scenario_id != "server-initiated-protocol-baseline-v1",
     )
     server_id = server.id
-    sent_activations = SentActivationRecorder()
+    sent_opening_messages = SentOpeningMessagesRecorder()
     # Watches the transport from here, because the first metadata-carrying
     # server/state can go out during connection bring-up, before the adapter
     # holds the client.
@@ -1015,7 +1017,10 @@ async def _run(args: argparse.Namespace) -> int:
                 server_id=server_id,
                 discovery_method=discovery_method,
                 client=client,
-                activation=sent_activations.initial_activation(connection),
+                activation=sent_opening_messages.initial_activation(connection),
+                # Read once the scenario has run, so the server has had the whole
+                # case in which to send one.
+                group_update=sent_opening_messages.first_group_update(connection),
             ),
             **payload,
         }

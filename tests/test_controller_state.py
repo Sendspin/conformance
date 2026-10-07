@@ -24,6 +24,13 @@ COMMAND = "next"
 ADVERTISED = ["mute", "next", "switch", "volume"]
 
 
+# Every server summary carries one, and a case whose summary lacks it never passes.
+GROUP_UPDATE = {
+    "type": "group/update",
+    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+}
+
+
 def _apply(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
     """Apply overrides, with the `_ABSENT` sentinel dropping a field outright."""
     for field, value in overrides.items():
@@ -48,6 +55,7 @@ def _server_summary(**overrides: Any) -> dict[str, Any]:
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "group_update": GROUP_UPDATE,
         "controller": _apply(controller, overrides),
     }
 

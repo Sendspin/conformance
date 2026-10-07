@@ -127,6 +127,7 @@ Important fields to preserve where available:
 - `preferred_codec`
 - `peer_hello`
 - `activation` (server summaries)
+- `group_update` (server summaries)
 - audio hash fields
 
 `peer_hello` should contain the full hello message received from the other party whenever capture is possible.
@@ -134,6 +135,10 @@ Important fields to preserve where available:
 `activation` should contain the first `server/activate` the server sent, as it went on the wire and in the same `{type, payload}` shape as `peer_hello`. It is `null` only when the server sent none, and is never reconstructed from adapter arguments or SDK state.
 
 `null` fails the case: `activation_violation` in `src/conformance/protocol.py` judges this field on every case, whatever the scenario.
+
+`group_update` should contain the first `group/update` the server sent after that first `server/activate`, as it went on the wire and in the same `{type, payload}` shape. It is `null` only when none followed, and is never reconstructed from adapter arguments or SDK state.
+
+`group_update_violation` in `src/conformance/protocol.py` judges this field on every case too. `null` fails the case, and so does a `group/update` whose `playback_state` is not `playing` or `stopped`, or whose `group_id` or `group_name` is missing or not a string. Unlike `activation`, a summary without the field also fails the case, as a harness gap: an adapter that cannot observe the message must never read as a server that sent it. How soon the message followed is not judged, because the spec says "promptly" and gives no bound, so one sent at any point in the case satisfies it.
 
 ### Audio fixture
 
@@ -181,8 +186,9 @@ costs more than the risk.
 Bumping `scenario_revision` on the one scenario that changed is the deliberate
 act that resets its baseline; every other scenario in the same run
 keeps full protection. A verdict applied to every case, such as
-`activation_violation`, changes the assertions of every scenario and so bumps
-them all, which exempts the whole matrix for that one release. Do not add a
+`activation_violation` or `group_update_violation`, changes the assertions of
+every scenario and so bumps them all, which exempts the whole matrix for that
+one release. Do not add a
 waiver file, allowlist or PR-label escape hatch — the baseline is live and
 remote, so any such list goes stale on the next merge.
 

@@ -303,6 +303,7 @@ func runSession(
 		"discovery_method": discoveryMethod,
 		"peer_hello":       rawPeerHello,
 		"activation":       nil, // server/hello above carries active_roles; no server/activate is ever sent
+		"group_update":     nil, // with no server/activate sent, no group/update follows one
 		"client": map[string]any{
 			"client_id":       hello.ClientID,
 			"name":            hello.Name,

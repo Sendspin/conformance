@@ -513,6 +513,9 @@ DECLARED_FORMAT_COLUMNS = ("Declared format", "Claim status", "Declared in", "Ex
 # Shown for every recorded server/activate, present in the payload or not.
 ACTIVATION_PAYLOAD_FIELDS = ("activities", "active_roles")
 
+# Shown for every recorded group/update, present in the payload or not.
+GROUP_UPDATE_PAYLOAD_FIELDS = ("playback_state", "group_id", "group_name")
+
 GITHUB_REPO_URL = "https://github.com/balloob-travel/conformance"
 SENDSPIN_AUDIO_URL = "https://sendspin-audio.com/"
 SCENARIOS_REPO_PATH = "src/conformance/scenarios.py"
@@ -1955,11 +1958,11 @@ def _activation_value(value: Any) -> str:
     return f"<span class='font-mono text-[13px]'>{_escape(json.dumps(value))}</span>"
 
 
-def _activation_rows(activation: Any) -> str:
-    payload = activation.get("payload") if isinstance(activation, dict) else None
+def _recorded_message_rows(message: Any, payload_fields: tuple[str, ...]) -> str:
+    payload = message.get("payload") if isinstance(message, dict) else None
     if not isinstance(payload, dict):
         # Not shaped like a message, so it is shown whole rather than dropped.
-        fields = [("Recorded value", _activation_value(activation))]
+        fields = [("Recorded value", _activation_value(message))]
     else:
         fields = [
             (
@@ -1968,12 +1971,12 @@ def _activation_rows(activation: Any) -> str:
                 if name in payload
                 else "<span class='text-sm subtle-copy'>not in the message</span>",
             )
-            for name in ACTIVATION_PAYLOAD_FIELDS
+            for name in payload_fields
         ]
         fields += [
             (name, _activation_value(payload[name]))
             for name in sorted(payload)
-            if name not in ACTIVATION_PAYLOAD_FIELDS
+            if name not in payload_fields
         ]
     return "".join(
         "<div class='keyval-row'>"
@@ -2004,7 +2007,8 @@ def _render_activation_section(server_summary: Any, *, label: str) -> str:
             "</div>"
         )
     else:
-        content = f"<div class='keyval'>{_activation_rows(activation)}</div>"
+        rows = _recorded_message_rows(activation, ACTIVATION_PAYLOAD_FIELDS)
+        content = f"<div class='keyval'>{rows}</div>"
     return (
         "<section class='surface p-5 sm:p-6'>"
         "<p class='eyebrow'>Server activation</p>"
@@ -2016,6 +2020,48 @@ def _render_activation_section(server_summary: Any, *, label: str) -> str:
         "active_roles. Nothing else in it is checked against the specification: which "
         "activities and roles the matched PSK allows is not judged. A recording that cannot "
         "be read as that message is shown whole and not judged either."
+        "</p>"
+        f"<div class='mt-5'>{content}</div>"
+        "</section>"
+    )
+
+
+def _render_group_update_section(server_summary: Any, *, label: str) -> str:
+    """
+    Render the first ``group/update`` after activation recorded in a server summary.
+
+    Returns an empty string when the summary has no ``group_update`` field, so
+    a server that reported nothing is not shown as having sent none.
+    """
+    if not isinstance(server_summary, dict) or "group_update" not in server_summary:
+        return ""
+    group_update = server_summary["group_update"]
+    message_type = "<span class='font-mono text-[13px]'>group/update</span>"
+    activate_type = "<span class='font-mono text-[13px]'>server/activate</span>"
+    if group_update is None:
+        content = (
+            "<div class='surface-inset px-4 py-3 text-sm'>"
+            f"<p class='font-semibold'>No {message_type} observed after a {activate_type}</p>"
+            f"<p class='mt-2 subtle-copy'>The {_escape(label)} server sent no {message_type} "
+            f"after a first {activate_type} on this connection, according to its adapter. One "
+            f"sent on a connection that never carried a {activate_type} is not recorded here.</p>"
+            "</div>"
+        )
+    else:
+        rows = _recorded_message_rows(group_update, GROUP_UPDATE_PAYLOAD_FIELDS)
+        content = f"<div class='keyval'>{rows}</div>"
+    return (
+        "<section class='surface p-5 sm:p-6'>"
+        "<p class='eyebrow'>Server group state</p>"
+        f"<h2 class='mt-2 text-2xl'>First {message_type} after activation</h2>"
+        "<p class='mt-3 max-w-3xl text-sm leading-6 subtle-copy'>"
+        f"What the {_escape(label)} server's own adapter recorded for the first {message_type} "
+        f"it sent after its first {activate_type} on this connection, reported as sent. The "
+        "case fails when none followed, when playback_state is not playing or stopped, or "
+        "when group_id or group_name is missing or not a string. How soon it followed is not "
+        "judged, because the specification says promptly and gives no bound, so one sent at "
+        "any point in the case counts. A recording of anything other than that message fails "
+        "the case as a harness gap."
         "</p>"
         f"<div class='mt-5'>{content}</div>"
         "</section>"
@@ -2121,6 +2167,7 @@ def _render_case_page(
         "<main class='space-y-6'>"
         f"{_page_header(accent='case', breadcrumb=breadcrumb, kicker='Case', title=f'{server_label} -> {client_label}', description=_scenario_description(scenario_id), meta=header_meta)}"
         f"{_render_activation_section(server_summary, label=server_label)}"
+        f"{_render_group_update_section(server_summary, label=server_label)}"
         "<section class='surface p-4 sm:p-5' data-tabset>"
         "<div>"
         "<p class='eyebrow'>Inspection</p>"

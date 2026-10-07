@@ -6,11 +6,16 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .chunk_framing import HARNESS_GAP
+
 
 SPEC_REVISION = "8c9577ea8719ad082d051ec13cc73ef15ed68948"
 
 # The activities RC1 defines. An implementation's own extensions are not in it.
 RC1_ACTIVITIES = frozenset({"pairing", "playback"})
+
+# The group playback states RC1 defines.
+RC1_PLAYBACK_STATES = ("playing", "stopped")
 
 
 @dataclass(frozen=True)
@@ -150,6 +155,73 @@ def activation_violation(server_summary: dict[str, Any]) -> str | None:
     if not defects:
         return None
     return f"Server's initial server/activate {'; '.join(defects)}"
+
+
+def group_update_violation(server_summary: dict[str, Any]) -> str | None:
+    """
+    Return how the server's first `group/update` breaks RC1, or None.
+
+    RC1 has the server send a `group/update` after the first `server/activate`
+    on every connection, and has every `group/update` carry all three of its
+    fields, so this is judged on every case. It is asserted against the message
+    as the server's adapter recorded it: that one followed the first
+    `server/activate`, that `playback_state` is 'playing' or 'stopped', and
+    that `group_id` and `group_name` are strings.
+
+    RC1 says the message follows "promptly" and gives no bound, so how long the
+    server took is not judged: one sent at any point in the case satisfies it.
+
+    None means a conformant `group/update` was recorded, with one exception: a
+    server recorded as sending no `server/activate` gave the requirement
+    nothing to follow, and `activation_violation` already reports it.
+
+    A recorded `null` is a server defect: the adapter contract reserves it for
+    a server that sent none. So is a `group/update` with no payload object. A
+    summary with no `group_update` field, or one recording some other message,
+    is reported as a harness gap, naming the adapter rather than the
+    implementation.
+    """
+    if "activation" in server_summary and server_summary["activation"] is None:
+        return None
+    if "group_update" not in server_summary:
+        return (
+            f"{HARNESS_GAP}the server adapter does not record the first group/update "
+            "it sent after its first server/activate"
+        )
+    group_update = server_summary["group_update"]
+    if group_update is None:
+        return (
+            "Server sent no group/update after its first server/activate; RC1 requires "
+            "the server to send one on every connection"
+        )
+    if not isinstance(group_update, dict) or group_update.get("type") != "group/update":
+        return (
+            f"{HARNESS_GAP}the server adapter recorded something other than a "
+            f"group/update as the first one sent: {json.dumps(group_update)}"
+        )
+    subject = "Server's first group/update after server/activate"
+    payload = group_update.get("payload")
+    if not isinstance(payload, dict):
+        return f"{subject} carried no payload object, so none of the fields RC1 requires"
+
+    defects: list[str] = []
+    if "playback_state" not in payload:
+        defects.append("omitted playback_state, which RC1 requires")
+    elif payload["playback_state"] not in RC1_PLAYBACK_STATES:
+        defects.append(
+            f"declared playback_state {json.dumps(payload['playback_state'])}, where RC1 "
+            "requires 'playing' or 'stopped'"
+        )
+    for name in ("group_id", "group_name"):
+        if name not in payload:
+            defects.append(f"omitted {name}, which RC1 requires")
+        elif not isinstance(payload[name], str):
+            defects.append(
+                f"declared {name} {json.dumps(payload[name])}, where RC1 requires a string"
+            )
+    if not defects:
+        return None
+    return f"{subject} {'; '.join(defects)}"
 
 
 def _is_rc1_activity_set(activities: Any) -> bool:

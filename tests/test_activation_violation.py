@@ -28,6 +28,12 @@ def _activate(**payload: Any) -> dict[str, Any]:
 
 PLAYBACK_ACTIVATE = _activate(activities=["playback"], active_roles=["player@v1"])
 
+# Every server summary carries one, and a case whose summary lacks it never passes.
+GROUP_UPDATE = {
+    "type": "group/update",
+    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+}
+
 
 def _audio_summary(role: str, **extra: Any) -> dict[str, Any]:
     """Build a summary that passes PCM verification on its own."""
@@ -167,7 +173,7 @@ class CaseVerdictTest(unittest.TestCase):
     def _verdict(self, **server_extra: Any) -> tuple[bool, str]:
         return _compare_summaries(
             self.scenario,
-            _audio_summary("server", **server_extra),
+            _audio_summary("server", group_update=GROUP_UPDATE, **server_extra),
             _audio_summary("client"),
         )
 
