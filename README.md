@@ -33,7 +33,7 @@ Current scenarios:
 
 The OPUS scenario is currently exercised only by the `SendspinKit` and `sendspin-cpp` clients against the `aiosendspin` server until other implementations opt in via `supports_opus`.
 
-The `client-initiated-state-format-*` scenarios have no capability flag of their own: RC1 gives every player the `client/state` `format` preference, so a client that never sends one shows as a failed case. The FLAC variant still needs a client that can list FLAC (`supports_flac`). Only the `aiosendspin` client adapter drives them today.
+The `client-initiated-state-format-*` scenarios have no capability flag of their own: RC1 gives every player the `client/state` `format` preference, so a client that never sends one shows as a failed case. The FLAC variant still needs a client that can list FLAC (`supports_flac`). The `aiosendspin` and `SendspinKit` client adapters drive them today.
 
 The `client-initiated-metadata`, `client-initiated-artwork` and `client-initiated-controller` scenarios have no capability flag of their own either: RC1 requires every server to support client-initiated connections, whichever roles the client brings. The `aiosendspin`, `sendspin-dotnet`, `SendspinKit`, `sendspin-cpp` and `sendspin-js` client adapters drive them over the outbound path they use for `client-initiated-pcm`. The `sendspin-go` and `sendspin-rs` client adapters have an outbound path for player sessions only, so their cases fail as a harness gap rather than being left out.
 
