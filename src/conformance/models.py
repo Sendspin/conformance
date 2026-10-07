@@ -174,3 +174,6 @@ class CaseResult:
     case_dir: str
     server_exit_code: int | None = None
     client_exit_code: int | None = None
+    # Set by the harness when it judged, before launching anything, that an
+    # implementation cannot run the scenario. Never derived from adapter output.
+    unsupported: bool = False

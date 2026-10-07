@@ -989,20 +989,15 @@ def _repository_versions_section(
 
 
 def _display_status(result: dict[str, Any]) -> str:
-    status = str(result["status"])
-    if status != "failed":
-        return status
+    """
+    Return the status a result is labelled and counted under.
 
-    reason = str(result.get("reason") or "").lower()
-    unsupported_markers = (
-        "does not support",
-        "currently a client library",
-        "does not yet expose",
-        "not a server implementation",
-        "only supports client-initiated",
-        "only supports server-initiated",
-    )
-    if any(marker in reason for marker in unsupported_markers):
+    A failed case reads "unsupported" only when the harness recorded that
+    judgement on the row. A row published before the field existed carries none
+    and keeps its recorded status.
+    """
+    status = str(result["status"])
+    if status == "failed" and result.get("unsupported") is True:
         return "unsupported"
     return status
 
