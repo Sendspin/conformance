@@ -20,10 +20,12 @@ jobs:
   publish-report:
     if: github.repository == 'sendspin/conformance'
     runs-on: macos-26
-    # Only the newest run for a ref is worth finishing. The group is scoped to this
-    # job so that a run which has reached deploy-pages can no longer be cancelled.
+    # A newer push to a pull request cancels the run it supersedes. Every other
+    # event gets a group of its own: deploy-pages fails on GitHub's side when its
+    # run has cancelled another through this group, so a run that deploys never
+    # shares it.
     concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}
+      group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
       cancel-in-progress: true
     outputs:
       site_built: ${{ steps.check_site.outputs.site_built }}
