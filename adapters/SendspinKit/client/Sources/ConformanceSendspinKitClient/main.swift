@@ -607,7 +607,7 @@ actor ConformanceCollector {
             var controllerDict: [String: Any] = [:]
             if let state = receivedControllerState {
                 controllerDict["received_state"] = [
-                    "supported_commands": Array(state.supportedCommands.map(\.rawValue)),
+                    "supported_commands": state.supportedCommands.map(\.rawValue).sorted(),
                     "volume": state.volume,
                     "muted": state.muted,
                     "repeat": state.repeatMode?.rawValue as Any? ?? NSNull(),
