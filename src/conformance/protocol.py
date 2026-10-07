@@ -380,12 +380,14 @@ def time_exchange_violation(server_summary: dict[str, Any]) -> str | None:
     close with a `client/time` still unread. So one left unanswered is a
     violation only when the record shows the server went on without answering
     it: it answered a `client/time` it received later, or began sending some
-    other message after receiving it. No interval is measured. A `client/time`
-    nothing was sent after is not judged, however many there are, so a server
-    whose adapter records no `other-sent` entries and that answers none passes.
-    What the record shows is that the server kept sending, not that it had
-    handled the message: one that replies out of order, or sends queued
-    messages ahead of a reply, and never sent the reply is named.
+    other message after receiving it and then received a further `client/time`.
+    No interval is measured. The last `client/time` received is judged on
+    neither count, since a server shutting down may flush what it had queued
+    and close. Nor is one nothing was sent after, however many there are, so a
+    server whose adapter records no `other-sent` entries and that answers none
+    passes. What the record shows is that the server kept reading and sending,
+    not that it had handled the message: one that replies out of order and
+    never sent the earlier reply is named.
 
     The values themselves are not judged, because RC1 says the timestamps are
     not necessarily epoch-based. Nor is whether `server_transmitted` was
@@ -462,7 +464,7 @@ def time_exchange_violation(server_summary: dict[str, Any]) -> str | None:
     for position, _ in unanswered:
         if position < latest_answered:
             went_on = "answered one it received later"
-        elif position in passed_over:
+        elif position in passed_over and position < received:
             went_on = "sent another message after receiving it"
         else:
             continue

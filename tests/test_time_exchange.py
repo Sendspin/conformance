@@ -168,9 +168,15 @@ class TimeExchangeViolationTest(unittest.TestCase):
 
     def test_a_client_time_the_server_sent_past_is_reported(self) -> None:
         for label, exchange in {
-            "never answered": [_client_time(1), OTHER_SENT],
-            "second of two": [_client_time(1), _server_time(1), _client_time(2), OTHER_SENT],
             "first of two": [_client_time(1), OTHER_SENT, _client_time(2)],
+            "first of two, sent past later": [_client_time(1), _client_time(2), OTHER_SENT],
+            "second of three": [
+                _client_time(1),
+                _server_time(1),
+                _client_time(2),
+                OTHER_SENT,
+                _client_time(3),
+            ],
         }.items():
             with self.subTest(label):
                 violation = _violation(*exchange)
@@ -181,12 +187,17 @@ class TimeExchangeViolationTest(unittest.TestCase):
 
     def test_the_client_time_named_is_the_one_sent_past(self) -> None:
         violation = _violation(
-            _client_time(1), OTHER_SENT, _server_time(1), _client_time(2), OTHER_SENT
+            _client_time(1),
+            OTHER_SENT,
+            _server_time(1),
+            _client_time(2),
+            OTHER_SENT,
+            _client_time(3),
         )
 
         self.assertIsNotNone(violation)
         self.assertTrue(
-            violation.startswith("Server sent no server/time for client/time 2 of 2"), violation
+            violation.startswith("Server sent no server/time for client/time 2 of 3"), violation
         )
 
     def test_a_client_time_skipped_for_a_later_one_is_reported(self) -> None:
@@ -204,6 +215,14 @@ class TimeExchangeViolationTest(unittest.TestCase):
             "every one": [_client_time(1), _client_time(2), _client_time(3)],
             # Sent before the client/time was received, so no evidence about it.
             "after another message": [OTHER_SENT, _client_time(1)],
+            # A server shutting down may flush what it had queued and close.
+            "the last one, sent past": [_client_time(1), OTHER_SENT],
+            "the last of two, sent past": [
+                _client_time(1),
+                _server_time(1),
+                _client_time(2),
+                OTHER_SENT,
+            ],
             "last one": [_client_time(1), _server_time(1), _client_time(2)],
             "last two": [_client_time(1), _server_time(1), _client_time(2), _client_time(3)],
             # The reply to 1 was still being written when 2 arrived.
@@ -292,7 +311,7 @@ class CaseVerdictTest(unittest.TestCase):
 
     def test_a_missing_group_update_is_reported_first(self) -> None:
         matches, reason = self._verdict(
-            group_updates=[], time_exchange=[_client_time(), OTHER_SENT]
+            group_updates=[], time_exchange=[_client_time(1), OTHER_SENT, _client_time(2)]
         )
 
         self.assertFalse(matches)
@@ -303,7 +322,7 @@ class CaseVerdictTest(unittest.TestCase):
             "status": "ok",
             "group_updates": [GROUP_UPDATE],
             "availability_trace": AVAILABILITY_TRACE,
-            "time_exchange": [_client_time(), OTHER_SENT],
+            "time_exchange": [_client_time(1), OTHER_SENT, _client_time(2)],
         }
         with mock.patch("conformance.runner._dispatch_comparison", return_value=(True, "ok")):
             for scenario in SCENARIO_LIST:

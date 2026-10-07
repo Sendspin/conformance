@@ -132,14 +132,21 @@ says the spec states the response without marking it mandatory.
 
 A `client/time` left unanswered fails the case only when the record shows the server went
 on without answering it: it answered a `client/time` it received later, or an `other-sent`
-entry follows it. No interval is measured, because the spec gives no bound on the response.
-A `client/time` nothing was sent after is not judged, however many there are, since a
-connection can close with one still unread. So a server that answers none passes where its
-adapter records no `other-sent` entries, or where it sent no other text after the first.
+entry follows it and a further `client/time` was received. No interval is measured,
+because the spec gives no bound on the response. Two kinds are never judged:
 
-The record shows that the server kept sending, not that it had handled the message. A
-server that replies out of order, or that sends messages it had queued ahead of a reply,
-and never sent the reply, is named.
+- The last `client/time` received. A connection can close with it still unread, and a
+  server shutting down may send what it had queued and close without answering.
+- A `client/time` nothing was sent after, however many there are.
+
+So a server interrupted by shutdown is not named. A server that answers none passes where
+the client sent one `client/time`, where its adapter records no `other-sent` entries, or
+where it sent no other text after the first.
+
+The record shows that the server kept reading and sending, not that it had handled the
+message. One case is still named without proof: a server that replies out of order and
+never sent the earlier reply, as in `client/time` 1, `client/time` 2, `server/time` 2.
+The spec does not define reply ordering.
 
 A `client/time` whose `client_transmitted` is not an integer fails the case naming the
 client. A case in which no `client/time` was sent gives the verdict nothing to judge. A
