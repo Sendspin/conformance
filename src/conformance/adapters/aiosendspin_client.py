@@ -88,8 +88,8 @@ def _supported_formats(preferred_codec: str, *, scenario_id: str = "") -> list[A
         # The registry marks this client `supports_opus=False`, so the runner
         # fail-fasts the opus case before the adapter is launched.
         raise ValueError(
-            "aiosendspin decodes PCM and FLAC only, so an opus-only list is "
-            "entirely undecodable and it cannot advertise opus alongside the pcm "
+            "aiosendspin decodes PCM and FLAC only and rejects a supported_formats "
+            "list naming any other codec, so it cannot list opus ahead of the pcm "
             "or flac entry roles/player/v1.md requires"
         )
     if scenario_id == "server-initiated-pcm-24bit":

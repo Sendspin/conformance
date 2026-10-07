@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .declared_formats import undeclared_format_violation
+from .declared_formats import format_priority_violation, undeclared_format_violation
 from .environment import resolve_environment
 from .fixtures import fixture_path
 from .implementations import (
@@ -1206,6 +1206,14 @@ def _dispatch_comparison(
     if scenario.verification_mode == "audio-pcm":
         return _compare_audio_summaries(server_summary, client_summary)
     if scenario.verification_mode == "audio-encoded-bytes":
+        # A server that failed keeps its own reason; the status checks below name it.
+        if scenario.verifies_format_priority and server_summary.get("status") == "ok":
+            violation = format_priority_violation(
+                server_summary,
+                preferred_codec=scenario.preferred_codec,
+            )
+            if violation is not None:
+                return False, violation
         return _compare_encoded_audio_summaries(
             server_summary,
             client_summary,

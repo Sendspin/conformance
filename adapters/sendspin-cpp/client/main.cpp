@@ -508,6 +508,12 @@ static PlayerRoleConfig build_player_config(const Args& args) {
             bit_depth,
         };
         config.audio_formats = {format};
+        if (codec == SendspinCodecFormat::OPUS) {
+            // Every player has to list flac or pcm; opus stays first so the server's
+            // priority choice is what the case exercises.
+            config.audio_formats.push_back(
+                AudioSupportedFormatObject{SendspinCodecFormat::PCM, 1, 8000, 16});
+        }
     }
     return config;
 }
