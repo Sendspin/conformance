@@ -156,11 +156,11 @@ jobs:
     needs: publish-report
     if: github.repository == 'sendspin/conformance' && github.event_name != 'pull_request' && needs.publish-report.outputs.site_built == 'true'
     runs-on: ubuntu-latest
-    # Deployments wait their turn and are never cancelled, in flight or pending.
+    # An in-flight deployment is never cancelled. A pending one gives way to a
+    # newer deployment, because only the newest report matters.
     concurrency:
       group: pages
       cancel-in-progress: false
-      queue: max
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
