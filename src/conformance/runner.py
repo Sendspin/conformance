@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from .chunk_framing import chunk_framing_verdict
-from .declared_formats import format_priority_violation, undeclared_format_violation
+from .declared_formats import (
+    format_priority_violation,
+    stream_bit_depth_violation,
+    undeclared_format_violation,
+)
 from .environment import resolve_environment
 from .fixtures import fixture_path
 from .implementations import (
@@ -1235,7 +1239,16 @@ def _dispatch_comparison(
             return False, failure
         return True, f"Passed {len(scenario.protocol_assertions)} protocol assertions"
     if scenario.verification_mode == "audio-pcm":
-        return _compare_audio_summaries(server_summary, client_summary)
+        matches, reason = _compare_audio_summaries(server_summary, client_summary)
+        if matches and scenario.verifies_stream_bit_depth is not None:
+            violation = stream_bit_depth_violation(
+                server_summary,
+                client_summary,
+                bit_depth=scenario.verifies_stream_bit_depth,
+            )
+            if violation is not None:
+                return False, violation
+        return matches, reason
     if scenario.verification_mode == "audio-encoded-bytes":
         # A server that failed keeps its own reason; the status checks below name it.
         if scenario.verifies_format_priority and server_summary.get("status") == "ok":

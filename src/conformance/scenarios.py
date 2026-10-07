@@ -190,13 +190,16 @@ SERVER_INITIATED_PCM_24BIT = ScenarioSpec(
         "client advertises a listener and 24-bit PCM as its only supported audio "
         "format. The matrix compares canonical PCM hashes after the client unpacks "
         "the 24-bit stream. A client SDK with no 24-bit decode path misreads the "
-        "bytes and produces a hash mismatch."
+        "bytes and produces a hash mismatch. The matrix also verifies that the "
+        "negotiated stream was 24-bit, because a 16-bit stream of the same clip "
+        "yields the same canonical hash without exercising the 24-bit path."
     ),
     initiator_role="server",
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="audio-pcm",
-    scenario_revision=6,
+    scenario_revision=7,
+    verifies_stream_bit_depth=24,
 )
 
 

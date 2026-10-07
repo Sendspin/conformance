@@ -6,12 +6,14 @@ those declarations to the formats the matrix really negotiated, so an untested
 claim is visible as such instead of hiding behind a green case.
 
 The join is mostly observational: it reports what a client claimed and what the
-wire carried. Two verdicts are drawn from it. `undeclared_format_violation`
+wire carried. Three verdicts are drawn from it. `undeclared_format_violation`
 asserts the spec MUST that a negotiated format be one the client listed, and
 applies to every case. `format_priority_violation` asserts that the server
 picked the first entry of a list offering it a choice, and applies only to a
-scenario built around that choice. Whether any other scenario got the format it
-set out to test is not recorded in machine-readable form anywhere yet.
+scenario built around that choice. `stream_bit_depth_violation` asserts that the
+negotiated stream carried the bit depth a scenario exists to test, and applies
+only to a scenario naming one. Whether any other scenario got the format it set
+out to test is not recorded in machine-readable form anywhere yet.
 """
 
 from __future__ import annotations
@@ -205,6 +207,73 @@ def format_priority_violation(
             f"{codec_label} first; a server that can produce {codec_label} is expected to "
             "honour supported_formats priority (roles/player/v1.md, SHOULD); "
             f"declared: {offered}"
+        )
+    return None
+
+
+def stream_bit_depth_violation(
+    server_summary: dict[str, Any],
+    client_summary: dict[str, Any],
+    *,
+    bit_depth: int,
+) -> str | None:
+    """Return why the case did not exercise a stream of `bit_depth`, or None.
+
+    For a scenario whose subject is one bit depth. The canonical PCM hash is
+    taken over float samples, so a stream of the same clip at another depth
+    still matches it; only the negotiated format shows which path the pair ran.
+
+    The spec requires no particular bit depth of a player, so a reason returned
+    here never describes a conformance defect in the client. It says the case
+    did not test what the scenario is for, and names the side whose evidence
+    shows why:
+
+    - The server's recorded stream is what was put on the wire, so it decides.
+      A server summary without a readable one is a harness gap rather than a
+      pass, because the server adapters belong to this harness.
+    - Where that stream has another depth and the client's `supported_formats`
+      offered none at `bit_depth`, the client adapter did not set up the
+      stimulus. That is a harness gap too: the adapter writes the declaration.
+      A declaration that is missing or holds an unreadable entry cannot show
+      that, so the reason then names neither side.
+    - Where the client did offer `bit_depth`, the server chose otherwise.
+    - A client that reports the stream it observed has to have observed the
+      same depth. A client summary without a readable stream is not judged.
+    """
+    stream = normalized_format(server_summary.get("stream"))
+    if stream is None:
+        return (
+            "Harness gap: the server adapter recorded no stream format, so the case "
+            f"cannot show that it tested {bit_depth}-bit audio"
+        )
+
+    declared, unreadable = _declared_formats(server_summary)
+    offered = ", ".join(format_label(audio_format) for audio_format in declared) or "none recorded"
+    if stream["bit_depth"] != bit_depth:
+        if not declared or unreadable:
+            return (
+                f"Harness gap: the stream was {format_label(stream)}, so the case cannot "
+                f"test {bit_depth}-bit audio, and the server summary records no readable "
+                "supported_formats from client/hello to show which side chose it; "
+                f"declared: {offered}"
+            )
+        if any(audio_format["bit_depth"] == bit_depth for audio_format in declared):
+            return (
+                f"Server streamed {format_label(stream)} although the client listed a "
+                f"{bit_depth}-bit format, so the case cannot test {bit_depth}-bit audio; "
+                f"declared: {offered}"
+            )
+        return (
+            f"Harness gap: the client adapter advertised no {bit_depth}-bit format and "
+            f"the stream was {format_label(stream)}, so the case cannot test "
+            f"{bit_depth}-bit audio; declared: {offered}"
+        )
+
+    observed = normalized_format(client_summary.get("stream"))
+    if observed is not None and observed["bit_depth"] != bit_depth:
+        return (
+            f"Client observed a {format_label(observed)} stream although the server "
+            f"sent {format_label(stream)}; declared: {offered}"
         )
     return None
 

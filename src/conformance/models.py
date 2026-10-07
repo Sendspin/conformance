@@ -147,6 +147,10 @@ class ScenarioSpec:
     # The case also checks that the client listed `preferred_codec` first with a
     # pcm or flac entry after it, and that the server picked the first entry.
     verifies_format_priority: bool = False
+    # The case also checks that the stream the pair negotiated carried this bit
+    # depth. It is a verdict on a case that ran, never a reason to keep an
+    # implementation out of the scenario.
+    verifies_stream_bit_depth: int | None = None
     extra_cli_args: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     protocol_assertions: tuple[str, ...] = field(default_factory=tuple)
 
