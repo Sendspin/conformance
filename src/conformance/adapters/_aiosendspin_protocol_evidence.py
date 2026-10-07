@@ -236,6 +236,41 @@ def binary_frame_record(frame: bytes) -> dict[str, Any]:
     return {"byte_count": len(frame), "leading_hex": frame[:FRAME_PREFIX_BYTES].hex()}
 
 
+class ChunkPayloadSizes:
+    """
+    The size of each audio chunk's payload, keyed by the timestamp the SDK gave it.
+
+    The SDK hands an adapter a chunk's audio and its timestamp together, on a
+    hook that never sees the frame, and the transport shows the frame but not
+    where its audio starts. The timestamp is the one thing both carry, so it is
+    what tells which audio a frame held.
+    """
+
+    def __init__(self) -> None:
+        self._sizes: dict[int, int | None] = {}
+
+    def record(self, timestamp_us: int, payload: bytes) -> None:
+        """Note the payload of the chunk stamped `timestamp_us`."""
+        # Two chunks sharing a timestamp cannot be told apart, so neither is paired.
+        self._sizes[timestamp_us] = None if timestamp_us in self._sizes else len(payload)
+
+    def paired(self, frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Return `frames` with a `payload_byte_count` on each.
+
+        The count is that of the chunk whose timestamp the frame carries in
+        bytes 1-8, read big-endian, and None for a frame carrying no recorded
+        timestamp there.
+        """
+        paired = []
+        for frame in frames:
+            leading = bytes.fromhex(frame["leading_hex"])
+            timestamp_us = int.from_bytes(leading[1:9], "big", signed=True)
+            size = self._sizes.get(timestamp_us) if len(leading) >= 9 else None
+            paired.append({**frame, "payload_byte_count": size})
+        return paired
+
+
 class SentBinaryFrameRecorder:
     """
     Records every binary frame sent on an encrypted connection, in order.

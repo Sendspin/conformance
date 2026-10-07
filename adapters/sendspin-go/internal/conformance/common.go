@@ -77,15 +77,17 @@ func SHA256Hex(data []byte) string {
 // past it; the rest of the payload is never recorded.
 const framePrefixBytes = 13
 
-// FrameRecord describes one binary frame as it was handed to the transport.
-func FrameRecord(frame []byte) map[string]any {
+// FrameRecord describes one binary frame as it was handed to the transport,
+// beside the size of the audio payload the caller built it from.
+func FrameRecord(frame []byte, payloadByteCount int) map[string]any {
 	prefix := frame
 	if len(prefix) > framePrefixBytes {
 		prefix = prefix[:framePrefixBytes]
 	}
 	return map[string]any{
-		"byte_count":  len(frame),
-		"leading_hex": HexLower(prefix),
+		"byte_count":         len(frame),
+		"leading_hex":        HexLower(prefix),
+		"payload_byte_count": payloadByteCount,
 	}
 }
 

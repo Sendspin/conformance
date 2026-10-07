@@ -193,6 +193,7 @@ fn frame_record(frame: &[u8]) -> serde_json::Value {
     serde_json::json!({
         "byte_count": frame.len(),
         "leading_hex": hex_lower(&frame[..frame.len().min(FRAME_PREFIX_BYTES)]),
+        "payload_byte_count": null,
     })
 }
 
@@ -745,6 +746,10 @@ where
                             }
                             encoded_hasher.update(&*data);
                             encoded_byte_count += data.len();
+                            // The frame recorded just above is the one this audio came off.
+                            if let Some(record) = received_frames.last_mut() {
+                                record["payload_byte_count"] = serde_json::json!(data.len());
+                            }
                             if stream.codec == "pcm" {
                                 received_hasher
                                     .update_from_pcm_bytes(&data, stream.bit_depth)

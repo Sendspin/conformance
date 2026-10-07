@@ -15,6 +15,7 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 from conformance.adapters._aiosendspin_protocol_evidence import (
+    ChunkPayloadSizes,
     ProtocolEvidenceCollector,
     SentActivationRecorder,
     SentBinaryFrameRecorder,
@@ -376,10 +377,8 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
     sent_audio_hasher = sha256()
     sent_audio_chunk_count = 0
     sent_audio_byte_count = 0
-    # The framing scenario reads the header width off the transported frames, so
-    # the payload count beside them has to be bytes this adapter saw for itself.
     chunk_framing_scenario = args.scenario_id == "server-initiated-audio-chunk-framing"
-    payload_counted_without_header = True
+    sent_payload_sizes = ChunkPayloadSizes()
     # The legacy unencrypted transport is not the one the recorder watches.
     frames_observable = client.connection is not None and client.connection.is_encrypted
     # The SDK keeps the header without send_ahead for a client whose client/hello
@@ -431,10 +430,13 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
         player_audio_header: bool = False,
         epoch_exempt: bool = False,
     ) -> None:
-        nonlocal sent_audio_chunk_count, sent_audio_byte_count, payload_counted_without_header
+        nonlocal sent_audio_chunk_count, sent_audio_byte_count
         if message_type == BinaryMessageType.AUDIO_CHUNK.value:
             payload = data if player_audio_header else data[BINARY_HEADER_SIZE:]
-            payload_counted_without_header &= player_audio_header
+            # A chunk handed over with its header attached has no payload this
+            # adapter saw apart from it, so its frame is left unpaired.
+            if chunk_framing_scenario and player_audio_header:
+                sent_payload_sizes.record(timestamp_us, payload)
             sent_audio_hasher.update(payload)
             sent_audio_chunk_count += 1
             sent_audio_byte_count += len(payload)
@@ -549,7 +551,9 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
     if format_preference_scenario:
         summary["format_preference"] = {"received": received_format_preference}
     if sent_frames is not None:
-        summary["audio"]["sent_chunk_frames"] = sent_frames.frames() if frames_observable else None
+        summary["audio"]["sent_chunk_frames"] = (
+            sent_payload_sizes.paired(sent_frames.frames()) if frames_observable else None
+        )
         # The SDK re-frames the blocks this adapter feeds it before sending them.
         summary["audio"]["chunked_by"] = "implementation"
         summary["audio"]["legacy_header_reason"] = (
@@ -559,10 +563,6 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
             if legacy_header
             else None
         )
-        if not payload_counted_without_header:
-            # A chunk handed over with its header already attached was counted by
-            # subtracting the SDK's own header size, which says nothing of the wire.
-            summary["audio"]["sent_encoded_byte_count"] = None
     return summary
 
 

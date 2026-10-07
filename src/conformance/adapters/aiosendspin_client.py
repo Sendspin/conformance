@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from conformance.adapters._aiosendspin_protocol_evidence import (
+    ChunkPayloadSizes,
     ProtocolEvidenceCollector,
     ReceivedBinaryFrameRecorder,
     record_activation_evidence_client,
@@ -238,6 +239,7 @@ async def _run(args: argparse.Namespace) -> int:
     }
     received_hasher = FloatPcmHasher()
     encoded_accumulator = bytearray()
+    received_payload_sizes = ChunkPayloadSizes()
     current_decoder: StreamingFlacDecoder | None = None
 
     metadata_state: dict[str, Any] = {
@@ -327,6 +329,8 @@ async def _run(args: argparse.Namespace) -> int:
         timestamp_us: int, payload: bytes, audio_format: Any, _send_ahead: int
     ) -> None:
         audio_chunk_timestamps_us.append(timestamp_us)
+        if received_frames is not None:
+            received_payload_sizes.record(timestamp_us, payload)
         audio_state["chunk_count"] += 1
         encoded_accumulator.extend(payload)
         codec = audio_format.codec.value
@@ -666,7 +670,9 @@ async def _run(args: argparse.Namespace) -> int:
             # Chunks that reached the listener without a frame being recorded
             # came over a transport the recorder does not watch.
             "received_chunk_frames": (
-                frames if frames or not audio_state["chunk_count"] else None
+                received_payload_sizes.paired(frames)
+                if frames or not audio_state["chunk_count"]
+                else None
             ),
         }
     elif format_preference_scenario:

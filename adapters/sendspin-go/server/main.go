@@ -535,7 +535,7 @@ func runPlayerScenario(
 			return nil, err
 		}
 		if conformance.IsChunkFramingScenario(parsed.ScenarioID) {
-			sentFrames = append(sentFrames, conformance.FrameRecord(frame))
+			sentFrames = append(sentFrames, conformance.FrameRecord(frame, len(block.Data)))
 		}
 		_, _ = sentHasher.Write(block.Data)
 		chunkCount++
