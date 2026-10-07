@@ -3,10 +3,11 @@ for the contract it must honour when it refuses.
 
 `roles/player/v1.md:20` requires a player to list `pcm` or `flac`, and may list
 `opus` in addition. The client SDK decodes only PCM and FLAC and rejects a
-`supported_formats` list holding anything else, so this adapter cannot satisfy
-both at once and must refuse rather than advertise an opus-only list. The
-registry marks the client `supports_opus=False`, which fail-fasts the opus case
-before the adapter is launched, so the matrix never reaches this rule.
+`supported_formats` list holding anything else, so this adapter cannot list
+opus ahead of a pcm or flac entry and must refuse rather than advertise a codec
+it cannot handle. The registry marks the client `supports_opus=False`, which
+fail-fasts the opus case before the adapter is launched, so the matrix never
+reaches this rule.
 
 A refusal still has to reach the harness as a result. AGENTS.md requires a
 client-side case that cannot run to fail fast, emit a summary and exit non-zero.

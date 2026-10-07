@@ -81,19 +81,23 @@ SERVER_INITIATED_FLAC = ScenarioSpec(
 
 SERVER_INITIATED_OPUS = ScenarioSpec(
     id="server-initiated-opus",
-    display_name="Server initiates connection and client wants OPUS",
+    display_name="Server initiates connection and client prefers OPUS",
     description=(
         "Start the server first, then the client. The server loads the PCM audio derived "
-        "from almost_silent.flac, the client advertises a listener and OPUS as its only "
-        "supported audio format, the server connects in, uses the SDK to encode the PCM "
-        "into OPUS, streams it to the client, and the matrix compares the transported "
-        "OPUS header and chunk bytes as received by the client."
+        "from almost_silent.flac, the client advertises a listener and lists OPUS first "
+        "in its supported audio formats, followed by the PCM or FLAC entry every player "
+        "must list. The server connects in and, being able to produce OPUS, is expected "
+        "to honour that priority: it uses the SDK to encode the PCM into OPUS and streams "
+        "it to the client. The matrix verifies the declared list, that the negotiated "
+        "format is OPUS, and that the transported OPUS chunk bytes match as received by "
+        "the client. OPUS is lossy, so decoded audio is not compared against the source."
     ),
     initiator_role="server",
     preferred_codec="opus",
     required_role_families=("player",),
     verification_mode="audio-encoded-bytes",
-    scenario_revision=1,
+    scenario_revision=2,
+    verifies_format_priority=True,
 )
 
 

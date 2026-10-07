@@ -552,7 +552,13 @@ private fun buildPreferences(preferredCodec: String) = ClientPreferences(
     // The almost_silent.flac fixture is 8 kHz mono; 256×256 is its embedded artwork.
     supportedFormats = when (preferredCodec) {
         "flac" -> listOf(AudioFormat("flac", 1, 8000, 16), AudioFormat("flac", 2, 48000, 16))
-        "opus" -> listOf(AudioFormat("opus", 1, 48000, 16), AudioFormat("opus", 2, 48000, 16))
+        // Every player has to list flac or pcm; opus stays first so the server's
+        // priority choice is what the case exercises.
+        "opus" -> listOf(
+            AudioFormat("opus", 1, 48000, 16),
+            AudioFormat("opus", 2, 48000, 16),
+            AudioFormat("pcm", 1, 48000, 16),
+        )
         else   -> listOf(AudioFormat("pcm", 1, 8000, 16), AudioFormat("pcm", 2, 48000, 16))
     },
     artworkChannels = listOf(ArtworkChannel("album", "jpeg", 256, 256)),

@@ -143,6 +143,9 @@ class ScenarioSpec:
     # different revision, so a deliberate tightening does not read as breakage.
     scenario_revision: int
     requires_legacy_unencrypted: bool = False
+    # The case also checks that the client listed `preferred_codec` first with a
+    # pcm or flac entry after it, and that the server picked the first entry.
+    verifies_format_priority: bool = False
     extra_cli_args: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     protocol_assertions: tuple[str, ...] = field(default_factory=tuple)
 
