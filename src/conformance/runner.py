@@ -35,6 +35,10 @@ from .toolchains import find_cargo, find_cmake, find_dotnet, find_go, find_swift
 SERVER_PORT_BASE = 18927
 CLIENT_PORT_BASE = 19927
 
+# Codecs whose decoded output is sample-identical to what was encoded, so a
+# decoded stream can be hash-compared with its source.
+_LOSSLESS_CODECS = frozenset({"flac"})
+
 # "error" as a word of its own, so a dependency named quick-error or thiserror is not one.
 _BUILD_ERROR_LINE = re.compile(r"(?<![\w-])error(?![\w-])", re.IGNORECASE)
 
@@ -701,9 +705,100 @@ def _compare_encoded_audio_summaries(
             f"{codec_label} codec header mismatch: "
             f"server={server_header_hash} client={client_header_hash}",
         )
-    if server_header_hash and client_header_hash:
-        return True, f"{codec_label} header and chunk bytes match exactly"
-    return True, f"{codec_label} chunk bytes match exactly"
+    transported = (
+        "header and chunk bytes" if server_header_hash and client_header_hash else "chunk bytes"
+    )
+
+    violation, unjudged = _decoded_audio_verdict(
+        server_summary,
+        client_summary,
+        expected_codec=expected_codec,
+    )
+    if violation is not None:
+        return False, violation
+    if unjudged is not None:
+        return True, (
+            f"{codec_label} {transported} match exactly; "
+            f"decoded audio not judged against the source clip: {unjudged}"
+        )
+    return True, (
+        f"{codec_label} {transported} match exactly and the decoded audio matches the source clip"
+    )
+
+
+def _decoded_audio_verdict(
+    server_summary: dict[str, Any],
+    client_summary: dict[str, Any],
+    *,
+    expected_codec: str,
+) -> tuple[str | None, str | None]:
+    """
+    Judge the audio the client decoded against the source clip, as (violation, unjudged).
+
+    `violation` is why the decoded audio is not the source clip. `unjudged` is
+    why the rule could not be applied to this case. Both are None when the rule
+    ran and held, and at most one is set.
+
+    Matching sent bytes against received bytes proves only that the transport
+    delivered what the server sent. A server that sends part of the clip still
+    satisfies it, because the client really did receive everything that went
+    out. Comparing what the client decoded with the clip the server started
+    from is what catches the missing audio.
+
+    The rule is judged only where a hash equality can hold and the evidence to
+    test it exists:
+
+    - A lossy codec never decodes back to its source, so it is not judged.
+    - A client adapter that does not decode the stream reports no PCM hash, or
+      a hash over zero samples, and is not judged. A client whose decoder
+      produced nothing from a stream it was meant to decode is indistinguishable
+      from that and is not judged either.
+    - A stream negotiated at another sample rate or channel count than the
+      source was resampled or remixed on the way, so it is not judged. Bit depth
+      is deliberately left out: the hash is taken over canonical float samples,
+      which a widening such as 16-bit to 24-bit leaves unchanged.
+
+    Once a client has reported decoded audio, a server summary without a source
+    hash is a violation rather than missing evidence, because the server
+    adapters belong to this harness and always know the clip they were given.
+    """
+    codec_label = expected_codec.upper()
+    if expected_codec not in _LOSSLESS_CODECS:
+        return None, f"{codec_label} is lossy, so its decoded audio cannot equal the source"
+
+    server_audio = server_summary.get("audio", {})
+    client_audio = client_summary.get("audio", {})
+    received_hash = client_audio.get("received_pcm_sha256")
+    if (
+        not isinstance(received_hash, str)
+        or not received_hash
+        or client_audio.get("received_sample_count") == 0
+    ):
+        return None, "the client reported no decoded audio"
+
+    source_hash = server_audio.get("source_pcm_sha256")
+    if not isinstance(source_hash, str) or not source_hash:
+        return "Server summary is missing the source PCM hash", None
+
+    stream = server_summary.get("stream") or {}
+    converted = [
+        f"{field} {server_audio.get(field)} -> {stream.get(field)}"
+        for field in ("sample_rate", "channels")
+        if stream.get(field) != server_audio.get(field)
+    ]
+    if converted:
+        return None, (
+            "the stream was not negotiated at the source clip's format "
+            f"({', '.join(converted)})"
+        )
+
+    if received_hash == source_hash:
+        return None, None
+    return (
+        f"{codec_label} decoded audio does not match the source clip: "
+        f"{_sample_count_detail(server_audio, client_audio)}"
+        f"source={source_hash} client={received_hash}"
+    ), None
 
 
 def _microseconds(value: Any) -> int | None:
