@@ -21,6 +21,14 @@ CHANNELS = 2
 SAMPLE_COUNT = FRAME_COUNT * CHANNELS
 
 
+# What a server that held stream/start until the client reported available records.
+AVAILABILITY_TRACE = [
+    {"type": "client/state", "available": True},
+    {"type": "stream/start", "phase": "sending", "roles": ["player"]},
+    {"type": "stream/start", "phase": "sent", "roles": ["player"]},
+]
+
+
 def _server_summary(**overrides: Any) -> dict[str, Any]:
     audio = {
         "source_pcm_sha256": SOURCE_HASH,
@@ -31,6 +39,7 @@ def _server_summary(**overrides: Any) -> dict[str, Any]:
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "availability_trace": AVAILABILITY_TRACE,
         "audio": {**audio, **overrides},
     }
 

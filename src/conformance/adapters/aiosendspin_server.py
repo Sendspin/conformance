@@ -20,6 +20,7 @@ from conformance.adapters._aiosendspin_protocol_evidence import (
     SentActivationRecorder,
     SentBinaryFrameRecorder,
     SentMetadataStateRecorder,
+    AvailabilityTraceRecorder,
     record_activation_evidence_server,
     record_handshake_evidence_server,
     record_player_stream_evidence,
@@ -322,6 +323,7 @@ def _base_summary(
     discovery_method: str,
     client: Any,
     activation: dict[str, Any] | None,
+    availability_trace: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     return {
         "status": "ok",
@@ -338,6 +340,7 @@ def _base_summary(
             "payload": client.info.to_dict(),
         },
         "activation": activation,
+        "availability_trace": availability_trace,
         "client": _client_snapshot(client),
     }
 
@@ -944,6 +947,7 @@ async def _run(args: argparse.Namespace) -> int:
     )
     server_id = server.id
     sent_activations = SentActivationRecorder()
+    availability_traces = AvailabilityTraceRecorder()
     # Watches the transport from here, because the first metadata-carrying
     # server/state can go out during connection bring-up, before the adapter
     # holds the client.
@@ -1016,6 +1020,7 @@ async def _run(args: argparse.Namespace) -> int:
                 discovery_method=discovery_method,
                 client=client,
                 activation=sent_activations.initial_activation(connection),
+                availability_trace=availability_traces.trace(connection),
             ),
             **payload,
         }

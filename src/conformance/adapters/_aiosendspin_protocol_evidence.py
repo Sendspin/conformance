@@ -38,6 +38,13 @@ Evidence fidelity by assertion:
   :class:`SentMetadataStateRecorder` wraps the same transport method, because
   the timestamp requirement on that state needs a clock reading taken once the
   frame is really on the wire, which the enqueueing send path cannot give.
+- ``client/state`` received and ``stream/start`` sent, in order: full fidelity
+  on an encrypted connection. The SDK applies a ``client/state`` and sends a
+  ``stream/start`` from its own loops, and its parser rewrites a legacy ``state``
+  into ``available``, so only the transport shows what arrived and when.
+  :class:`AvailabilityTraceRecorder` wraps ``EncryptedWebSocket.receive`` and
+  ``EncryptedWebSocket.send_str``. An unencrypted legacy connection bypasses
+  that transport and is not observed.
 - Binary frames as transported: full fidelity on an encrypted connection.
   The SDK builds the audio chunk header in its send-queue drain and strips it
   before any listener runs, so the header exists nowhere an adapter can reach
@@ -223,6 +230,108 @@ class SentMetadataStateRecorder:
     def uninstall(self) -> None:
         """Restore the ``send_str`` this recorder wrapped."""
         self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
+
+
+class AvailabilityTraceRecorder:
+    """
+    Records each ``client/state`` received and ``stream/start`` sent, in order.
+
+    A ``client/state`` is recorded with the ``available`` it carried on the
+    wire, as soon as the transport hands it over and so before the SDK acts on
+    it. A ``stream/start`` is recorded twice, as ``sending`` before the
+    transport is given the frame and as ``sent`` once it has been written,
+    because a state arriving during the write cannot be placed on either side
+    of it. A send that raised leaves ``sending`` without a ``sent``.
+
+    Recording starts on construction and covers every connection the process
+    opens afterwards, so construct it before the server starts accepting
+    clients. Call :meth:`uninstall` to stop recording.
+    """
+
+    def __init__(self) -> None:
+        from aiohttp import WSMsgType
+        from aiosendspin.noise.wire import EncryptedWebSocket
+
+        self._transport_class = EncryptedWebSocket
+        self._original_send_str = EncryptedWebSocket.send_str
+        self._original_receive = EncryptedWebSocket.receive
+        self._trace_by_socket: dict[Any, list[dict[str, Any]]] = {}
+
+        def trace_for(transport: Any) -> list[dict[str, Any]]:
+            # A pairing re-handshake swaps the transport but keeps the socket.
+            return self._trace_by_socket.setdefault(transport._ws, [])
+
+        def message_of_type(data: Any, message_type: str) -> dict[str, Any] | None:
+            try:
+                message = json.loads(data)
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(message, dict) or message.get("type") != message_type:
+                return None
+            return message
+
+        async def send_str(transport: Any, data: str) -> None:
+            # Every JSON control body, including each server/time, passes through
+            # here, so only bodies naming the message type are parsed.
+            message = (
+                message_of_type(data, "stream/start") if '"stream/start"' in data else None
+            )
+            if message is None:
+                await self._original_send_str(transport, data)
+                return
+            payload = message.get("payload")
+            entry = {
+                "type": "stream/start",
+                "roles": sorted(
+                    role
+                    for role, value in (payload if isinstance(payload, dict) else {}).items()
+                    if isinstance(value, dict)
+                ),
+            }
+            trace = trace_for(transport)
+            trace.append({**entry, "phase": "sending"})
+            await self._original_send_str(transport, data)
+            trace.append({**entry, "phase": "sent"})
+
+        async def receive(transport: Any) -> Any:
+            received = await self._original_receive(transport)
+            if received.type is WSMsgType.TEXT:
+                # Parsed whatever the text looks like: a client is free to write
+                # the type with its slash escaped, which no substring test finds.
+                message = message_of_type(received.data, "client/state")
+                if message is not None:
+                    payload = message.get("payload")
+                    trace_for(transport).append(
+                        {
+                            "type": "client/state",
+                            "available": payload.get("available")
+                            if isinstance(payload, dict)
+                            else None,
+                        }
+                    )
+            return received
+
+        EncryptedWebSocket.send_str = send_str  # type: ignore[method-assign]
+        EncryptedWebSocket.receive = receive  # type: ignore[method-assign]
+
+    def trace(self, connection: Any) -> list[dict[str, Any]] | None:
+        """
+        Return the trace of a server-side ``SendspinConnection``, oldest entry first.
+
+        Each entry is ``{"type": "client/state", "available": ...}`` or
+        ``{"type": "stream/start", "phase": "sending" | "sent", "roles": [...]}``,
+        where ``roles`` names the role objects the ``stream/start`` carried.
+        Returns ``None`` for a connection this recorder observed nothing on,
+        which covers an unencrypted legacy connection.
+        """
+        socket = connection._wsock_server or connection._wsock_client
+        trace = self._trace_by_socket.get(socket)
+        return None if trace is None else list(trace)
+
+    def uninstall(self) -> None:
+        """Restore the SDK transport's own ``send_str`` and ``receive``."""
+        self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
+        self._transport_class.receive = self._original_receive  # type: ignore[method-assign]
 
 
 # Spans the RC1 audio chunk header, so the prefix shows every header field. A

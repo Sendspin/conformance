@@ -22,6 +22,14 @@ FLAC_16 = {"codec": "flac", "sample_rate": 8000, "bit_depth": 16, "channels": 1}
 SCENARIO_IDS = ("client-initiated-state-format-pcm", "client-initiated-state-format-flac")
 
 
+# What a server that held stream/start until the client reported available records.
+AVAILABILITY_TRACE = [
+    {"type": "client/state", "available": True},
+    {"type": "stream/start", "phase": "sending", "roles": ["player"]},
+    {"type": "stream/start", "phase": "sent", "roles": ["player"]},
+]
+
+
 def _server_summary(
     *,
     received: dict[str, Any] | None,
@@ -31,6 +39,7 @@ def _server_summary(
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "availability_trace": AVAILABILITY_TRACE,
         "stream": stream,
         "format_preference": {"received": received},
     }

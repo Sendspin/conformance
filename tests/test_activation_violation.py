@@ -29,6 +29,14 @@ def _activate(**payload: Any) -> dict[str, Any]:
 PLAYBACK_ACTIVATE = _activate(activities=["playback"], active_roles=["player@v1"])
 
 
+# What a server that held stream/start until the client reported available records.
+AVAILABILITY_TRACE = [
+    {"type": "client/state", "available": True},
+    {"type": "stream/start", "phase": "sending", "roles": ["player"]},
+    {"type": "stream/start", "phase": "sent", "roles": ["player"]},
+]
+
+
 def _audio_summary(role: str, **extra: Any) -> dict[str, Any]:
     """Build a summary that passes PCM verification on its own."""
     return {
@@ -167,7 +175,7 @@ class CaseVerdictTest(unittest.TestCase):
     def _verdict(self, **server_extra: Any) -> tuple[bool, str]:
         return _compare_summaries(
             self.scenario,
-            _audio_summary("server", **server_extra),
+            _audio_summary("server", availability_trace=AVAILABILITY_TRACE, **server_extra),
             _audio_summary("client"),
         )
 

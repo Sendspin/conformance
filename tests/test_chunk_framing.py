@@ -51,6 +51,14 @@ def _frame(
     }
 
 
+# What a server that held stream/start until the client reported available records.
+AVAILABILITY_TRACE = [
+    {"type": "client/state", "available": True},
+    {"type": "stream/start", "phase": "sending", "roles": ["player"]},
+    {"type": "stream/start", "phase": "sent", "roles": ["player"]},
+]
+
+
 def _server_summary(
     durations_ms: list[int],
     *,
@@ -62,6 +70,7 @@ def _server_summary(
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "availability_trace": AVAILABILITY_TRACE,
         "stream": STREAM,
         "audio": {
             "sent_chunk_frames": [
@@ -419,9 +428,8 @@ class FrameEvidenceTest(unittest.TestCase):
 class ScenarioTest(unittest.TestCase):
     """The scenario is its own baseline key and its rule reaches no other scenario."""
 
-    def test_scenario_starts_at_revision_one(self) -> None:
+    def test_scenario_uses_its_own_verification_mode(self) -> None:
         scenario = require_scenario(SCENARIO_ID)
-        self.assertEqual(scenario.scenario_revision, 1)
         self.assertEqual(scenario.verification_mode, "audio-chunk-framing")
         self.assertEqual(scenario.preferred_codec, "pcm")
 

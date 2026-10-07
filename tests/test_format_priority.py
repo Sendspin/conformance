@@ -25,11 +25,20 @@ FLAC = {"codec": "flac", "sample_rate": 8000, "bit_depth": 16, "channels": 1}
 ENCODED_SHA = "b" * 64
 
 
+# What a server that held stream/start until the client reported available records.
+AVAILABILITY_TRACE = [
+    {"type": "client/state", "available": True},
+    {"type": "stream/start", "phase": "sending", "roles": ["player"]},
+    {"type": "stream/start", "phase": "sent", "roles": ["player"]},
+]
+
+
 def _server_summary(*, declared: Any, stream: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "availability_trace": AVAILABILITY_TRACE,
         "peer_hello": {
             "type": "client/hello",
             "payload": {"player@v1_support": {"supported_formats": declared}},
