@@ -41,12 +41,21 @@ def _stream(codec: str, **overrides: Any) -> dict[str, Any]:
     return {"codec": codec, "sample_rate": 8_000, "channels": 1, "bit_depth": 16, **overrides}
 
 
+# What a server that held stream/start until the client reported available records.
+AVAILABILITY_TRACE = [
+    {"type": "client/state", "available": True},
+    {"type": "stream/start", "phase": "sending", "roles": ["player"]},
+    {"type": "stream/start", "phase": "sent", "roles": ["player"]},
+]
+
+
 def _server_summary(codec: str = "flac", **stream_overrides: Any) -> dict[str, Any]:
     return {
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
         "group_updates": [GROUP_UPDATE],
+        "availability_trace": AVAILABILITY_TRACE,
         "stream": {
             **_stream(codec, **stream_overrides),
             "codec_header_sha256": HEADER_HASH,

@@ -49,6 +49,49 @@ not judged either. A summary with no `group_updates` list fails the case as a ha
 so an adapter that cannot observe the messages cannot pass by staying silent. A server
 whose `activation` is `null` is left to that verdict.
 
+## Availability trace
+
+Every server adapter MUST report an `availability_trace` field in its summary: each
+`client/state` it received and each `stream/start` it sent, in the order it observed them.
+
+```json
+[
+  {"type": "client/state", "available": false},
+  {"type": "client/state", "available": true},
+  {"type": "stream/start", "phase": "sending", "roles": ["player"]},
+  {"type": "stream/start", "phase": "sent", "roles": ["player"]}
+]
+```
+
+- A `client/state` entry carries `available` as it arrived, and `null` when the message
+  carried none. Record it when the message is read, before the implementation acts on it.
+  Do not report a value the implementation derived, such as one it filled in from a legacy
+  field.
+- **Record every `stream/start` twice: `sending` before the frame is handed to the
+  transport, and `sent` once it has certainly been written.** A `client/state` read while
+  the frame is in flight belongs on neither side of it, so the two entries bracket the
+  uncertainty. An adapter with no hook on the write takes a settle as the point the frame
+  has gone out. `roles` names the role objects the message carried.
+- Report `null` when the adapter cannot observe this ordering. Never report a trace
+  reconstructed from what the implementation is expected to do.
+
+The matrix draws a verdict from this field on every scenario that opens a player or
+artwork stream. A `stream/start` passes when the latest `client/state` reported
+`available: true` at any point between its `sending` and `sent` entries, so a pass means
+no violation was witnessed, and a wider bracket witnesses less. Otherwise it fails the
+case, described by the latest `client/state` received before `sending`: naming the server
+when there was none or it reported `available: false`, and naming the client first when
+it carried no boolean `available`.
+
+A `null`, absent or unreadable trace fails the case as a harness gap, since the gate was
+not witnessed either way. So does a `sent` entry with no `sending` before it, and a trace
+in which no `stream/start` reached `sent`. A `sending` with no `sent` is a frame that never
+went out and is not judged. Brackets do not nest.
+
+The wait a server owes a newly activated role, for the `client/state` carrying that
+role's object, is not judged: the trace records `available`, not which role objects each
+`client/state` carried.
+
 ## Metadata scenario summary fields
 
 The spec requires the first `server/state` sent for a role on a connection to

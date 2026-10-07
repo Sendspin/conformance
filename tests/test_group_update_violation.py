@@ -27,6 +27,14 @@ ACTIVATE = {
 GROUP = {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"}
 
 
+# What a server that held stream/start until the client reported available records.
+AVAILABILITY_TRACE = [
+    {"type": "client/state", "available": True},
+    {"type": "stream/start", "phase": "sending", "roles": ["player"]},
+    {"type": "stream/start", "phase": "sent", "roles": ["player"]},
+]
+
+
 def _group_update(**payload: Any) -> dict[str, Any]:
     return {"type": "group/update", "payload": payload}
 
@@ -167,7 +175,12 @@ class CaseVerdictTest(unittest.TestCase):
     def _verdict(self, **server_extra: Any) -> tuple[bool, str]:
         return _compare_summaries(
             self.scenario,
-            _audio_summary("server", activation=ACTIVATE, **server_extra),
+            _audio_summary(
+                "server",
+                activation=ACTIVATE,
+                availability_trace=AVAILABILITY_TRACE,
+                **server_extra,
+            ),
             _audio_summary("client"),
         )
 

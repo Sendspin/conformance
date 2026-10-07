@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	conformance "conformance-sendspin-go/internal/conformance"
@@ -87,6 +88,25 @@ type flacTransport struct {
 	DurationSeconds  float64
 	SourceFlacSHA256 string
 	SourcePcmSHA256  string
+}
+
+// availabilityTrace is the ordered record of the client/state messages received
+// and the stream/start messages sent, reported as the summary's availability_trace.
+type availabilityTrace struct {
+	mu      sync.Mutex
+	entries []map[string]any
+}
+
+func (t *availabilityTrace) add(entry map[string]any) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.entries = append(t.entries, entry)
+}
+
+func (t *availabilityTrace) snapshot() []map[string]any {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]map[string]any{}, t.entries...)
 }
 
 func main() {
@@ -289,7 +309,8 @@ func runSession(
 	readDone := make(chan struct{})
 	readErrCh := make(chan error, 1)
 	controllerCh := make(chan map[string]any, 1)
-	go readClientMessages(conn, sc, controllerCh, readDone, readErrCh)
+	trace := &availabilityTrace{}
+	go readClientMessages(conn, sc, trace, controllerCh, readDone, readErrCh)
 
 	baseSummary := map[string]any{
 		"status":           "ok",
@@ -311,13 +332,19 @@ func runSession(
 		},
 	}
 
+	// Read once the session is over, so the trace covers all of it.
+	finish := func(scenarioSummary map[string]any) map[string]any {
+		baseSummary["availability_trace"] = trace.snapshot()
+		return mergeMaps(baseSummary, scenarioSummary)
+	}
+
 	switch {
 	case conformance.IsPlayerScenario(parsed.ScenarioID):
-		summary, err := runPlayerScenario(sc, conn, readDone, readErrCh, parsed, hello, fixture, flacPayload)
+		summary, err := runPlayerScenario(sc, conn, trace, readDone, readErrCh, parsed, hello, fixture, flacPayload)
 		if err != nil {
 			return nil, err
 		}
-		return mergeMaps(baseSummary, summary), nil
+		return finish(summary), nil
 	case conformance.IsMetadataScenario(parsed.ScenarioID):
 		// This adapter sends no state while activating, so this is the first
 		// metadata-carrying state and the one the matrix judges.
@@ -341,7 +368,7 @@ func runSession(
 		if err := drainReadError(readErrCh); err != nil {
 			return nil, err
 		}
-		return mergeMaps(baseSummary, map[string]any{
+		return finish(map[string]any{
 			"metadata": map[string]any{
 				"expected": metadataSnapshot(parsed),
 				"first_state_sent": map[string]any{
@@ -368,7 +395,7 @@ func runSession(
 		if err := drainReadError(readErrCh); err != nil {
 			return nil, err
 		}
-		return mergeMaps(baseSummary, map[string]any{
+		return finish(map[string]any{
 			"controller": map[string]any{
 				"expected_command": map[string]any{"command": parsed.ControllerCommand},
 				"received_command": received,
@@ -386,7 +413,7 @@ func runSession(
 		if err != nil {
 			return nil, err
 		}
-		if err := sc.Send("stream/start", protocol.StreamStart{
+		streamStartSent, err := sendStreamStart(sc, trace, "artwork", protocol.StreamStart{
 			Artwork: &protocol.StreamStartArtwork{
 				Channels: []protocol.ArtworkStreamChannel{
 					{
@@ -397,19 +424,21 @@ func runSession(
 					},
 				},
 			},
-		}); err != nil {
+		})
+		if err != nil {
 			return nil, err
 		}
 		if err := sc.SendBinary(protocol.CreateArtworkChunk(0, conformance.CurrentMicros()+250_000, imageBytes)); err != nil {
 			return nil, err
 		}
 		time.Sleep(200 * time.Millisecond)
+		streamStartSent()
 		_ = sendClose(conn)
 		<-readDone
 		if err := drainReadError(readErrCh); err != nil {
 			return nil, err
 		}
-		return mergeMaps(baseSummary, map[string]any{
+		return finish(map[string]any{
 			"artwork": map[string]any{
 				"channel":        0,
 				"source":         "album",
@@ -428,6 +457,7 @@ func runSession(
 func runPlayerScenario(
 	sc *protocol.ServerConn,
 	conn *websocket.Conn,
+	trace *availabilityTrace,
 	readDone <-chan struct{},
 	readErrCh <-chan error,
 	parsed args,
@@ -440,7 +470,7 @@ func runPlayerScenario(
 			return nil, fmt.Errorf("missing FLAC transport payload")
 		}
 		codecHeader := base64.StdEncoding.EncodeToString(flacPayload.CodecHeader)
-		if err := sc.Send("stream/start", protocol.StreamStart{
+		streamStartSent, err := sendStreamStart(sc, trace, "player", protocol.StreamStart{
 			Player: &protocol.StreamStartPlayer{
 				Codec:       "flac",
 				SampleRate:  flacPayload.SampleRate,
@@ -448,7 +478,8 @@ func runPlayerScenario(
 				BitDepth:    flacPayload.BitDepth,
 				CodecHeader: codecHeader,
 			},
-		}); err != nil {
+		})
+		if err != nil {
 			return nil, err
 		}
 		if err := sc.Send("server/state", metadataStateMessage(parsed)); err != nil {
@@ -461,6 +492,7 @@ func runPlayerScenario(
 			return nil, err
 		}
 		time.Sleep(25 * time.Millisecond)
+		streamStartSent()
 		if err := sc.SendBinary(protocol.CreateAudioChunk(conformance.CurrentMicros()+250_000, flacPayload.AudioBytes)); err != nil {
 			return nil, err
 		}
@@ -504,14 +536,15 @@ func runPlayerScenario(
 	if err != nil {
 		return nil, err
 	}
-	if err := sc.Send("stream/start", protocol.StreamStart{
+	streamStartSent, err := sendStreamStart(sc, trace, "player", protocol.StreamStart{
 		Player: &protocol.StreamStartPlayer{
 			Codec:      "pcm",
 			SampleRate: streamFixture.SampleRate,
 			Channels:   streamFixture.Channels,
 			BitDepth:   streamFixture.BitDepth,
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 	if err := sc.Send("server/state", metadataStateMessage(parsed)); err != nil {
@@ -524,6 +557,7 @@ func runPlayerScenario(
 		return nil, err
 	}
 	time.Sleep(25 * time.Millisecond)
+	streamStartSent()
 
 	sentHasher := sha256.New()
 	chunkCount := 0
@@ -585,9 +619,35 @@ func runPlayerScenario(
 	}, nil
 }
 
+// sendStreamStart sends a stream/start for one role and records it in the trace
+// as "sending". The returned function records it as "sent".
+//
+// This adapter sends stream/start without waiting for a client/state, so the
+// trace reports whichever state, if any, had arrived by then.
+//
+// ServerConn.Send only enqueues onto the writer goroutine and there is no hook
+// for the write itself, so call the returned function after a settle: a
+// client/state read before the frame went out must not be recorded after it.
+func sendStreamStart(
+	sc *protocol.ServerConn,
+	trace *availabilityTrace,
+	role string,
+	start protocol.StreamStart,
+) (func(), error) {
+	entry := func(phase string) map[string]any {
+		return map[string]any{"type": "stream/start", "phase": phase, "roles": []string{role}}
+	}
+	trace.add(entry("sending"))
+	if err := sc.Send("stream/start", start); err != nil {
+		return nil, err
+	}
+	return func() { trace.add(entry("sent")) }, nil
+}
+
 func readClientMessages(
 	conn *websocket.Conn,
 	sc *protocol.ServerConn,
+	trace *availabilityTrace,
 	controllerCh chan<- map[string]any,
 	done chan<- struct{},
 	errCh chan<- error,
@@ -615,6 +675,11 @@ func readClientMessages(
 			continue
 		}
 		switch envelope.Type {
+		case "client/state":
+			// The value as it arrived, nil when the message carried none.
+			var state map[string]any
+			_ = json.Unmarshal(envelope.Payload, &state)
+			trace.add(map[string]any{"type": "client/state", "available": state["available"]})
 		case "client/time":
 			var clientTime protocol.ClientTime
 			if err := json.Unmarshal(envelope.Payload, &clientTime); err != nil {

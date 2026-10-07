@@ -28,6 +28,14 @@ GROUP_UPDATE = {
 }
 
 
+# What a server that held stream/start until the client reported available records.
+AVAILABILITY_TRACE = [
+    {"type": "client/state", "available": True},
+    {"type": "stream/start", "phase": "sending", "roles": ["player"]},
+    {"type": "stream/start", "phase": "sent", "roles": ["player"]},
+]
+
+
 def _server_summary(**overrides: Any) -> dict[str, Any]:
     audio = {
         "source_pcm_sha256": SOURCE_HASH,
@@ -39,6 +47,7 @@ def _server_summary(**overrides: Any) -> dict[str, Any]:
         "implementation": "synthetic-server",
         "role": "server",
         "group_updates": [GROUP_UPDATE],
+        "availability_trace": AVAILABILITY_TRACE,
         "audio": {**audio, **overrides},
     }
 

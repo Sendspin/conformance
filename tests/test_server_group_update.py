@@ -17,7 +17,7 @@ from unittest import mock
 
 from aiosendspin.noise.wire import EncryptedWebSocket
 
-from conformance.adapters._aiosendspin_protocol_evidence import SentOpeningMessagesRecorder
+from conformance.adapters._aiosendspin_protocol_evidence import ControlMessageRecorder
 from conformance.site import _render_group_update_section
 
 ACTIVATE = {
@@ -56,7 +56,7 @@ class SentGroupUpdateRecordingTests(unittest.IsolatedAsyncioTestCase):
         patcher = mock.patch.object(EncryptedWebSocket, "send_str", send_str)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.recorder = SentOpeningMessagesRecorder()
+        self.recorder = ControlMessageRecorder()
         self.addCleanup(self.recorder.uninstall)
 
     async def _send(self, socket: object, *messages: dict[str, Any]) -> None:

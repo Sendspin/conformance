@@ -127,6 +127,7 @@ Important fields to preserve where available:
 - `preferred_codec`
 - `peer_hello`
 - `activation` (server summaries)
+- `availability_trace` (server summaries)
 - `group_updates` (server summaries)
 - audio hash fields
 
@@ -141,6 +142,10 @@ Important fields to preserve where available:
 `group_update_violation` in `src/conformance/protocol.py` judges this field on every case too. An empty list fails the case, and so does any recorded `group/update` whose `playback_state` is not `playing` or `stopped`, or whose `group_id` or `group_name` is missing or not a string. Unlike `activation`, a summary without the field also fails the case, as a harness gap. The difference is deliberate, so do not align the two. Every server adapter in the tree records `group_updates`, so a summary without it comes from a broken adapter, never from an implementation that predates the field, and failing closed keeps an adapter that cannot observe the messages from reading as a server that sent them. How soon the first message followed is not judged, because the spec says "promptly" and gives no bound, so one sent at any point in the case satisfies it.
 
 Every recorded `group/update` is judged for its fields. The same spec sentence also requires one "whenever any field listed below changes", and nothing in the matrix asserts that a change produced one.
+
+`availability_trace` should contain each `client/state` the server received and each `stream/start` it sent, in the order the adapter observed them, as `adapters/README.md` specifies. It is `null` only when the adapter cannot observe that ordering, and is never reconstructed from what the implementation is expected to do.
+
+`null` or a missing field fails the case as a harness gap: `stream_start_gate_violation` in `src/conformance/protocol.py` judges this field on every scenario that opens a player or artwork stream.
 
 ### Audio fixture
 
@@ -190,7 +195,8 @@ act that resets its baseline; every other scenario in the same run
 keeps full protection. A verdict applied to every case, such as
 `activation_violation` or `group_update_violation`, changes the assertions of
 every scenario and so bumps them all, which exempts the whole matrix for that
-one release. Do not add a
+one release. A verdict applied to some scenarios, such as
+`stream_start_gate_violation`, bumps only those. Do not add a
 waiver file, allowlist or PR-label escape hatch — the baseline is live and
 remote, so any such list goes stale on the next merge.
 

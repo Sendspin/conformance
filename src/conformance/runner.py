@@ -29,7 +29,12 @@ from .io import read_json, write_json
 from .models import AUDIO_FORMAT_FIELDS, CaseResult, RoleName, ScenarioSpec
 from .paths import repo_root
 from .process import close_process_log, collect_process, wait_for_exit, wait_for_file
-from .protocol import activation_violation, group_update_violation, protocol_evidence_failure
+from .protocol import (
+    activation_violation,
+    group_update_violation,
+    protocol_evidence_failure,
+    stream_start_gate_violation,
+)
 from .scenarios import ordered_scenarios, require_scenario
 from .toolchains import find_cargo, find_cmake, find_dotnet, find_go, find_swift
 
@@ -39,6 +44,10 @@ CLIENT_PORT_BASE = 19927
 # Codecs whose decoded output is sample-identical to what was encoded, so a
 # decoded stream can be hash-compared with its source.
 _LOSSLESS_CODECS = frozenset({"flac"})
+
+# The roles a stream/start opens a stream for. A scenario exercising neither has
+# the server send none, so the available gate on stream/start is not judged there.
+_STREAMED_ROLE_FAMILIES = frozenset({"player", "artwork"})
 
 # "error" as a word of its own, so a dependency named quick-error or thiserror is not one.
 _BUILD_ERROR_LINE = re.compile(r"(?<![\w-])error(?![\w-])", re.IGNORECASE)
@@ -1187,6 +1196,10 @@ def _compare_summaries(
     violation = group_update_violation(server_summary)
     if violation is not None:
         return False, violation
+    if _STREAMED_ROLE_FAMILIES.intersection(scenario.required_role_families):
+        violation = stream_start_gate_violation(server_summary)
+        if violation is not None:
+            return False, violation
     # Every format the case negotiated must be one the client declared. Modes
     # that negotiate no player stream leave the check with nothing to inspect,
     # so it applies to all of them rather than to a list of audio modes that a

@@ -16,10 +16,10 @@ from PIL import Image, ImageDraw
 
 from conformance.adapters._aiosendspin_protocol_evidence import (
     ChunkPayloadSizes,
+    ControlMessageRecorder,
     ProtocolEvidenceCollector,
     SentBinaryFrameRecorder,
     SentMetadataStateRecorder,
-    SentOpeningMessagesRecorder,
     record_activation_evidence_server,
     record_handshake_evidence_server,
     record_player_stream_evidence,
@@ -323,6 +323,7 @@ def _base_summary(
     client: Any,
     activation: dict[str, Any] | None,
     group_updates: list[dict[str, Any]],
+    availability_trace: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     return {
         "status": "ok",
@@ -340,6 +341,7 @@ def _base_summary(
         },
         "activation": activation,
         "group_updates": group_updates,
+        "availability_trace": availability_trace,
         "client": _client_snapshot(client),
     }
 
@@ -945,7 +947,7 @@ async def _run(args: argparse.Namespace) -> int:
         allow_noncompliant_clients=args.scenario_id != "server-initiated-protocol-baseline-v1",
     )
     server_id = server.id
-    sent_opening_messages = SentOpeningMessagesRecorder()
+    control_messages = ControlMessageRecorder()
     # Watches the transport from here, because the first metadata-carrying
     # server/state can go out during connection bring-up, before the adapter
     # holds the client.
@@ -1017,10 +1019,11 @@ async def _run(args: argparse.Namespace) -> int:
                 server_id=server_id,
                 discovery_method=discovery_method,
                 client=client,
-                activation=sent_opening_messages.initial_activation(connection),
+                activation=control_messages.initial_activation(connection),
                 # Read once the scenario has run, so the server has had the whole
                 # case in which to send them.
-                group_updates=sent_opening_messages.group_updates(connection),
+                group_updates=control_messages.group_updates(connection),
+                availability_trace=control_messages.availability_trace(connection),
             ),
             **payload,
         }

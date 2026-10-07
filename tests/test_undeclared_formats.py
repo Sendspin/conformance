@@ -31,6 +31,14 @@ GROUP_UPDATE = {
 }
 
 
+# What a server that held stream/start until the client reported available records.
+AVAILABILITY_TRACE = [
+    {"type": "client/state", "available": True},
+    {"type": "stream/start", "phase": "sending", "roles": ["player"]},
+    {"type": "stream/start", "phase": "sent", "roles": ["player"]},
+]
+
+
 def _server_summary(
     *,
     declared: list[Any] | None,
@@ -47,6 +55,7 @@ def _server_summary(
         "implementation": "synthetic-server",
         "role": "server",
         "group_updates": [GROUP_UPDATE],
+        "availability_trace": AVAILABILITY_TRACE,
         "peer_hello": {"type": "client/hello", "payload": payload},
         "stream": stream,
         "audio": {"sent_audio_chunk_count": 4, "sent_encoded_sha256": ENCODED_SHA},
