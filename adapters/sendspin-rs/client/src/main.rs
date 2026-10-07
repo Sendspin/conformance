@@ -176,7 +176,24 @@ fn is_player_scenario(scenario_id: &str) -> bool {
             | "server-initiated-pcm"
             | "server-initiated-pcm-24bit"
             | "server-initiated-flac"
+            | "server-initiated-audio-chunk-framing"
     )
+}
+
+fn is_chunk_framing_scenario(scenario_id: &str) -> bool {
+    scenario_id == "server-initiated-audio-chunk-framing"
+}
+
+// Spans the RC1 audio chunk header, so the prefix shows every header field. A
+// frame with a shorter header yields that many bytes of audio past it; the rest
+// of the payload is never recorded.
+const FRAME_PREFIX_BYTES: usize = 13;
+
+fn frame_record(frame: &[u8]) -> serde_json::Value {
+    serde_json::json!({
+        "byte_count": frame.len(),
+        "leading_hex": hex_lower(&frame[..frame.len().min(FRAME_PREFIX_BYTES)]),
+    })
 }
 
 fn is_metadata_scenario(scenario_id: &str) -> bool {
@@ -584,6 +601,8 @@ where
     let mut received_hasher = FloatPcmHasher::default();
     let mut encoded_hasher = Sha256::new();
     let mut audio_chunk_count = 0usize;
+    let mut encoded_byte_count = 0usize;
+    let mut received_frames: Vec<serde_json::Value> = Vec::new();
     let mut metadata_update_count = 0usize;
     let mut received_metadata: Option<serde_json::Value> = None;
     let mut received_controller_state: Option<serde_json::Value> = None;
@@ -706,6 +725,10 @@ where
                     }
                 }
                 WsMessage::Binary(data) => {
+                    // Recorded as received, before the SDK parses a header off it.
+                    if is_chunk_framing_scenario(&args.scenario_id) {
+                        received_frames.push(frame_record(&data));
+                    }
                     match BinaryFrame::from_bytes(&data).map_err(|err| err.to_string())? {
                         BinaryFrame::Audio(AudioChunk { data, .. }) => {
                             if !is_player_scenario(&args.scenario_id) {
@@ -721,6 +744,7 @@ where
                                 ));
                             }
                             encoded_hasher.update(&*data);
+                            encoded_byte_count += data.len();
                             if stream.codec == "pcm" {
                                 received_hasher
                                     .update_from_pcm_bytes(&data, stream.bit_depth)
@@ -770,7 +794,7 @@ where
         None
     };
 
-    match read_result {
+    let mut summary = match read_result {
         Err(_) => build_summary(
             args,
             "error",
@@ -855,7 +879,12 @@ where
             artwork_sha256,
             artwork_byte_count,
         ),
+    };
+    if is_chunk_framing_scenario(&args.scenario_id) {
+        summary["audio"]["received_encoded_byte_count"] = serde_json::json!(encoded_byte_count);
+        summary["audio"]["received_chunk_frames"] = serde_json::json!(received_frames);
     }
+    summary
 }
 
 async fn run_outbound_protocol_client(args: &Args, server_url: &str) -> serde_json::Value {

@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw
 from conformance.adapters._aiosendspin_protocol_evidence import (
     ProtocolEvidenceCollector,
     SentActivationRecorder,
+    SentBinaryFrameRecorder,
     SentMetadataStateRecorder,
     record_activation_evidence_server,
     record_handshake_evidence_server,
@@ -375,6 +376,17 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
     sent_audio_hasher = sha256()
     sent_audio_chunk_count = 0
     sent_audio_byte_count = 0
+    # The framing scenario reads the header width off the transported frames, so
+    # the payload count beside them has to be bytes this adapter saw for itself.
+    chunk_framing_scenario = args.scenario_id == "server-initiated-audio-chunk-framing"
+    payload_counted_without_header = True
+    # The legacy unencrypted transport is not the one the recorder watches.
+    frames_observable = client.connection is not None and client.connection.is_encrypted
+    # The SDK keeps the header without send_ahead for a client whose client/hello
+    # it reads as older than that field. The property is marked for removal, and
+    # an SDK without it has no such fallback to report.
+    legacy_header = getattr(client.connection, "uses_pre_spec_177_wire", False)
+    sent_frames = SentBinaryFrameRecorder() if chunk_framing_scenario else None
 
     def capture_stream_start(message: Any) -> None:
         nonlocal stream_state, sent_codec_header_sha256
@@ -419,9 +431,10 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
         player_audio_header: bool = False,
         epoch_exempt: bool = False,
     ) -> None:
-        nonlocal sent_audio_chunk_count, sent_audio_byte_count
+        nonlocal sent_audio_chunk_count, sent_audio_byte_count, payload_counted_without_header
         if message_type == BinaryMessageType.AUDIO_CHUNK.value:
             payload = data if player_audio_header else data[BINARY_HEADER_SIZE:]
+            payload_counted_without_header &= player_audio_header
             sent_audio_hasher.update(payload)
             sent_audio_chunk_count += 1
             sent_audio_byte_count += len(payload)
@@ -510,6 +523,8 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
         client.send_binary = original_send_binary  # type: ignore[method-assign]
         if format_preference_scenario and player_role is not None:
             player_role.on_client_state = original_on_client_state  # type: ignore[method-assign]
+        if sent_frames is not None:
+            sent_frames.uninstall()
 
     summary: dict[str, Any] = {
         "stream": stream_state,
@@ -533,6 +548,21 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
     }
     if format_preference_scenario:
         summary["format_preference"] = {"received": received_format_preference}
+    if sent_frames is not None:
+        summary["audio"]["sent_chunk_frames"] = sent_frames.frames() if frames_observable else None
+        # The SDK re-frames the blocks this adapter feeds it before sending them.
+        summary["audio"]["chunked_by"] = "implementation"
+        summary["audio"]["legacy_header_reason"] = (
+            "aiosendspin classified the client/hello as older than send_ahead "
+            "(unencrypted, a trust_level key, or player supported_commands in "
+            "client/hello) and kept the header without it for that client"
+            if legacy_header
+            else None
+        )
+        if not payload_counted_without_header:
+            # A chunk handed over with its header already attached was counted by
+            # subtracting the SDK's own header size, which says nothing of the wire.
+            summary["audio"]["sent_encoded_byte_count"] = None
     return summary
 
 
@@ -857,6 +887,7 @@ async def _scenario_payload(
         "client-initiated-state-format-pcm",
         "client-initiated-state-format-flac",
         "server-initiated-legacy-unencrypted",
+        "server-initiated-audio-chunk-framing",
     }:
         # The server streams source PCM and the player role re-encodes to whatever
         # format the client negotiates, including a mid-stream client/state format

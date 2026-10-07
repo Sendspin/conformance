@@ -39,6 +39,7 @@ const PLAYER_SCENARIOS = new Set([
   "client-initiated-pcm",
   "server-initiated-pcm",
   "server-initiated-legacy-unencrypted",
+  "server-initiated-audio-chunk-framing",
 ]);
 const METADATA_SCENARIOS = new Set(["server-initiated-metadata"]);
 const CONTROLLER_SCENARIOS = new Set(["server-initiated-controller"]);
@@ -304,6 +305,12 @@ function buildSuccessSummary(args, state) {
         state.pcmSampleCount > 0 ? state.pcmHasher.digest("hex") : null,
       received_sample_count: state.pcmSampleCount,
     };
+    if (args["scenario-id"] === "server-initiated-audio-chunk-framing") {
+      // SendspinCore hands the adapter decoded PCM only, so neither a raw frame
+      // nor the size of the encoded payload it carried is observable.
+      summary.audio.received_encoded_byte_count = null;
+      summary.audio.received_chunk_frames = null;
+    }
   }
   return summary;
 }

@@ -87,6 +87,11 @@ if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "s
     summary["stream"] = playerStream;
     summary["audio"] = pipeline.Snapshot();
 }
+else if (options.ScenarioId is "server-initiated-audio-chunk-framing")
+{
+    summary["stream"] = playerStream;
+    summary["audio"] = pipeline.ChunkFramingSnapshot();
+}
 else if (options.ScenarioId is "client-initiated-metadata" or "server-initiated-metadata")
 {
     summary["metadata"] = new Dictionary<string, object?>
@@ -249,6 +254,7 @@ SendspinClientOptions BuildClientOptions() =>
 void CaptureStreamStart(StreamStartPayload payload)
 {
     if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "server-initiated-flac" or "server-initiated-pcm-24bit"
+            or "server-initiated-audio-chunk-framing"
         && payload.Format is not null)
     {
         playerStream = ToWireElement(payload.Format);
@@ -662,6 +668,15 @@ internal sealed class HashingAudioPipeline : IAudioPipeline
         received_encoded_sha256 = ToHex(SHA256.HashData(_encodedStream.ToArray())),
         received_sample_count = _decodedFloatStream.Length / sizeof(float),
         audio_chunk_count = _audioChunkCount,
+    };
+
+    // The SDK parses the header off each frame before the chunk reaches the
+    // pipeline, so the adapter never holds a raw frame.
+    public object ChunkFramingSnapshot() => new
+    {
+        audio_chunk_count = _audioChunkCount,
+        received_encoded_byte_count = _encodedStream.Length,
+        received_chunk_frames = (object?)null,
     };
 
     private void SetState(AudioPipelineState state)

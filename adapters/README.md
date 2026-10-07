@@ -136,3 +136,68 @@ The client's:
 
 The client records the format it preferred, the format the stream started in, the
 format it changed to, and how many stream formats it was started in.
+
+## Audio chunk framing contract
+
+The `server-initiated-audio-chunk-framing` scenario judges the player audio chunk
+header and the duration of each chunk. No adapter reports a header. Each reports the
+audio frames as they crossed the transport, and the matrix derives the header width
+from them: whatever a frame carries beyond the payload bytes the same adapter counted.
+
+A frame record is the frame's size and its first 13 bytes, or the whole frame when it
+is shorter:
+
+```json
+{"byte_count": 413, "leading_hex": "040000005b0af3730d0003cd4b"}
+```
+
+The server's `audio` block adds:
+
+```json
+{
+  "sent_chunk_frames": [{"byte_count": 413, "leading_hex": "040000005b0af3730d0003cd4b"}],
+  "sent_audio_chunk_count": 200,
+  "sent_encoded_byte_count": 80000,
+  "chunked_by": "implementation",
+  "legacy_header_reason": null
+}
+```
+
+- `sent_chunk_frames`: one record per binary frame handed to the transport during the
+  stream, in order, taken where the frame is complete and before it is encrypted.
+  Record every binary frame, not only those of type `4`; the matrix judges the type.
+- `sent_encoded_byte_count`: the audio payload bytes, counted without reference to the
+  header. A count obtained by subtracting a header size the SDK defines is not an
+  observation; report `null` instead.
+- `chunked_by`: `"implementation"` when the implementation decided where each chunk
+  ends, `"adapter"` when the adapter cut the audio into chunks and handed each one over
+  whole. Chunk duration is judged only for the former.
+- `legacy_header_reason`: when the implementation deliberately framed the stream for
+  an older peer, the reason in its own terms, otherwise `null`. It is appended to a
+  header failure and never excuses one.
+
+The client's `audio` block adds:
+
+```json
+{
+  "received_chunk_frames": [{"byte_count": 413, "leading_hex": "040000005b0af3730d0003cd4b"}],
+  "audio_chunk_count": 200,
+  "received_encoded_byte_count": 80000
+}
+```
+
+- `received_chunk_frames`: one record per binary frame received during the stream, in
+  order, taken after decryption and before the SDK parses anything off it.
+- `received_encoded_byte_count`: the audio payload bytes the SDK delivered.
+
+**Report `null` for frames the adapter cannot see.** An SDK that hands the adapter
+parsed chunks has already consumed the header, and nothing the adapter holds
+afterwards is a frame: not the chunk's timestamp, not a `send_ahead` the SDK exposes,
+not a size rebuilt by adding a header length back on. A client reporting `null` still
+reports `received_encoded_byte_count` where it can, because a payload that is the
+wrong size for the frames the server sent shows the client misread the header, and
+that is failed as the client's fault. Otherwise the case fails as a harness gap.
+
+`send_ahead` needs no field. The matrix decodes it from `leading_hex` to show it, and
+does not judge its saturation values: that needs the instant a frame was transmitted,
+which no adapter can observe.

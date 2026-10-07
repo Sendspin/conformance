@@ -528,9 +528,14 @@ func runPlayerScenario(
 	chunkCount := 0
 	byteCount := 0
 	nextTimestamp := conformance.CurrentMicros() + 250_000
+	sentFrames := []map[string]any{}
 	for _, block := range conformance.PCMBlocks(streamFixture.PCMBytes, streamFixture.SampleRate, streamFixture.Channels, streamFixture.BitDepth, 50) {
-		if err := sc.SendBinary(protocol.CreateAudioChunk(nextTimestamp, block.Data)); err != nil {
+		frame := protocol.CreateAudioChunk(nextTimestamp, block.Data)
+		if err := sc.SendBinary(frame); err != nil {
 			return nil, err
+		}
+		if conformance.IsChunkFramingScenario(parsed.ScenarioID) {
+			sentFrames = append(sentFrames, conformance.FrameRecord(frame))
 		}
 		_, _ = sentHasher.Write(block.Data)
 		chunkCount++
@@ -547,6 +552,27 @@ func runPlayerScenario(
 		return nil, err
 	}
 
+	audio := map[string]any{
+		"fixture":                 parsed.Fixture,
+		"source_flac_sha256":      streamFixture.SourceFlacSHA256,
+		"source_pcm_sha256":       streamFixture.SourcePcmSHA256,
+		"sent_encoded_sha256":     conformance.HexLower(sentHasher.Sum(nil)),
+		"sent_audio_chunk_count":  chunkCount,
+		"sent_encoded_byte_count": byteCount,
+		"clip_seconds":            parsed.ClipSeconds,
+		"sample_rate":             streamFixture.SampleRate,
+		"channels":                streamFixture.Channels,
+		"bit_depth":               streamFixture.BitDepth,
+		"frame_count":             streamFixture.FrameCount,
+		"duration_seconds":        streamFixture.DurationSeconds,
+	}
+	if conformance.IsChunkFramingScenario(parsed.ScenarioID) {
+		audio["sent_chunk_frames"] = sentFrames
+		// The frame layout is the SDK's, from protocol.CreateAudioChunk, but the
+		// block size above is this adapter's choice and not sendspin-go's.
+		audio["chunked_by"] = "adapter"
+		audio["legacy_header_reason"] = nil
+	}
 	return map[string]any{
 		"stream": map[string]any{
 			"codec":       "pcm",
@@ -554,20 +580,7 @@ func runPlayerScenario(
 			"channels":    streamFixture.Channels,
 			"bit_depth":   streamFixture.BitDepth,
 		},
-		"audio": map[string]any{
-			"fixture":                 parsed.Fixture,
-			"source_flac_sha256":      streamFixture.SourceFlacSHA256,
-			"source_pcm_sha256":       streamFixture.SourcePcmSHA256,
-			"sent_encoded_sha256":     conformance.HexLower(sentHasher.Sum(nil)),
-			"sent_audio_chunk_count":  chunkCount,
-			"sent_encoded_byte_count": byteCount,
-			"clip_seconds":            parsed.ClipSeconds,
-			"sample_rate":             streamFixture.SampleRate,
-			"channels":                streamFixture.Channels,
-			"bit_depth":               streamFixture.BitDepth,
-			"frame_count":             streamFixture.FrameCount,
-			"duration_seconds":        streamFixture.DurationSeconds,
-		},
+		"audio": audio,
 	}, nil
 }
 

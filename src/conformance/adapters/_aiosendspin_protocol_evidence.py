@@ -38,6 +38,14 @@ Evidence fidelity by assertion:
   :class:`SentMetadataStateRecorder` wraps the same transport method, because
   the timestamp requirement on that state needs a clock reading taken once the
   frame is really on the wire, which the enqueueing send path cannot give.
+- Binary frames as transported: full fidelity on an encrypted connection.
+  The SDK builds the audio chunk header in its send-queue drain and strips it
+  before any listener runs, so the header exists nowhere an adapter can reach
+  but the transport. :class:`SentBinaryFrameRecorder` and
+  :class:`ReceivedBinaryFrameRecorder` wrap ``EncryptedWebSocket.send_bytes``
+  and ``EncryptedWebSocket.receive`` to keep each frame's size and leading
+  bytes. An unencrypted legacy connection bypasses that transport and is not
+  observed.
 """
 
 from __future__ import annotations
@@ -215,6 +223,84 @@ class SentMetadataStateRecorder:
     def uninstall(self) -> None:
         """Restore the ``send_str`` this recorder wrapped."""
         self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
+
+
+# Spans the RC1 audio chunk header, so the prefix shows every header field. A
+# frame with a shorter header yields that many bytes of audio past it; the rest
+# of the payload is never recorded.
+FRAME_PREFIX_BYTES = 13
+
+
+def binary_frame_record(frame: bytes) -> dict[str, Any]:
+    """Return the summary record for one binary frame as it crossed the transport."""
+    return {"byte_count": len(frame), "leading_hex": frame[:FRAME_PREFIX_BYTES].hex()}
+
+
+class SentBinaryFrameRecorder:
+    """
+    Records every binary frame sent on an encrypted connection, in order.
+
+    Recording starts on construction and covers every connection the process
+    opens afterwards. A frame is recorded once the transport has accepted it,
+    so one the SDK built for a client that had already gone is left out. Call
+    :meth:`uninstall` to stop recording.
+    """
+
+    def __init__(self) -> None:
+        from aiosendspin.noise.wire import EncryptedWebSocket
+
+        self._transport_class = EncryptedWebSocket
+        self._original_send_bytes = EncryptedWebSocket.send_bytes
+        self._frames: list[dict[str, Any]] = []
+
+        async def send_bytes(transport: Any, data: bytes) -> None:
+            await self._original_send_bytes(transport, data)
+            self._frames.append(binary_frame_record(data))
+
+        EncryptedWebSocket.send_bytes = send_bytes  # type: ignore[method-assign]
+
+    def frames(self) -> list[dict[str, Any]]:
+        """Return one ``{"byte_count": ..., "leading_hex": ...}`` record per frame sent."""
+        return list(self._frames)
+
+    def uninstall(self) -> None:
+        """Restore the SDK transport's own ``send_bytes``."""
+        self._transport_class.send_bytes = self._original_send_bytes  # type: ignore[method-assign]
+
+
+class ReceivedBinaryFrameRecorder:
+    """
+    Records every binary frame received on an encrypted connection, in order.
+
+    Each frame is the decrypted, reassembled message the transport hands to the
+    SDK, before the SDK parses a header off it. Recording starts on
+    construction, so construct it before the client connects. Call
+    :meth:`uninstall` to stop recording.
+    """
+
+    def __init__(self) -> None:
+        from aiohttp import WSMsgType
+        from aiosendspin.noise.wire import EncryptedWebSocket
+
+        self._transport_class = EncryptedWebSocket
+        self._original_receive = EncryptedWebSocket.receive
+        self._frames: list[dict[str, Any]] = []
+
+        async def receive(transport: Any) -> Any:
+            message = await self._original_receive(transport)
+            if message.type is WSMsgType.BINARY:
+                self._frames.append(binary_frame_record(message.data))
+            return message
+
+        EncryptedWebSocket.receive = receive  # type: ignore[method-assign]
+
+    def frames(self) -> list[dict[str, Any]]:
+        """Return one ``{"byte_count": ..., "leading_hex": ...}`` record per frame received."""
+        return list(self._frames)
+
+    def uninstall(self) -> None:
+        """Restore the SDK transport's own ``receive``."""
+        self._transport_class.receive = self._original_receive  # type: ignore[method-assign]
 
 
 def record_handshake_evidence_server(

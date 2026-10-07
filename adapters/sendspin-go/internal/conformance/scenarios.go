@@ -13,7 +13,12 @@ func IsPlayerScenario(scenarioID string) bool {
 	return scenarioID == "client-initiated-pcm" ||
 		scenarioID == "server-initiated-pcm" ||
 		scenarioID == "server-initiated-flac" ||
-		scenarioID == "server-initiated-legacy-unencrypted"
+		scenarioID == "server-initiated-legacy-unencrypted" ||
+		IsChunkFramingScenario(scenarioID)
+}
+
+func IsChunkFramingScenario(scenarioID string) bool {
+	return scenarioID == "server-initiated-audio-chunk-framing"
 }
 
 func IsMetadataScenario(scenarioID string) bool {

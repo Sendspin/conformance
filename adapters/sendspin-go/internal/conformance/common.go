@@ -72,6 +72,23 @@ func SHA256Hex(data []byte) string {
 	return HexLower(sum[:])
 }
 
+// framePrefixBytes spans the RC1 audio chunk header, so the prefix shows every
+// header field. A frame with a shorter header yields that many bytes of audio
+// past it; the rest of the payload is never recorded.
+const framePrefixBytes = 13
+
+// FrameRecord describes one binary frame as it was handed to the transport.
+func FrameRecord(frame []byte) map[string]any {
+	prefix := frame
+	if len(prefix) > framePrefixBytes {
+		prefix = prefix[:framePrefixBytes]
+	}
+	return map[string]any{
+		"byte_count":  len(frame),
+		"leading_hex": HexLower(prefix),
+	}
+}
+
 func WriteJSON(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err

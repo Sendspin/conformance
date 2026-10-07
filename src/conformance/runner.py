@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .chunk_framing import chunk_framing_verdict
 from .declared_formats import format_priority_violation, undeclared_format_violation
 from .environment import resolve_environment
 from .fixtures import fixture_path
@@ -1232,6 +1233,8 @@ def _dispatch_comparison(
         return _compare_artwork_summaries(server_summary, client_summary)
     if scenario.verification_mode == "format-preference":
         return _compare_format_preference_summaries(scenario, server_summary, client_summary)
+    if scenario.verification_mode == "audio-chunk-framing":
+        return chunk_framing_verdict(server_summary, client_summary)
     raise ValueError(f"Unsupported verification mode: {scenario.verification_mode}")
 
 

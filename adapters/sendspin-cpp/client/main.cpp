@@ -31,6 +31,9 @@ using namespace sendspin;
 static const char* const AUDIO_NOT_OBSERVABLE_REASON =
     "sendspin-cpp exposes no public hook for transported audio chunks, so the adapter cannot "
     "report the received audio hashes";
+static const char* const CHUNK_FRAMES_NOT_OBSERVABLE_REASON =
+    "sendspin-cpp exposes no public hook for transported audio chunks, so the adapter cannot "
+    "report the raw frames it received";
 
 struct Args {
     std::string client_name;
@@ -145,10 +148,15 @@ struct SessionState {
     size_t artwork_byte_count{0};
 };
 
+static bool is_chunk_framing_scenario(const std::string& id) {
+    return id == "server-initiated-audio-chunk-framing";
+}
+
 static bool is_player_scenario(const std::string& id) {
     return id == "client-initiated-pcm" || id == "server-initiated-pcm" ||
            id == "server-initiated-flac" || id == "server-initiated-opus" ||
-           id == "server-initiated-pcm-24bit" || id == "server-initiated-legacy-unencrypted";
+           id == "server-initiated-pcm-24bit" || id == "server-initiated-legacy-unencrypted" ||
+           is_chunk_framing_scenario(id);
 }
 
 static bool is_metadata_scenario(const std::string& id) {
@@ -598,6 +606,10 @@ static JsonDocument build_summary(const Args& args, const SessionState& state,
         audio["received_encoded_sha256"] = nullptr;
         audio["received_pcm_sha256"] = nullptr;
         audio["received_sample_count"] = nullptr;
+        if (is_chunk_framing_scenario(args.scenario_id)) {
+            audio["received_encoded_byte_count"] = nullptr;
+            audio["received_chunk_frames"] = nullptr;
+        }
     } else if (is_metadata_scenario(args.scenario_id)) {
         auto metadata = doc["metadata"].to<JsonObject>();
         metadata["update_count"] = state.metadata_update_count;
@@ -781,6 +793,9 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
         for (int i = 0; i < 10; i++) {
             client.loop();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (is_chunk_framing_scenario(args.scenario_id)) {
+            return emit_summary(args, state, "error", CHUNK_FRAMES_NOT_OBSERVABLE_REASON);
         }
         if (is_player_scenario(args.scenario_id)) {
             return emit_summary(args, state, "error", AUDIO_NOT_OBSERVABLE_REASON);
