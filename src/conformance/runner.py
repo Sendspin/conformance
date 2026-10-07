@@ -1182,7 +1182,8 @@ def _compare_summaries(
     if violation is not None:
         return False, violation
     # RC1 also has the server send a group/update after that first
-    # server/activate on every connection, so this applies to all of them too.
+    # server/activate on every connection, and constrains every one it sends,
+    # so this applies to all of them too.
     violation = group_update_violation(server_summary)
     if violation is not None:
         return False, violation

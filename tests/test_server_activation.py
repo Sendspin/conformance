@@ -148,6 +148,14 @@ class ActivationSectionTests(unittest.TestCase):
         self.assertIn("Recorded value", section)
         self.assertIn("&quot;garbled&quot;", section)
 
+    def test_shows_a_recording_of_another_message_whole(self) -> None:
+        recorded = {"type": "server/hello", "payload": PLAYBACK_ACTIVATE["payload"]}
+        section = _render_activation_section({"activation": recorded}, label="aiosendspin")
+
+        self.assertIn("Recorded value", section)
+        self.assertIn("server/hello", section)
+        self.assertNotIn(">activities<", section)
+
 
 if __name__ == "__main__":
     unittest.main()

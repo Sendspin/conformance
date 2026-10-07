@@ -3,7 +3,7 @@
 Wraps the aiosendspin SDK's connection objects from outside (no SDK changes)
 to populate ``summary["protocol"]`` per the contract in
 :mod:`conformance.protocol`, ``summary["activation"]`` with the initial
-``server/activate``, and ``summary["group_update"]`` with the first
+``server/activate``, and ``summary["group_updates"]`` with every
 ``group/update`` that followed it. This is deliberately a monkey-patch:
 aiosendspin does not yet expose a first-class tracing hook (tracked in
 https://github.com/Sendspin/conformance/issues/111), so this module reaches
@@ -35,8 +35,8 @@ Evidence fidelity by assertion:
   connection bring-up, before the adapter holds the connection, so
   :class:`SentOpeningMessagesRecorder` wraps ``EncryptedWebSocket.send_str`` at
   class level and keeps the JSON body handed to the encrypting transport.
-- First ``group/update`` after that ``server/activate``: full fidelity, from
-  the same wrapper, which is what orders the two.
+- Every ``group/update`` after that ``server/activate``: full fidelity, from
+  the same wrapper, which is what orders them.
 - First metadata-carrying ``server/state``: full fidelity, and timed.
   :class:`SentMetadataStateRecorder` wraps the same transport method, because
   the timestamp requirement on that state needs a clock reading taken once the
@@ -108,7 +108,7 @@ class SentOpeningMessagesRecorder:
     """
     Records what opened each encrypted connection, as the server sent it.
 
-    That is the first ``server/activate``, and the first ``group/update`` sent
+    That is the first ``server/activate``, and every ``group/update`` sent
     after it. Recording starts on construction and covers every connection the
     process opens afterwards, so construct it before the server starts
     accepting clients. Call :meth:`uninstall` to stop recording.
@@ -120,7 +120,7 @@ class SentOpeningMessagesRecorder:
         self._transport_class = EncryptedWebSocket
         self._original_send_str = EncryptedWebSocket.send_str
         self._first_by_socket: dict[Any, dict[str, Any]] = {}
-        self._first_group_update_by_socket: dict[Any, dict[str, Any]] = {}
+        self._group_updates_by_socket: dict[Any, list[dict[str, Any]]] = {}
 
         async def send_str(transport: Any, data: str) -> None:
             await self._original_send_str(transport, data)
@@ -134,7 +134,7 @@ class SentOpeningMessagesRecorder:
             if message.get("type") == "server/activate":
                 self._first_by_socket.setdefault(socket, message)
             elif message.get("type") == "group/update" and socket in self._first_by_socket:
-                self._first_group_update_by_socket.setdefault(socket, message)
+                self._group_updates_by_socket.setdefault(socket, []).append(message)
 
         EncryptedWebSocket.send_str = send_str  # type: ignore[method-assign]
 
@@ -157,20 +157,20 @@ class SentOpeningMessagesRecorder:
             )
         return message
 
-    def first_group_update(self, connection: Any) -> dict[str, Any] | None:
+    def group_updates(self, connection: Any) -> list[dict[str, Any]]:
         """
-        Return the first ``group/update`` sent after the first ``server/activate``.
+        Return every ``group/update`` sent after the first ``server/activate``, in order.
 
-        The message is the ``{"type": ..., "payload": ...}`` body as sent on a
-        server-side ``SendspinConnection``. Returns ``None`` when none had been
-        sent by the time of the call, which covers an unencrypted legacy
+        Each is the ``{"type": ..., "payload": ...}`` body as sent on a
+        server-side ``SendspinConnection``. The list is empty when none had
+        been sent by the time of the call, which covers an unencrypted legacy
         connection, where no ``server/activate`` precedes anything. A
-        ``group/update`` sent before the first ``server/activate`` is not the
-        one this returns. Both messages are seen by one wrapper, so
-        :meth:`initial_activation` raising is what shows this one went unobserved.
+        ``group/update`` sent before the first ``server/activate`` is left out.
+        Both message types are seen by one wrapper, so
+        :meth:`initial_activation` raising is what shows these went unobserved.
         """
         socket = connection._wsock_server or connection._wsock_client
-        return self._first_group_update_by_socket.get(socket)
+        return list(self._group_updates_by_socket.get(socket, ()))
 
     def uninstall(self) -> None:
         """Restore the SDK transport's own ``send_str``."""

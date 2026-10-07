@@ -59,7 +59,7 @@ def _server_summary(*, sent: Any = None, include_sent: bool = True) -> dict[str,
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
-        "group_update": GROUP_UPDATE,
+        "group_updates": [GROUP_UPDATE],
         "metadata": metadata,
     }
 

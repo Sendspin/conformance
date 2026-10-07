@@ -37,7 +37,7 @@ def _server_summary(*, declared: Any, stream: dict[str, Any] | None) -> dict[str
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
-        "group_update": GROUP_UPDATE,
+        "group_updates": [GROUP_UPDATE],
         "peer_hello": {
             "type": "client/hello",
             "payload": {"player@v1_support": {"supported_formats": declared}},

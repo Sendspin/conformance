@@ -322,7 +322,7 @@ def _base_summary(
     discovery_method: str,
     client: Any,
     activation: dict[str, Any] | None,
-    group_update: dict[str, Any] | None,
+    group_updates: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "status": "ok",
@@ -339,7 +339,7 @@ def _base_summary(
             "payload": client.info.to_dict(),
         },
         "activation": activation,
-        "group_update": group_update,
+        "group_updates": group_updates,
         "client": _client_snapshot(client),
     }
 
@@ -1019,8 +1019,8 @@ async def _run(args: argparse.Namespace) -> int:
                 client=client,
                 activation=sent_opening_messages.initial_activation(connection),
                 # Read once the scenario has run, so the server has had the whole
-                # case in which to send one.
-                group_update=sent_opening_messages.first_group_update(connection),
+                # case in which to send them.
+                group_updates=sent_opening_messages.group_updates(connection),
             ),
             **payload,
         }

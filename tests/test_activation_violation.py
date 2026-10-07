@@ -173,7 +173,7 @@ class CaseVerdictTest(unittest.TestCase):
     def _verdict(self, **server_extra: Any) -> tuple[bool, str]:
         return _compare_summaries(
             self.scenario,
-            _audio_summary("server", group_update=GROUP_UPDATE, **server_extra),
+            _audio_summary("server", group_updates=[GROUP_UPDATE], **server_extra),
             _audio_summary("client"),
         )
 

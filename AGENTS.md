@@ -127,7 +127,7 @@ Important fields to preserve where available:
 - `preferred_codec`
 - `peer_hello`
 - `activation` (server summaries)
-- `group_update` (server summaries)
+- `group_updates` (server summaries)
 - audio hash fields
 
 `peer_hello` should contain the full hello message received from the other party whenever capture is possible.
@@ -136,11 +136,11 @@ Important fields to preserve where available:
 
 `null` fails the case: `activation_violation` in `src/conformance/protocol.py` judges this field on every case, whatever the scenario.
 
-`group_update` should contain the first `group/update` the server sent after that first `server/activate`, as it went on the wire and in the same `{type, payload}` shape. It is `null` only when none followed, and is never reconstructed from adapter arguments or SDK state.
+`group_updates` should contain every `group/update` the server sent after that first `server/activate`, in order, each as it went on the wire and in the same `{type, payload}` shape. It is an empty list only when none followed, and is never reconstructed from adapter arguments or SDK state.
 
-`group_update_violation` in `src/conformance/protocol.py` judges this field on every case too. `null` fails the case, and so does a `group/update` whose `playback_state` is not `playing` or `stopped`, or whose `group_id` or `group_name` is missing or not a string. Unlike `activation`, a summary without the field also fails the case, as a harness gap. The difference is deliberate, so do not align the two. Every server adapter in the tree records `group_update`, so a summary without it comes from a broken adapter, never from an implementation that predates the field, and failing closed keeps an adapter that cannot observe the message from reading as a server that sent it.
+`group_update_violation` in `src/conformance/protocol.py` judges this field on every case too. An empty list fails the case, and so does any recorded `group/update` whose `playback_state` is not `playing` or `stopped`, or whose `group_id` or `group_name` is missing or not a string. Unlike `activation`, a summary without the field also fails the case, as a harness gap. The difference is deliberate, so do not align the two. Every server adapter in the tree records `group_updates`, so a summary without it comes from a broken adapter, never from an implementation that predates the field, and failing closed keeps an adapter that cannot observe the messages from reading as a server that sent them. How soon the first message followed is not judged, because the spec says "promptly" and gives no bound, so one sent at any point in the case satisfies it.
 
-Only the first `group/update` is judged. The same spec sentence also requires one "whenever any field listed below changes", and nothing in the matrix asserts that half. How soon the message followed is not judged, because the spec says "promptly" and gives no bound, so one sent at any point in the case satisfies it.
+Every recorded `group/update` is judged for its fields. The same spec sentence also requires one "whenever any field listed below changes", and nothing in the matrix asserts that a change produced one.
 
 ### Audio fixture
 

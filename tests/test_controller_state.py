@@ -55,7 +55,7 @@ def _server_summary(**overrides: Any) -> dict[str, Any]:
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
-        "group_update": GROUP_UPDATE,
+        "group_updates": [GROUP_UPDATE],
         "controller": _apply(controller, overrides),
     }
 

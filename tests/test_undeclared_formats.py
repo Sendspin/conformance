@@ -46,7 +46,7 @@ def _server_summary(
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
-        "group_update": GROUP_UPDATE,
+        "group_updates": [GROUP_UPDATE],
         "peer_hello": {"type": "client/hello", "payload": payload},
         "stream": stream,
         "audio": {"sent_audio_chunk_count": 4, "sent_encoded_sha256": ENCODED_SHA},

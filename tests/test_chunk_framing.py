@@ -69,7 +69,7 @@ def _server_summary(
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
-        "group_update": GROUP_UPDATE,
+        "group_updates": [GROUP_UPDATE],
         "stream": STREAM,
         "audio": {
             "sent_chunk_frames": [

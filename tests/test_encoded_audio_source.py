@@ -46,7 +46,7 @@ def _server_summary(codec: str = "flac", **stream_overrides: Any) -> dict[str, A
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
-        "group_update": GROUP_UPDATE,
+        "group_updates": [GROUP_UPDATE],
         "stream": {
             **_stream(codec, **stream_overrides),
             "codec_header_sha256": HEADER_HASH,

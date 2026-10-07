@@ -38,7 +38,7 @@ def _server_summary(
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
-        "group_update": GROUP_UPDATE,
+        "group_updates": [GROUP_UPDATE],
         "stream": stream,
         "format_preference": {"received": received},
     }
