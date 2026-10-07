@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
 
 SPEC_REVISION = "8c9577ea8719ad082d051ec13cc73ef15ed68948"
+
+# The activities RC1 defines. An implementation's own extensions are not in it.
+RC1_ACTIVITIES = frozenset({"pairing", "playback"})
 
 
 @dataclass(frozen=True)
@@ -97,3 +101,60 @@ def protocol_evidence_failure(
             if not isinstance(events, list) or not events:
                 return f"{role.capitalize()} {assertion_id} has no trace events"
     return None
+
+
+def activation_violation(server_summary: dict[str, Any]) -> str | None:
+    """
+    Return how the server's initial `server/activate` breaks RC1, or None.
+
+    RC1 ends the mandatory initial sequence of every connection with a
+    `server/activate`, so this is judged on every case. Three things are
+    asserted against the message as the server's adapter recorded it: that one
+    was sent, that its `activities` is a list of unique values RC1 defines, and
+    that it carries `active_roles`. Every reason names the server as the party
+    at fault.
+
+    Which activity sets and roles are allowed depends on which PSK matched
+    during the handshake. No summary records that, so neither is judged.
+
+    None covers both a conformant activation and a summary no activation can be
+    read from: no `activation` field, or a value that is not a
+    `server/activate` message. An unreadable recording is not evidence against
+    an implementation. A recorded `null` is evidence: the adapter contract
+    reserves it for a server that sent no activation at all.
+    """
+    if "activation" not in server_summary:
+        return None
+    activation = server_summary["activation"]
+    if activation is None:
+        return (
+            "Server sent no initial server/activate; RC1 requires the server to send one "
+            "on every connection, as the last step of the initial sequence"
+        )
+    if not isinstance(activation, dict) or activation.get("type") != "server/activate":
+        return None
+    payload = activation.get("payload")
+    if not isinstance(payload, dict):
+        return None
+
+    defects: list[str] = []
+    if "activities" not in payload:
+        defects.append("omitted activities, which RC1 requires")
+    elif not _is_rc1_activity_set(payload["activities"]):
+        defects.append(
+            f"declared activities {json.dumps(payload['activities'])}, where RC1 requires "
+            "a list of unique values drawn from 'pairing' and 'playback'"
+        )
+    if "active_roles" not in payload:
+        defects.append("omitted active_roles, which RC1 requires on the first activation")
+    if not defects:
+        return None
+    return f"Server's initial server/activate {'; '.join(defects)}"
+
+
+def _is_rc1_activity_set(activities: Any) -> bool:
+    if not isinstance(activities, list):
+        return False
+    if not all(isinstance(activity, str) and activity in RC1_ACTIVITIES for activity in activities):
+        return False
+    return len(set(activities)) == len(activities)
