@@ -1324,6 +1324,27 @@ async def _run_failfast_role(
     )
 
 
+async def _run_unsupported_role(
+    *,
+    context: CaseContext,
+    failing_role: RoleName,
+    failure_reason: str | None = None,
+) -> CaseResult:
+    """
+    Fail a case fast and record that the harness judged it unsupported.
+
+    The mark records the judgement made before launch, so it stands however the
+    fail-fast adapter then behaves.
+    """
+    result = await _run_failfast_role(
+        context=context,
+        failing_role=failing_role,
+        failure_reason=failure_reason,
+    )
+    result.unsupported = True
+    return result
+
+
 async def run_case(
     *,
     results_dir: Path,
@@ -1358,7 +1379,7 @@ async def run_case(
     if not context.role_spec("server").supported:
         return _write_result(
             context,
-            await _run_failfast_role(
+            await _run_unsupported_role(
                 context=context,
                 failing_role="server",
             ),
@@ -1366,7 +1387,7 @@ async def run_case(
     if not context.role_spec("client").supported:
         return _write_result(
             context,
-            await _run_failfast_role(
+            await _run_unsupported_role(
                 context=context,
                 failing_role="client",
             ),
@@ -1375,7 +1396,7 @@ async def run_case(
     if server_capability_reason is not None:
         return _write_result(
             context,
-            await _run_failfast_role(
+            await _run_unsupported_role(
                 context=context,
                 failing_role="server",
                 failure_reason=server_capability_reason,
@@ -1385,7 +1406,7 @@ async def run_case(
     if client_capability_reason is not None:
         return _write_result(
             context,
-            await _run_failfast_role(
+            await _run_unsupported_role(
                 context=context,
                 failing_role="client",
                 failure_reason=client_capability_reason,

@@ -35,6 +35,13 @@ Every implementation is modeled as exactly two CLIs:
 
 Client-side unsupported roles still need a CLI surface that the harness can invoke. Those cases should fail fast, emit a summary, and exit non-zero. Server-side unsupported scenarios are filtered out before case creation, so the runner does not create dead server rows in the matrix.
 
+When the harness judges a case unsupported — the role is not `supported`, or
+`RoleSpec.unsupported_reason()` returns a reason for the scenario — it stamps
+`unsupported: true` on the result row. The report labels and counts a failed cell
+as unsupported from that field alone, never from the wording of a `reason`, so an
+adapter cannot relabel its own failure. `status` stays `failed`. A row published
+before the field existed carries none and reads as a plain failure.
+
 Adapters do not need to rely on the implementation library owning discovery itself.
 External mDNS advertisement/browsing or the harness registry handoff are acceptable,
 as long as the adapter can still attach the implementation to an outbound WebSocket
