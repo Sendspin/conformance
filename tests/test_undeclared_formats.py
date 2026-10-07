@@ -219,9 +219,9 @@ class CompareSummariesTest(unittest.TestCase):
         matches, reason = _compare_summaries(
             scenario,
             _server_summary(
-                declared=[PCM_24, PCM_16], stream=PCM_16, received_preference=PCM_24
+                declared=[PCM_24, PCM_16], stream=PCM_16, received_preference=PCM_16
             ),
-            _renegotiation_client_summary(initial=PCM_16, final=PCM_24),
+            _renegotiation_client_summary(initial=PCM_24, final=PCM_16),
         )
         self.assertTrue(matches, reason)
 
@@ -229,12 +229,12 @@ class CompareSummariesTest(unittest.TestCase):
         scenario = require_scenario("client-initiated-state-format-pcm")
         matches, reason = _compare_summaries(
             scenario,
-            _server_summary(declared=[PCM_16], stream=PCM_16, received_preference=PCM_24),
-            _renegotiation_client_summary(initial=PCM_16, final=PCM_24),
+            _server_summary(declared=[PCM_16], stream=PCM_16, received_preference=PCM_16),
+            _renegotiation_client_summary(initial=PCM_24, final=PCM_16),
         )
         self.assertFalse(matches)
         self.assertIn("24-bit", reason)
-        self.assertIn("client.renegotiation.final_format", reason)
+        self.assertIn("client.renegotiation.initial_format", reason)
 
 
 if __name__ == "__main__":

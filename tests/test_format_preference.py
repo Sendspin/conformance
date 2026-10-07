@@ -84,13 +84,52 @@ class FormatPreferenceComparisonTests(unittest.TestCase):
         self.assertFalse(matches)
         self.assertIn("Harness gap", reason)
 
-    def test_a_preference_the_client_did_not_report_fails(self) -> None:
+    def test_a_preference_for_another_format_than_the_scenario_target_fails(self) -> None:
+        """Both sides agreeing on the reverse transition is not this scenario."""
         matches, reason = _compare_summaries(
-            self.scenario, _server_summary(received=PCM_24), _client_summary()
+            self.scenario,
+            _server_summary(received=PCM_24, stream=PCM_24),
+            _client_summary(requested=PCM_24, final=PCM_24),
         )
         self.assertFalse(matches)
         self.assertIn("24bit", reason)
-        self.assertIn("16bit", reason)
+        self.assertIn("this scenario", reason)
+
+    def test_the_flac_scenario_rejects_a_preference_for_pcm(self) -> None:
+        matches, reason = _compare_summaries(
+            require_scenario("client-initiated-state-format-flac"),
+            _server_summary(received=PCM_16),
+            _client_summary(),
+        )
+        self.assertFalse(matches)
+        self.assertIn("this scenario", reason)
+
+    def test_the_flac_scenario_passes_a_preference_for_flac(self) -> None:
+        matches, reason = _compare_summaries(
+            require_scenario("client-initiated-state-format-flac"),
+            _server_summary(received=FLAC_16, stream=FLAC_16),
+            _client_summary(requested=FLAC_16, final=FLAC_16),
+        )
+        self.assertTrue(matches, reason)
+
+    def test_a_preference_the_client_did_not_report_fails(self) -> None:
+        matches, reason = _compare_summaries(
+            self.scenario,
+            _server_summary(received=PCM_16),
+            _client_summary(requested=FLAC_16, final=FLAC_16),
+        )
+        self.assertFalse(matches)
+        self.assertIn("client reports preferring", reason)
+
+    def test_a_client_claim_the_server_stream_contradicts_fails(self) -> None:
+        """The client's word that the format changed does not outweigh the server's."""
+        matches, reason = _compare_summaries(
+            self.scenario,
+            _server_summary(received=PCM_16, stream=PCM_24),
+            _client_summary(),
+        )
+        self.assertFalse(matches)
+        self.assertIn("server's last stream/start was pcm/8000Hz/24bit/1ch", reason)
 
     def test_a_received_preference_the_server_never_applied_fails(self) -> None:
         matches, reason = _compare_summaries(
