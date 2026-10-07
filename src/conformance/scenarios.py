@@ -115,6 +115,20 @@ METADATA_EXTRA_CLI_ARGS = (
 )
 
 
+CONTROLLER_EXTRA_CLI_ARGS = (
+    ("controller_command", "next"),
+    ("controller_repeat", "all"),
+    ("controller_shuffle", "false"),
+)
+
+
+ARTWORK_EXTRA_CLI_ARGS = (
+    ("artwork_format", "jpeg"),
+    ("artwork_width", "256"),
+    ("artwork_height", "256"),
+)
+
+
 SERVER_INITIATED_METADATA = ScenarioSpec(
     id="server-initiated-metadata",
     display_name="Server initiates connection and client wants Metadata",
@@ -146,11 +160,7 @@ SERVER_INITIATED_CONTROLLER = ScenarioSpec(
     required_role_families=("controller",),
     verification_mode="controller",
     scenario_revision=5,
-    extra_cli_args=(
-        ("controller_command", "next"),
-        ("controller_repeat", "all"),
-        ("controller_shuffle", "false"),
-    ),
+    extra_cli_args=CONTROLLER_EXTRA_CLI_ARGS,
 )
 
 
@@ -167,11 +177,7 @@ SERVER_INITIATED_ARTWORK = ScenarioSpec(
     required_role_families=("artwork",),
     verification_mode="artwork",
     scenario_revision=5,
-    extra_cli_args=(
-        ("artwork_format", "jpeg"),
-        ("artwork_width", "256"),
-        ("artwork_height", "256"),
-    ),
+    extra_cli_args=ARTWORK_EXTRA_CLI_ARGS,
 )
 
 
@@ -230,6 +236,61 @@ CLIENT_INITIATED_STATE_FORMAT_FLAC = ScenarioSpec(
 )
 
 
+CLIENT_INITIATED_METADATA = ScenarioSpec(
+    id="client-initiated-metadata",
+    display_name="Client initiates connection and client wants Metadata",
+    description=(
+        "Start the server first, then the client. The client discovers or looks up the "
+        "server and initiates the WebSocket connection, the server sends a metadata state "
+        "update, disconnects, and the matrix compares a normalized metadata snapshot and "
+        "checks that the first state carrying a metadata object bore a past or present "
+        "timestamp."
+    ),
+    initiator_role="client",
+    preferred_codec="none",
+    required_role_families=("metadata",),
+    verification_mode="metadata",
+    scenario_revision=1,
+    extra_cli_args=METADATA_EXTRA_CLI_ARGS,
+)
+
+
+CLIENT_INITIATED_CONTROLLER = ScenarioSpec(
+    id="client-initiated-controller",
+    display_name="Client initiates connection and client wants Controller",
+    description=(
+        "Start the server first, then the client. The client discovers or looks up the "
+        "server and initiates the WebSocket connection, the server observes controller "
+        "state, receives a control command, disconnects, and the matrix verifies the "
+        "recorded command."
+    ),
+    initiator_role="client",
+    preferred_codec="none",
+    required_role_families=("controller",),
+    verification_mode="controller",
+    scenario_revision=1,
+    extra_cli_args=CONTROLLER_EXTRA_CLI_ARGS,
+)
+
+
+CLIENT_INITIATED_ARTWORK = ScenarioSpec(
+    id="client-initiated-artwork",
+    display_name="Client initiates connection and client wants Artwork",
+    description=(
+        "Start the server first, then the client. The client discovers or looks up the "
+        "server and initiates the WebSocket connection, the server streams album artwork, "
+        "disconnects, and the matrix compares the received bytes against the server's "
+        "encoded artwork."
+    ),
+    initiator_role="client",
+    preferred_codec="none",
+    required_role_families=("artwork",),
+    verification_mode="artwork",
+    scenario_revision=1,
+    extra_cli_args=ARTWORK_EXTRA_CLI_ARGS,
+)
+
+
 SERVER_INITIATED_LEGACY_UNENCRYPTED = ScenarioSpec(
     id="server-initiated-legacy-unencrypted",
     display_name="Server initiates connection over the legacy unencrypted transition mode",
@@ -283,6 +344,9 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_PCM_24BIT,
     CLIENT_INITIATED_STATE_FORMAT_PCM,
     CLIENT_INITIATED_STATE_FORMAT_FLAC,
+    CLIENT_INITIATED_METADATA,
+    CLIENT_INITIATED_ARTWORK,
+    CLIENT_INITIATED_CONTROLLER,
     SERVER_INITIATED_LEGACY_UNENCRYPTED,
     SERVER_INITIATED_AUDIO_CHUNK_FRAMING,
 )

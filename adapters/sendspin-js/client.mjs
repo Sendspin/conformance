@@ -41,8 +41,14 @@ const PLAYER_SCENARIOS = new Set([
   "server-initiated-legacy-unencrypted",
   "server-initiated-audio-chunk-framing",
 ]);
-const METADATA_SCENARIOS = new Set(["server-initiated-metadata"]);
-const CONTROLLER_SCENARIOS = new Set(["server-initiated-controller"]);
+const METADATA_SCENARIOS = new Set([
+  "client-initiated-metadata",
+  "server-initiated-metadata",
+]);
+const CONTROLLER_SCENARIOS = new Set([
+  "client-initiated-controller",
+  "server-initiated-controller",
+]);
 
 function parseArgs(argv) {
   const values = {};

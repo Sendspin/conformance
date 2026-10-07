@@ -129,8 +129,8 @@ struct CliOptions {
     }
 
     var isFormatPreferenceScenario: Bool {
-        scenarioID == "client-initiated-request-format-pcm"
-            || scenarioID == "client-initiated-request-format-flac"
+        scenarioID == "client-initiated-state-format-pcm"
+            || scenarioID == "client-initiated-state-format-flac"
     }
 
     /// Codecs whose conformance check compares the raw encoded chunk bytes the
@@ -989,8 +989,8 @@ struct ConformanceSendspinKitClient {
             if options.scenarioID == "server-initiated-pcm-24bit" {
                 formats = try [AudioFormatSpec(codec: .pcm, channels: 1, sampleRate: 8000, bitDepth: 24)]
             } else if options.isFormatPreferenceScenario {
-                let initialDepth = options.scenarioID == "client-initiated-request-format-pcm" ? 24 : 16
-                let targetCodec: AudioCodec = options.scenarioID == "client-initiated-request-format-flac" ? .flac : .pcm
+                let initialDepth = options.scenarioID == "client-initiated-state-format-pcm" ? 24 : 16
+                let targetCodec: AudioCodec = options.scenarioID == "client-initiated-state-format-flac" ? .flac : .pcm
                 formats = try [
                     AudioFormatSpec(codec: .pcm, channels: 1, sampleRate: 8000, bitDepth: initialDepth),
                     AudioFormatSpec(codec: targetCodec, channels: 1, sampleRate: 8000, bitDepth: 16),
@@ -1111,7 +1111,7 @@ struct ConformanceSendspinKitClient {
                     await collector.recordStreamFormat(format, codecHeader: await client.currentCodecHeader)
                     if !preferenceSent {
                         preferenceSent = true
-                        let codec: AudioCodec = options.scenarioID == "client-initiated-request-format-flac" ? .flac : .pcm
+                        let codec: AudioCodec = options.scenarioID == "client-initiated-state-format-flac" ? .flac : .pcm
                         let requested = try AudioFormatSpec(codec: codec, channels: 1, sampleRate: 8000, bitDepth: 16)
                         try await client.setPlayerFormatPreference(requested)
                         await collector.recordPreferenceRequest(requested)
@@ -1125,7 +1125,7 @@ struct ConformanceSendspinKitClient {
                     await collector.recordStreamFormat(format, codecHeader: codecHeader)
                     if options.isFormatPreferenceScenario, !preferenceSent {
                         preferenceSent = true
-                        let targetCodec: AudioCodec = options.scenarioID == "client-initiated-request-format-flac" ? .flac : .pcm
+                        let targetCodec: AudioCodec = options.scenarioID == "client-initiated-state-format-flac" ? .flac : .pcm
                         let requested = try AudioFormatSpec(codec: targetCodec, channels: 1, sampleRate: 8000, bitDepth: 16)
                         try await client.setPlayerFormatPreference(requested)
                         await collector.recordPreferenceRequest(requested)

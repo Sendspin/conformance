@@ -103,6 +103,23 @@ func run(parsed args) int {
 		)
 	}
 
+	// The outbound path drives a player session only, so any other role would
+	// report a missing audio stream instead of what its scenario asks for.
+	if parsed.InitiatorRole == "client" && !conformance.IsPlayerScenario(parsed.ScenarioID) {
+		if err := conformance.WriteJSON(parsed.Ready, map[string]any{"status": "error"}); err != nil {
+			log.Printf("failed to write ready file: %v", err)
+		}
+		return exitWithSummary(
+			parsed,
+			errorSummary(
+				parsed,
+				fmt.Sprintf("Harness gap, not a protocol result: the sendspin-go client adapter has no client-initiated path for scenario %s", parsed.ScenarioID),
+				nil,
+				nil,
+			),
+		)
+	}
+
 	if parsed.InitiatorRole == "client" {
 		if err := conformance.WriteJSON(parsed.Ready, conformance.BuildReadyPayload(parsed.ScenarioID, parsed.InitiatorRole, "")); err != nil {
 			log.Printf("failed to write ready file: %v", err)
