@@ -160,15 +160,15 @@ static bool is_player_scenario(const std::string& id) {
 }
 
 static bool is_metadata_scenario(const std::string& id) {
-    return id == "server-initiated-metadata";
+    return id == "client-initiated-metadata" || id == "server-initiated-metadata";
 }
 
 static bool is_controller_scenario(const std::string& id) {
-    return id == "server-initiated-controller";
+    return id == "client-initiated-controller" || id == "server-initiated-controller";
 }
 
 static bool is_artwork_scenario(const std::string& id) {
-    return id == "server-initiated-artwork";
+    return id == "client-initiated-artwork" || id == "server-initiated-artwork";
 }
 
 static std::string get_arg(int argc, char* argv[], const std::string& name,

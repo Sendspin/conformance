@@ -212,7 +212,15 @@ class CaseVerdictTest(unittest.TestCase):
             }
 
         unjudged = {scenario_id for scenario_id, (matches, _) in verdicts.items() if matches}
-        self.assertEqual(unjudged, {"server-initiated-metadata", "server-initiated-controller"})
+        self.assertEqual(
+            unjudged,
+            {
+                "server-initiated-metadata",
+                "server-initiated-controller",
+                "client-initiated-metadata",
+                "client-initiated-controller",
+            },
+        )
         for scenario_id in verdicts.keys() - unjudged:
             with self.subTest(scenario_id):
                 self.assertTrue(verdicts[scenario_id][1].startswith(HARNESS_GAP))

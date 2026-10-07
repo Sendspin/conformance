@@ -1224,7 +1224,22 @@ async fn run_request_format_client(args: &Args, server_url: &str) -> serde_json:
 }
 
 async fn run(args: Args) -> Result<(), String> {
-    let summary = if args.initiator_role == "client" {
+    // The outbound paths drive a player session only, so these roles would
+    // report a missing audio stream instead of what their scenario asks for.
+    let lacks_outbound_path = is_metadata_scenario(&args.scenario_id)
+        || is_controller_scenario(&args.scenario_id)
+        || is_artwork_scenario(&args.scenario_id);
+    let summary = if args.initiator_role == "client" && lacks_outbound_path {
+        write_json(&args.ready, &serde_json::json!({"status": "error"}))?;
+        build_error_summary(
+            &args,
+            &format!(
+                "Harness gap, not a protocol result: the sendspin-rs client adapter has no \
+                 client-initiated path for scenario {}",
+                args.scenario_id
+            ),
+        )
+    } else if args.initiator_role == "client" {
         write_json(&args.ready, &build_ready(&args, None))?;
         match wait_for_server_url(&args.registry, &args.server_name, args.timeout_seconds).await {
             Ok(server_url) if is_request_format_scenario(&args.scenario_id) => {
