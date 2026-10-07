@@ -41,7 +41,10 @@ Unsupported client roles use fail-fast adapters that emit a summary and exit non
 The matrix is moving from media-oriented interoperability checks to normative protocol
 conformance. `server-initiated-protocol-baseline-v1` is the first authoritative
 protocol test and is pinned to Sendspin spec revision
-`8c9577ea8719ad082d051ec13cc73ef15ed68948`. It intentionally fails until an adapter
+`8c9577ea8719ad082d051ec13cc73ef15ed68948`. That pin scopes this scenario's assertions
+only. It is not the revision the matrix is audited against: the verdicts applied to every
+case are judged against the spec checkout each run records in `repositories.json` and
+shows on the report overview. The scenario intentionally fails until an adapter
 can provide the required ordered protocol evidence described in
 [`adapters/README.md`](adapters/README.md). The current PCM, FLAC, OPUS, artwork,
 metadata, and controller scenarios remain diagnostic interoperability checks during

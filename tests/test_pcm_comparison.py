@@ -21,6 +21,13 @@ CHANNELS = 2
 SAMPLE_COUNT = FRAME_COUNT * CHANNELS
 
 
+# Every server summary carries one, and a case whose summary lacks it never passes.
+GROUP_UPDATE = {
+    "type": "group/update",
+    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+}
+
+
 def _server_summary(**overrides: Any) -> dict[str, Any]:
     audio = {
         "source_pcm_sha256": SOURCE_HASH,
@@ -31,6 +38,7 @@ def _server_summary(**overrides: Any) -> dict[str, Any]:
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "group_updates": [GROUP_UPDATE],
         "audio": {**audio, **overrides},
     }
 
