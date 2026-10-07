@@ -26,6 +26,12 @@ Every server adapter MUST report an `activation` field in its summary: the first
 shape as `peer_hello`. Report `null` only when the server sent none. Never reconstruct it
 from adapter arguments or SDK state.
 
+The matrix draws a verdict from this field on every case: a case fails when it is `null`,
+when its `activities` is not a list of unique values from `playback` and `pairing`, or when
+it omits `active_roles`. Which activity sets and roles the matched PSK allows is not judged,
+because no summary records which PSK matched. A summary with no `activation` field at all
+is not judged, so omitting the field hides a server from this verdict rather than passing it.
+
 ## Metadata scenario summary fields
 
 The spec requires the first `server/state` sent for a role on a connection to

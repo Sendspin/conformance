@@ -28,7 +28,7 @@ from .io import read_json, write_json
 from .models import AUDIO_FORMAT_FIELDS, CaseResult, RoleName, ScenarioSpec
 from .paths import repo_root
 from .process import close_process_log, collect_process, wait_for_exit, wait_for_file
-from .protocol import protocol_evidence_failure
+from .protocol import activation_violation, protocol_evidence_failure
 from .scenarios import ordered_scenarios, require_scenario
 from .toolchains import find_cargo, find_cmake, find_dotnet, find_go, find_swift
 
@@ -1175,6 +1175,11 @@ def _compare_summaries(
     matches, reason = _dispatch_comparison(scenario, server_summary, client_summary)
     if not matches:
         return matches, reason
+    # RC1 opens every connection with the server's initial server/activate,
+    # whatever the scenario goes on to exercise, so this applies to all of them.
+    violation = activation_violation(server_summary)
+    if violation is not None:
+        return False, violation
     # Every format the case negotiated must be one the client declared. Modes
     # that negotiate no player stream leave the check with nothing to inspect,
     # so it applies to all of them rather than to a list of audio modes that a
