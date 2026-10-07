@@ -441,6 +441,31 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
     client.send_role_message = send_role_message_wrapper  # type: ignore[method-assign]
     client.send_binary = send_binary_wrapper  # type: ignore[method-assign]
 
+    format_preference_scenario = args.scenario_id in {
+        "client-initiated-state-format-pcm",
+        "client-initiated-state-format-flac",
+    }
+    received_format_preference: dict[str, Any] | None = None
+    player_role = next(iter(client.roles_by_family("player")), None)
+    original_on_client_state = None if player_role is None else player_role.on_client_state
+
+    def on_client_state_wrapper(payload: Any) -> None:
+        nonlocal received_format_preference
+        preferred = None if payload.player is None else payload.player.format
+        if preferred is not None:
+            received_format_preference = {
+                "codec": preferred.codec.value,
+                "sample_rate": preferred.sample_rate,
+                "channels": preferred.channels,
+                "bit_depth": preferred.bit_depth,
+            }
+        original_on_client_state(payload)
+
+    # Only client/state reaches this hook, so a preference recorded here was
+    # carried by the `format` field and not by any other message.
+    if format_preference_scenario and player_role is not None:
+        player_role.on_client_state = on_client_state_wrapper  # type: ignore[method-assign]
+
     try:
         # The SDK holds stream/start while the client reports unavailable and then
         # joins it at the playhead, skipping every chunk committed before it.
@@ -458,13 +483,10 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
         )
         next_play_start_us = server.clock.now_us() + 250_000
         total_duration_us = 0
-        # Renegotiation scenarios need audio to keep flowing in real time so a
-        # mid-stream stream/request-format has later chunks to flush the new
+        # Format-preference scenarios need audio to keep flowing in real time so a
+        # mid-stream client/state format change has later chunks to flush the new
         # stream/start. Other scenarios commit upfront and settle once at the end.
-        pace_realtime = args.scenario_id in {
-            "client-initiated-request-format-pcm",
-            "client-initiated-request-format-flac",
-        }
+        pace_realtime = format_preference_scenario
         for chunk, duration_us in _iter_pcm_blocks(
             source_pcm_bytes,
             sample_rate=fixture.sample_rate,
@@ -486,8 +508,10 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
         client.send_message = original_send_message  # type: ignore[method-assign]
         client.send_role_message = original_send_role_message  # type: ignore[method-assign]
         client.send_binary = original_send_binary  # type: ignore[method-assign]
+        if format_preference_scenario and player_role is not None:
+            player_role.on_client_state = original_on_client_state  # type: ignore[method-assign]
 
-    return {
+    summary: dict[str, Any] = {
         "stream": stream_state,
         "audio": {
             "fixture": str(fixture.path),
@@ -507,6 +531,9 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
             "trimmed_source_frames": trimmed_source_frames,
         }
     }
+    if format_preference_scenario:
+        summary["format_preference"] = {"received": received_format_preference}
+    return summary
 
 
 async def _run_protocol_baseline_scenario(
@@ -827,13 +854,13 @@ async def _scenario_payload(
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
-        "client-initiated-request-format-pcm",
-        "client-initiated-request-format-flac",
+        "client-initiated-state-format-pcm",
+        "client-initiated-state-format-flac",
         "server-initiated-legacy-unencrypted",
     }:
         # The server streams source PCM and the player role re-encodes to whatever
-        # format the client negotiates, including a mid-stream stream/request-format
-        # switch, so no renegotiation-specific server logic is required here.
+        # format the client negotiates, including a mid-stream client/state format
+        # change, so every player scenario shares one streaming path.
         return await _run_audio_scenario(args, server=server, client=client)
     if args.scenario_id == "server-initiated-protocol-baseline-v1":
         assert handshake_timestamps is not None

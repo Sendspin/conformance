@@ -190,41 +190,39 @@ SERVER_INITIATED_PCM_24BIT = ScenarioSpec(
 )
 
 
-CLIENT_INITIATED_REQUEST_FORMAT_PCM = ScenarioSpec(
-    id="client-initiated-request-format-pcm",
-    display_name="Client renegotiates PCM bit depth via stream/request-format",
+CLIENT_INITIATED_STATE_FORMAT_PCM = ScenarioSpec(
+    id="client-initiated-state-format-pcm",
+    display_name="Client changes its preferred PCM bit depth via client/state",
     description=(
         "Start the server first, then the client. The client connects, advertises two PCM "
-        "formats (24-bit then 16-bit), and the server starts streaming the preferred 24-bit "
-        "format. The client then emits stream/request-format asking for the 16-bit format, "
-        "the server re-emits stream/start with the new format, and the matrix verifies the "
-        "client observed the renegotiated 16-bit stream."
+        "formats (24-bit then 16-bit), and the server starts streaming the higher-priority "
+        "24-bit format. The client then sends a client/state whose player format prefers "
+        "the 16-bit entry. The matrix verifies the server received that preference in "
+        "client/state and the client observed a new stream/start in the 16-bit format."
     ),
     initiator_role="client",
     preferred_codec="pcm",
     required_role_families=("player",),
-    verification_mode="format-renegotiation",
+    verification_mode="format-preference",
     scenario_revision=1,
-    requires_request_format=True,
 )
 
 
-CLIENT_INITIATED_REQUEST_FORMAT_FLAC = ScenarioSpec(
-    id="client-initiated-request-format-flac",
-    display_name="Client renegotiates PCM to FLAC via stream/request-format",
+CLIENT_INITIATED_STATE_FORMAT_FLAC = ScenarioSpec(
+    id="client-initiated-state-format-flac",
+    display_name="Client changes its preferred format from PCM to FLAC via client/state",
     description=(
         "Start the server first, then the client. The client connects, advertises PCM then "
-        "FLAC, and the server starts streaming the preferred PCM format. The client then "
-        "emits stream/request-format asking for FLAC, the server re-emits stream/start with "
-        "the FLAC format, and the matrix verifies the client observed the renegotiated FLAC "
-        "stream."
+        "FLAC, and the server starts streaming the higher-priority PCM format. The client "
+        "then sends a client/state whose player format prefers the FLAC entry. The matrix "
+        "verifies the server received that preference in client/state and the client "
+        "observed a new stream/start in the FLAC format."
     ),
     initiator_role="client",
-    preferred_codec="pcm",
+    preferred_codec="flac",
     required_role_families=("player",),
-    verification_mode="format-renegotiation",
+    verification_mode="format-preference",
     scenario_revision=1,
-    requires_request_format=True,
 )
 
 
@@ -258,8 +256,8 @@ SCENARIO_LIST: tuple[ScenarioSpec, ...] = (
     SERVER_INITIATED_FLAC,
     SERVER_INITIATED_OPUS,
     SERVER_INITIATED_PCM_24BIT,
-    CLIENT_INITIATED_REQUEST_FORMAT_PCM,
-    CLIENT_INITIATED_REQUEST_FORMAT_FLAC,
+    CLIENT_INITIATED_STATE_FORMAT_PCM,
+    CLIENT_INITIATED_STATE_FORMAT_FLAC,
     SERVER_INITIATED_LEGACY_UNENCRYPTED,
 )
 

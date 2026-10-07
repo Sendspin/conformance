@@ -93,11 +93,12 @@ def undeclared_format_violation(
 ) -> str | None:
     """Return why the case's negotiated formats break the client's declaration, or None.
 
-    Both `stream/start` and `stream/request-format` carry the same spec MUST:
-    the format has to be one the client listed in its `supported_formats`. The
-    reason names every undeclared format, the summary field that observed it,
-    and what the client actually offered — the three things a reader of the red
-    cell needs to tell a server defect from a client misreport.
+    Both `stream/start` and the `client/state` player `format` carry the same
+    spec MUST: the format has to be one the client listed in its
+    `supported_formats`. The reason names every undeclared format, the summary
+    field that observed it, and what the client actually offered — the three
+    things a reader of the red cell needs to tell a server defect from a client
+    misreport.
 
     Formats match on `AUDIO_FORMAT_FIELDS`, except that `bit_depth` is dropped
     for `opus`, which the spec says to ignore for that codec in both
@@ -192,7 +193,7 @@ def _negotiated_formats(
 ) -> list[dict[str, Any]]:
     """Return every audio format the case negotiated, tagged with its source.
 
-    The server records the format it emitted in `stream/start`. Renegotiation
+    The server records the format it emitted in `stream/start`. Format-preference
     scenarios emit two and only the client keeps both, so both sides are read
     and each observation names the summary field it came from.
     """

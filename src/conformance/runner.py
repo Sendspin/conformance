@@ -1065,7 +1065,16 @@ def _formats_equal(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return all(left.get(key) == right.get(key) for key in AUDIO_FORMAT_FIELDS)
 
 
-def _compare_renegotiation_summaries(
+# The format each format-preference scenario has the client prefer. Fields left
+# out are the client's to choose, since it lists rates and channels it can play.
+FORMAT_PREFERENCE_TARGETS: dict[str, dict[str, Any]] = {
+    "client-initiated-state-format-pcm": {"codec": "pcm", "bit_depth": 16},
+    "client-initiated-state-format-flac": {"codec": "flac"},
+}
+
+
+def _compare_format_preference_summaries(
+    scenario: ScenarioSpec,
     server_summary: dict[str, Any],
     client_summary: dict[str, Any],
 ) -> tuple[bool, str]:
@@ -1073,6 +1082,31 @@ def _compare_renegotiation_summaries(
         return False, f"Server summary status is {server_summary.get('status')!r}"
     if client_summary.get("status") != "ok":
         return False, f"Client summary status is {client_summary.get('status')!r}"
+
+    # The preference has to be observed on the server side of the wire. A client
+    # reporting that it asked for a format does not show which message carried it.
+    preference = server_summary.get("format_preference")
+    if not isinstance(preference, dict):
+        return (
+            False,
+            "Harness gap: the server adapter does not record the format preference "
+            "it receives in client/state",
+        )
+    received = preference.get("received")
+    if not isinstance(received, dict):
+        return (
+            False,
+            "Server received no player format preference in client/state "
+            "(roles/player/v1.md, client/state player object `format`)",
+        )
+    target = FORMAT_PREFERENCE_TARGETS[scenario.id]
+    if not _format_matches(received, target):
+        return (
+            False,
+            f"Server received client/state format {_format_label(received)}, but "
+            "this scenario has the client prefer "
+            + ", ".join(f"{field}={value}" for field, value in target.items()),
+        )
 
     renegotiation = client_summary.get("renegotiation")
     if not isinstance(renegotiation, dict):
@@ -1082,12 +1116,29 @@ def _compare_renegotiation_summaries(
     if not isinstance(requested, dict):
         return False, "Client did not record a requested format"
 
-    stream_start_count = int(renegotiation.get("stream_start_count") or 0)
-    final = renegotiation.get("final_format")
-    if stream_start_count < 2 or not isinstance(final, dict):
+    if not _format_matches(received, requested):
         return (
             False,
-            "Server did not re-emit stream/start after the request "
+            f"Server received client/state format {_format_label(received)} but the "
+            f"client reports preferring {_format_label(requested)}",
+        )
+
+    stream_start_count = int(renegotiation.get("stream_start_count") or 0)
+    final = renegotiation.get("final_format")
+    sent = server_summary.get("stream")
+    server_applied = isinstance(sent, dict) and _format_matches(sent, requested)
+    if stream_start_count < 2 or not isinstance(final, dict):
+        if server_applied:
+            return (
+                False,
+                f"Server sent a stream/start in the preferred {_format_label(requested)} "
+                "but the client did not observe the stream change format "
+                f"(stream_start_count={stream_start_count})",
+            )
+        return (
+            False,
+            "Server kept the stream format after the client/state preference changed, "
+            "where roles/player/v1.md says it SHOULD select the preferred format "
             f"(stream_start_count={stream_start_count})",
         )
 
@@ -1096,6 +1147,14 @@ def _compare_renegotiation_summaries(
             False,
             f"Renegotiated format {_format_label(final)} does not match "
             f"requested {_format_label(requested)}",
+        )
+
+    if not server_applied:
+        return (
+            False,
+            f"Client reports the stream changed to {_format_label(final)} but the "
+            "server's last stream/start was "
+            f"{_format_label(sent if isinstance(sent, dict) else None)}",
         )
 
     initial = renegotiation.get("initial_format")
@@ -1158,8 +1217,8 @@ def _dispatch_comparison(
         return _compare_controller_summaries(server_summary, client_summary)
     if scenario.verification_mode == "artwork":
         return _compare_artwork_summaries(server_summary, client_summary)
-    if scenario.verification_mode == "format-renegotiation":
-        return _compare_renegotiation_summaries(server_summary, client_summary)
+    if scenario.verification_mode == "format-preference":
+        return _compare_format_preference_summaries(scenario, server_summary, client_summary)
     raise ValueError(f"Unsupported verification mode: {scenario.verification_mode}")
 
 

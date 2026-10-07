@@ -96,3 +96,37 @@ The assertion identifiers and pinned specification revision are defined in
 scenario exercises `CORE-001` through `CORE-004` and `PLAYER-001`. Existing
 media-hash scenarios remain interoperability diagnostics during the migration; their
 pass status does not establish protocol conformance.
+
+## Format preference contract
+
+The `client-initiated-state-format-*` scenarios judge the `format` field of the
+`client/state` player object, so the evidence has to show which message carried the
+preference. Each adapter adds its own block to its summary. The server's:
+
+```json
+{
+  "format_preference": {
+    "received": {"codec": "pcm", "sample_rate": 8000, "channels": 1, "bit_depth": 16}
+  }
+}
+```
+
+The server records the last `format` it received in a `client/state` player object,
+or `null` when none arrived. A format requested through any other message must not be
+recorded here.
+
+The client's:
+
+```json
+{
+  "renegotiation": {
+    "requested": {"codec": "pcm", "sample_rate": 8000, "channels": 1, "bit_depth": 16},
+    "initial_format": {"codec": "pcm", "sample_rate": 8000, "channels": 1, "bit_depth": 24},
+    "final_format": {"codec": "pcm", "sample_rate": 8000, "channels": 1, "bit_depth": 16},
+    "stream_start_count": 2
+  }
+}
+```
+
+The client records the format it preferred, the format the stream started in, the
+format it changed to, and how many stream formats it was started in.

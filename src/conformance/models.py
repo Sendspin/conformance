@@ -17,7 +17,7 @@ VerificationMode = Literal[
     "metadata",
     "controller",
     "artwork",
-    "format-renegotiation",
+    "format-preference",
     "protocol",
 ]
 
@@ -40,7 +40,6 @@ class RoleSpec:
     supports_flac: bool = False
     supports_opus: bool = False
     supports_discovery: bool = False
-    supports_request_format: bool = False
     supports_legacy_unencrypted: bool = False
     supported_role_families: tuple[RoleFamily, ...] = ()
     reason: str | None = None
@@ -76,7 +75,6 @@ class RoleSpec:
             self.supports_initiator(scenario.initiator_role)
             and self.supports_codec(scenario.preferred_codec)
             and self.supports_role_families(scenario.required_role_families)
-            and (self.supports_request_format or not scenario.requires_request_format)
             and (self.supports_legacy_unencrypted or not scenario.requires_legacy_unencrypted)
         ):
             return None
@@ -102,12 +100,6 @@ class RoleSpec:
             return (
                 f"{implementation} {role} adapter does not support role family/families "
                 f"{missing_display} required by {scenario.id}."
-            )
-
-        if scenario.requires_request_format and not self.supports_request_format:
-            return (
-                f"{implementation} {role} adapter does not support the "
-                f"stream/request-format renegotiation required by {scenario.id}."
             )
 
         if scenario.requires_legacy_unencrypted and not self.supports_legacy_unencrypted:
@@ -150,7 +142,6 @@ class ScenarioSpec:
     # `scripts/detect_regressions.py` exempts a cell whose baseline carries a
     # different revision, so a deliberate tightening does not read as breakage.
     scenario_revision: int
-    requires_request_format: bool = False
     requires_legacy_unencrypted: bool = False
     extra_cli_args: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     protocol_assertions: tuple[str, ...] = field(default_factory=tuple)
