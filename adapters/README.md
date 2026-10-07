@@ -110,6 +110,11 @@ each as it went on the wire, in the same `{"type": ..., "payload": ...}` shape.
 - Record a `server/time` once it has been written, and not at all when the write failed.
   An adapter with no hook on the write records it once the implementation has accepted it
   for sending.
+- Add `{"type": "other-sent"}` where the server sent any other text message, placed where
+  that send began, so that every `client/time` listed before it had been received by then.
+  Record it only once the send has returned. One entry may stand for several sends with no
+  `client/time` or `server/time` between them. An adapter that cannot observe other sends
+  leaves these out.
 - Report an empty list when the client sent no `client/time`, and `null` when the adapter
   cannot observe these messages. Never reconstruct an entry from adapter arguments or
   SDK state.
@@ -121,13 +126,16 @@ carries one that is not an integer, when its `client_transmitted` is not the val
 is later than its `server_transmitted`. The spec does not state that last rule: it follows
 from both being readings of the server's monotonic clock, taken in that order.
 
-A `client/time` left unanswered fails the case when the server answered one it received
-later, or answered none at all. Otherwise it is not judged: the spec gives no bound on the
-response, and a connection can close with a `client/time` still unread. Both halves are
-inferences, each with a case it names wrongly: a server whose only `client/time` arrived
-as the connection closed, and a server that answers out of order and was cut off between
-two replies. A server that stops answering partway through a case is not caught, because
-every `client/time` it ignored trails its last `server/time`.
+A `client/time` left unanswered fails the case only when the record shows the server went
+on without answering it: it answered a `client/time` it received later, or an `other-sent`
+entry follows it. No interval is measured, because the spec gives no bound on the response.
+A `client/time` nothing was sent after is not judged, however many there are, since a
+connection can close with one still unread. So a server that answers none passes where its
+adapter records no `other-sent` entries, or where it sent no other text after the first.
+
+The record shows that the server kept sending, not that it had handled the message. A
+server that replies out of order, or that sends messages it had queued ahead of a reply,
+and never sent the reply, is named.
 
 A `client/time` whose `client_transmitted` is not an integer fails the case naming the
 client. A case in which no `client/time` was sent gives the verdict nothing to judge. A
@@ -144,7 +152,7 @@ Not judged, each for want of evidence or of a rule:
 The sendspin-go server adapter answers `client/time` in its own code, so its
 `time_exchange` records a reply the adapter wrote, not one the sendspin-go library sent.
 It records that reply as the value it handed to the library's send queue, which has no
-hook on the write.
+hook on the write, and records no `other-sent` entries.
 
 ## Metadata scenario summary fields
 

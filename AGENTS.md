@@ -148,7 +148,7 @@ Every recorded `group/update` is judged for its fields. The same spec sentence a
 
 `null` or a missing field fails the case as a harness gap: `stream_start_gate_violation` in `src/conformance/protocol.py` judges this field on every scenario that opens a player or artwork stream.
 
-`time_exchange` should contain each `client/time` the server received and each `server/time` it sent, in the order the adapter observed them, each as it went on the wire and in the same `{type, payload}` shape, as `adapters/README.md` specifies. It is an empty list when the client sent no `client/time`, `null` only when the adapter cannot observe the messages, and is never reconstructed from adapter arguments or SDK state.
+`time_exchange` should contain each `client/time` the server received and each `server/time` it sent, in the order the adapter observed them, each as it went on the wire and in the same `{type, payload}` shape, with an `other-sent` entry where the server began sending any other text message, as `adapters/README.md` specifies. It is an empty list when the client sent no `client/time`, `null` only when the adapter cannot observe the messages, and is never reconstructed from adapter arguments or SDK state.
 
 `time_exchange_violation` in `src/conformance/protocol.py` judges this field on every case. `null` or a missing field fails the case as a harness gap, and an empty list gives it nothing to judge. It does not judge the timestamp values, how late `server_transmitted` was stamped, or whether the client's time filter converged, and `adapters/README.md` gives the reason for each.
 

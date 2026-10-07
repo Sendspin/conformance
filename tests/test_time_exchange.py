@@ -54,6 +54,9 @@ def _server_time(client_transmitted: Any = 100, **overrides: Any) -> dict[str, A
     return {"type": "server/time", "payload": payload}
 
 
+OTHER_SENT = {"type": "other-sent"}
+
+
 def _without(name: str) -> dict[str, Any]:
     message = _server_time()
     del message["payload"][name]
@@ -89,6 +92,7 @@ class TimeExchangeViolationTest(unittest.TestCase):
                 _server_time(1),
                 _server_time(1),
             ],
+            "another message sent before the reply": [_client_time(), OTHER_SENT, _server_time()],
             "equal server timestamps": [
                 _client_time(),
                 _server_time(server_received=9, server_transmitted=9),
@@ -162,13 +166,26 @@ class TimeExchangeViolationTest(unittest.TestCase):
         self.assertIsNotNone(violation)
         self.assertIn("server_received 10 later than its server_transmitted 9", violation)
 
-    def test_a_server_that_answered_nothing_is_reported(self) -> None:
-        violation = _violation(_client_time(1), _client_time(2))
+    def test_a_client_time_the_server_sent_past_is_reported(self) -> None:
+        for label, exchange in {
+            "never answered": [_client_time(1), OTHER_SENT],
+            "second of two": [_client_time(1), _server_time(1), _client_time(2), OTHER_SENT],
+            "first of two": [_client_time(1), OTHER_SENT, _client_time(2)],
+        }.items():
+            with self.subTest(label):
+                violation = _violation(*exchange)
+
+                self.assertIsNotNone(violation)
+                self.assertIn("yet sent another message after receiving it", violation)
+
+    def test_the_client_time_named_is_the_one_sent_past(self) -> None:
+        violation = _violation(
+            _client_time(1), OTHER_SENT, _server_time(1), _client_time(2), OTHER_SENT
+        )
 
         self.assertIsNotNone(violation)
         self.assertTrue(
-            violation.startswith("Server received 2 client/time and sent no server/time"),
-            violation,
+            violation.startswith("Server sent no server/time for client/time 2 of 2"), violation
         )
 
     def test_a_client_time_skipped_for_a_later_one_is_reported(self) -> None:
@@ -181,6 +198,10 @@ class TimeExchangeViolationTest(unittest.TestCase):
 
     def test_client_times_still_unanswered_when_the_case_ended_are_not_judged(self) -> None:
         for label, exchange in {
+            "the only one": [_client_time(1)],
+            "every one": [_client_time(1), _client_time(2), _client_time(3)],
+            # Sent before the client/time was received, so no evidence about it.
+            "after another message": [OTHER_SENT, _client_time(1)],
             "last one": [_client_time(1), _server_time(1), _client_time(2)],
             "last two": [_client_time(1), _server_time(1), _client_time(2), _client_time(3)],
             # The reply to 1 was still being written when 2 arrived.
@@ -268,7 +289,9 @@ class CaseVerdictTest(unittest.TestCase):
                 self.assertTrue(reason.startswith(HARNESS_GAP), reason)
 
     def test_a_missing_group_update_is_reported_first(self) -> None:
-        matches, reason = self._verdict(group_updates=[], time_exchange=[_client_time()])
+        matches, reason = self._verdict(
+            group_updates=[], time_exchange=[_client_time(), OTHER_SENT]
+        )
 
         self.assertFalse(matches)
         self.assertIn("Server sent no group/update", reason)
@@ -278,7 +301,7 @@ class CaseVerdictTest(unittest.TestCase):
             "status": "ok",
             "group_updates": [GROUP_UPDATE],
             "availability_trace": AVAILABILITY_TRACE,
-            "time_exchange": [_client_time()],
+            "time_exchange": [_client_time(), OTHER_SENT],
         }
         with mock.patch("conformance.runner._dispatch_comparison", return_value=(True, "ok")):
             for scenario in SCENARIO_LIST:
@@ -367,6 +390,51 @@ class ControlMessageRecorderTests(unittest.IsolatedAsyncioTestCase):
         await transport.send_str(json.dumps(GROUP_UPDATE))
 
         self.assertEqual(self.recorder.time_exchange(_connection(socket)), [])
+
+    async def test_marks_where_another_message_was_sent(self) -> None:
+        socket = object()
+        transport = _transport(socket)
+        await transport.send_str(json.dumps(ACTIVATE))
+        await self._receive(transport, json.dumps(_client_time(1)))
+        await transport.send_str(json.dumps(GROUP_UPDATE))
+        await transport.send_str(json.dumps({"type": "server/state", "payload": {}}))
+        await transport.send_str(json.dumps(_server_time(1)))
+        await transport.send_str(json.dumps({"type": "stream/start", "payload": {"player": {}}}))
+
+        self.assertEqual(
+            self.recorder.time_exchange(_connection(socket)),
+            [_client_time(1), OTHER_SENT, _server_time(1), OTHER_SENT],
+        )
+
+    async def test_a_client_time_read_during_a_send_is_placed_after_it(self) -> None:
+        socket = object()
+        transport = _transport(socket)
+        await self._receive(transport, json.dumps(_client_time(1)))
+
+        async def send_while_reading(_transport: EncryptedWebSocket, _data: str) -> None:
+            await self._receive(transport, json.dumps(_client_time(2)))
+
+        with mock.patch.object(self.recorder, "_original_send_str", send_while_reading):
+            await transport.send_str(json.dumps(GROUP_UPDATE))
+
+        self.assertEqual(
+            self.recorder.time_exchange(_connection(socket)),
+            [_client_time(1), OTHER_SENT, _client_time(2)],
+        )
+
+    async def test_another_message_that_failed_to_send_is_not_marked(self) -> None:
+        async def failing_send_str(_transport: EncryptedWebSocket, _data: str) -> None:
+            raise ConnectionResetError
+
+        socket = object()
+        transport = _transport(socket)
+        await self._receive(transport, json.dumps(_client_time()))
+        with mock.patch.object(self.recorder, "_original_send_str", failing_send_str):
+            for message in (GROUP_UPDATE, {"type": "stream/start", "payload": {}}):
+                with self.assertRaises(ConnectionResetError):
+                    await transport.send_str(json.dumps(message))
+
+        self.assertEqual(self.recorder.time_exchange(_connection(socket)), [_client_time()])
 
     async def test_a_connection_no_text_was_observed_on_reports_no_exchange(self) -> None:
         socket = object()

@@ -358,7 +358,8 @@ def time_exchange_violation(server_summary: dict[str, Any]) -> str | None:
     Return how the `client/time` to `server/time` exchange breaks RC1, or None.
 
     Judged from `time_exchange`, the server adapter's ordered record of each
-    `client/time` it received and each `server/time` it sent. Clock sync is
+    `client/time` it received and each `server/time` it sent, with an
+    `other-sent` entry where the server began sending anything else. Clock sync is
     core messaging on every connection, so this is judged on every case. Four
     things are asserted of the server: that each `server/time` carries
     `client_transmitted`, `server_received` and `server_transmitted` as
@@ -373,12 +374,14 @@ def time_exchange_violation(server_summary: dict[str, Any]) -> str | None:
 
     RC1 gives no bound on how soon the response follows, and a connection can
     close with a `client/time` still unread. So one left unanswered is a
-    violation only when the server answered a `client/time` it received later,
-    or answered none at all. Both halves are inferences. The first also names
-    a server that answers out of order and was cut off between two replies,
-    and the second a server that received its only `client/time` as the
-    connection closed. A server that stops answering partway through is not
-    caught: every `client/time` it ignored trails its last `server/time`.
+    violation only when the record shows the server went on without answering
+    it: it answered a `client/time` it received later, or began sending some
+    other message after receiving it. No interval is measured. A `client/time`
+    nothing was sent after is not judged, however many there are, so a server
+    whose adapter records no `other-sent` entries and that answers none passes.
+    What the record shows is that the server kept sending, not that it had
+    handled the message: one that replies out of order, or sends queued
+    messages ahead of a reply, and never sent the reply is named.
 
     The values themselves are not judged, because RC1 says the timestamps are
     not necessarily epoch-based. Nor is whether `server_transmitted` was
@@ -406,12 +409,17 @@ def time_exchange_violation(server_summary: dict[str, Any]) -> str | None:
     received = 0
     answered = 0
     latest_answered = 0
+    # Each client/time the server began sending something else after receiving.
+    passed_over: set[int] = set()
     for entry in exchange:
         kind = entry.get("type") if isinstance(entry, dict) else None
+        if kind == "other-sent":
+            passed_over.update(position for position, _ in unanswered)
+            continue
         if kind not in ("client/time", "server/time"):
             return (
                 f"{HARNESS_GAP}the server adapter recorded something other than a "
-                f"client/time or server/time in the exchange: {json.dumps(entry)}"
+                f"client/time, server/time or other-sent in the exchange: {json.dumps(entry)}"
             )
         payload = entry.get("payload")
         if kind == "client/time":
@@ -447,17 +455,16 @@ def time_exchange_violation(server_summary: dict[str, Any]) -> str | None:
                 "monotonic clock, and it receives the client/time before it responds"
             )
 
-    if received and not answered:
+    for position, _ in unanswered:
+        if position < latest_answered:
+            went_on = "answered one it received later"
+        elif position in passed_over:
+            went_on = "sent another message after receiving it"
+        else:
+            continue
         return (
-            f"Server received {received} client/time and sent no server/time; RC1 has the "
-            "server respond to each with a server/time"
-        )
-    skipped = [position for position, _ in unanswered if position < latest_answered]
-    if skipped:
-        return (
-            f"Server sent no server/time for client/time {skipped[0]} of {received}, yet "
-            "answered one it received later; RC1 has the server respond to each with a "
-            "server/time"
+            f"Server sent no server/time for client/time {position} of {received}, yet "
+            f"{went_on}; RC1 has the server respond to each with a server/time"
         )
     return None
 
