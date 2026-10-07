@@ -126,6 +126,10 @@ carries one that is not an integer, when its `client_transmitted` is not the val
 is later than its `server_transmitted`. The spec does not state that last rule: it follows
 from both being readings of the server's monotonic clock, taken in that order.
 
+The spec says "Once received, the server responds with a `server/time`", and attaches no
+MUST or SHOULD to it. A case still fails on a `client/time` left unanswered, and its reason
+says the spec states the response without marking it mandatory.
+
 A `client/time` left unanswered fails the case only when the record shows the server went
 on without answering it: it answered a `client/time` it received later, or an `other-sent`
 entry follows it. No interval is measured, because the spec gives no bound on the response.

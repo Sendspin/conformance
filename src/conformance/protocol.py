@@ -372,6 +372,10 @@ def time_exchange_violation(server_summary: dict[str, Any]) -> str | None:
     being readings of the server's one monotonic clock, taken at two events
     that happen in that order.
 
+    RC1 states the last as what the server does ("Once received, the server
+    responds with a `server/time`") and attaches no MUST or SHOULD to it. A
+    case still fails on it, and the reason says which kind of statement it is.
+
     RC1 gives no bound on how soon the response follows, and a connection can
     close with a `client/time` still unread. So one left unanswered is a
     violation only when the record shows the server went on without answering
@@ -464,7 +468,8 @@ def time_exchange_violation(server_summary: dict[str, Any]) -> str | None:
             continue
         return (
             f"Server sent no server/time for client/time {position} of {received}, yet "
-            f"{went_on}; RC1 has the server respond to each with a server/time"
+            f"{went_on}; RC1 says the server responds to a client/time with a "
+            "server/time, without marking that as a MUST or a SHOULD"
         )
     return None
 

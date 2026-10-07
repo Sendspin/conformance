@@ -177,6 +177,7 @@ class TimeExchangeViolationTest(unittest.TestCase):
 
                 self.assertIsNotNone(violation)
                 self.assertIn("yet sent another message after receiving it", violation)
+                self.assertIn("without marking that as a MUST or a SHOULD", violation)
 
     def test_the_client_time_named_is_the_one_sent_past(self) -> None:
         violation = _violation(
@@ -195,6 +196,7 @@ class TimeExchangeViolationTest(unittest.TestCase):
         self.assertTrue(
             violation.startswith("Server sent no server/time for client/time 1 of 2"), violation
         )
+        self.assertIn("without marking that as a MUST or a SHOULD", violation)
 
     def test_client_times_still_unanswered_when_the_case_ended_are_not_judged(self) -> None:
         for label, exchange in {
