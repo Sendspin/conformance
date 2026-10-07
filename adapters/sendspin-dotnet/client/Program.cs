@@ -151,6 +151,12 @@ async Task RunListenerClientAsync()
         connectedServer = new ConnectionSnapshot(server.ServerId, server.ServerName, "playback");
     };
     host.ServerDisconnected += (_, _) => disconnectTcs.TrySetResult(true);
+    host.StreamStartReceived += (_, payload) => CaptureStreamStart(payload);
+
+    // No ServerHelloReceived handler, so peer_hello stays null on this path: the SDK exposes
+    // no raw server/hello frame, and its ServerHelloPayload carries server_id, version and
+    // active_roles values that were not in that frame.
+
     host.GroupStateChanged += (_, group) =>
     {
         HandleGroupState(group, () => host.SendCommandAsync(options.ControllerCommand));
