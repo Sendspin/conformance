@@ -43,11 +43,11 @@ SERVER_INITIATED_PROTOCOL_BASELINE = ScenarioSpec(
     id="server-initiated-protocol-baseline-v1",
     display_name="Server initiates a protocol baseline session",
     description=(
-        "Start the server first, then the client. The client advertises a listener and a "
-        "PCM player capability, the server connects in, and both adapters record "
-        "spec-revision-pinned evidence for the handshake, role activation, initial state, "
-        "stream negotiation, and timestamped player chunks. Media decoding and rendered "
-        "audio are explicitly outside this test."
+        "Start the server first, then the client. The client advertises a listener and "
+        "PCM player support. The server connects, and both adapters record the handshake, "
+        "role activation, initial state, stream negotiation, and timestamped player chunks "
+        "for checks against the pinned spec revision. This test does not check audio "
+        "decoding or playback."
     ),
     initiator_role="server",
     preferred_codec="pcm",
@@ -232,12 +232,11 @@ SERVER_INITIATED_LEGACY_UNENCRYPTED = ScenarioSpec(
     id="server-initiated-legacy-unencrypted",
     display_name="Server initiates connection over the legacy unencrypted transition mode",
     description=(
-        "Start the server first, then the client. The server opts into aiosendspin's "
-        "non-spec unencrypted transition mode (allow_unencrypted) rather than the real "
-        "encrypted Noise handshake, to keep tracking the plaintext legacy path used by "
-        "implementations that have not yet adopted the spec's mandatory encryption. This "
-        "scenario is expected to be dropped once every tracked implementation supports the "
-        "real handshake."
+        "Start the server first, then the client. The server uses aiosendspin's "
+        "allow_unencrypted mode to test clients that do not yet support the required "
+        "Noise handshake. This mode is outside the spec and sends traffic without "
+        "encryption. The test can be removed once all tracked implementations support "
+        "the Noise handshake."
     ),
     initiator_role="server",
     preferred_codec="pcm",

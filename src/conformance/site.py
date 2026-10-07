@@ -976,12 +976,9 @@ def _repository_versions_section(
     return (
         "<section class='surface p-5 sm:p-6'>"
         "<div class='max-w-3xl'>"
-        "<p class='eyebrow'>Repository versions</p>"
-        "<h2 class='mt-2 text-2xl sm:text-3xl'>Checked-out revisions</h2>"
+        "<h2 class='text-2xl sm:text-3xl'>Repository versions</h2>"
         "<p class='mt-3 text-sm leading-6 subtle-copy sm:text-base'>"
-        "These are the exact checked-out commits used for this report. Each row links to the selected "
-        "GitHub commit, shows the latest change included in that checkout, and notes how far the checkout "
-        "sits ahead of the latest tagged release."
+        "Commits tested in this run, with changes since the latest tagged release."
         "</p>"
         "</div>"
         "<div class='mt-5 divide-y' style='border-color: rgb(var(--retro-line) / 0.28)'>"
@@ -1075,22 +1072,21 @@ def _summary_cards(
     total_label: str,
     total_value: int,
 ) -> str:
-    items = [("Total", total_value, total_label), ("Passed", counts.get("passed", 0), "passing")]
+    items = [(total_label, total_value), ("Passed", counts.get("passed", 0))]
     if counts.get("unsupported", 0):
-        items.append(("Unsupported", counts["unsupported"], "not supported"))
+        items.append(("Unsupported", counts["unsupported"]))
     if counts.get("failed", 0) or not counts.get("unsupported", 0):
-        items.append(("Failed", counts.get("failed", 0), "failing"))
+        items.append(("Failed", counts.get("failed", 0)))
     if counts.get("skipped", 0):
-        items.append(("Skipped", counts["skipped"], "skipped"))
+        items.append(("Skipped", counts["skipped"]))
     cards = "".join(
         (
             "<div class='detail-card'>"
             f"<p class='eyebrow'>{_escape(label)}</p>"
             f"<p class='mt-2 text-2xl font-semibold'>{_escape(value)}</p>"
-            f"<p class='mt-1 text-sm muted-copy'>{_escape(subtitle)}</p>"
             "</div>"
         )
-        for label, value, subtitle in items
+        for label, value in items
     )
     return f"<div class='grid gap-3 sm:grid-cols-2 xl:grid-cols-5'>{cards}</div>"
 
@@ -1146,12 +1142,13 @@ def _page_header(
         else ""
     )
     meta_markup = f"<div class='mt-5'>{meta}</div>" if meta else ""
+    kicker_markup = f"<p class='eyebrow'>{_escape(kicker)}</p>" if kicker else ""
     return (
         f"<section class='page-header page-header-{html.escape(accent, quote=True)}'>"
         f"{breadcrumb}"
         "<div class='mt-4 flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between'>"
         "<div class='min-w-0 max-w-4xl'>"
-        f"<p class='eyebrow'>{_escape(kicker)}</p>"
+        f"{kicker_markup}"
         f"<h1 class='mt-2 text-3xl leading-tight sm:text-4xl'>{_escape(title)}</h1>"
         f"<p class='mt-3 max-w-3xl text-sm leading-6 subtle-copy sm:text-base'>{_escape(description)}</p>"
         f"{meta_markup}"
@@ -1286,22 +1283,23 @@ def _render_matrix(
         for client_impl in client_implementations
     )
 
-    return (
-        "<section class='list-shell overflow-hidden'>"
+    caption_markup = (
         "<div class='border-b px-4 py-4' "
         "style='border-color: rgb(var(--retro-line) / 0.42)'>"
-        "<div>"
-        "<p class='eyebrow'>Matrix</p>"
-        f"<p class='mt-1 text-sm subtle-copy'>{html.escape(caption)}</p>"
+        f"<p class='text-sm subtle-copy'>{html.escape(caption)}</p>"
         "</div>"
-        "</div>"
+        if caption
+        else ""
+    )
+    return (
+        "<section class='list-shell overflow-hidden'>"
+        f"{caption_markup}"
         "<div class='overflow-x-auto'>"
         "<table class='min-w-[980px] w-full border-separate border-spacing-0 text-sm'>"
         "<thead>"
         "<tr>"
         "<th scope='col' class='sticky left-0 z-20 min-w-[190px] border-b px-4 py-4 text-left' "
         "style='border-color: rgb(var(--retro-line) / 0.36); background-color: rgb(var(--retro-shell))'>"
-        "<p class='eyebrow'>Axis</p>"
         "<p class='mt-1 text-sm font-semibold text-retro-bark'>Server \\ Client</p>"
         "</th>"
         f"{headers}"
@@ -1505,21 +1503,18 @@ def _render_index_page(results: list[dict[str, Any]], *, data_dir: Path) -> str:
     overview_header = _page_header(
         accent="overview",
         breadcrumb=_breadcrumb([("Overview", None)]),
-        kicker="Overview",
-        title="Sendspin conformance overview",
+        kicker="",
+        title="Sendspin conformance",
         description=(
-            "Sendspin is a local-network protocol for discovering peers and exchanging synchronized "
-            "audio plus companion data such as metadata, artwork, and controller messages between "
-            "servers and clients. This report tests how different Sendspin implementations interoperate "
-            "with one another, with each matrix showing which server "
-            "and client pairings pass the current conformance scenarios."
+            "Compatibility test results for Sendspin servers and clients. "
+            "Select a result to view logs and test details."
         ),
         actions=(
             f"{_spec_revision_chip(repositories)}"
             f"{_external_chip('Conformance source', GITHUB_REPO_URL)}"
             f"{_external_chip('Sendspin-audio.com', SENDSPIN_AUDIO_URL)}"
         ),
-        meta=_summary_cards(counts=counts, total_label="all scenarios", total_value=len(results)),
+        meta=_summary_cards(counts=counts, total_label="Total cases", total_value=len(results)),
     )
     sections: list[str] = []
     for scenario_id, scenario_results in scenario_groups:
@@ -1539,7 +1534,7 @@ def _render_index_page(results: list[dict[str, Any]], *, data_dir: Path) -> str:
             "</div>"
             "</div>"
             "<div class='mt-5 space-y-4'>"
-            f"{_render_matrix(scenario_results, caption='Select a server and client pairing to inspect.', href_builder=_case_href)}"
+            f"{_render_matrix(scenario_results, caption='', href_builder=_case_href)}"
             "</div>"
             "</section>"
         )
@@ -1814,7 +1809,7 @@ def _render_implementation_page(
         "<div class='app-shell'>"
         "<div class='mx-auto max-w-[1540px] px-4 py-4 sm:px-6 lg:px-8 lg:py-6'>"
         "<main class='space-y-6'>"
-        f"{_page_header(accent='overview', breadcrumb=_breadcrumb([('Overview', '../index.html'), (label, None)]), kicker='Implementation', title=f'{label} filtered overview', description=f'This view narrows the conformance overview to cases where {label} participates as either the server or the client.', actions=actions, meta=_summary_cards(counts=counts, total_label='matching cases', total_value=len(filtered_results)))}"
+        f"{_page_header(accent='overview', breadcrumb=_breadcrumb([('Overview', '../index.html'), (label, None)]), kicker='Implementation', title=label, description=f'Test results for {label} as server or client.', actions=actions, meta=_summary_cards(counts=counts, total_label='Total cases', total_value=len(filtered_results)))}"
         f"{declared_formats_html}"
         f"{impl_sections_html}"
         "</main>"
@@ -1866,7 +1861,7 @@ def _render_scenario_page(
     )
     header_meta = _summary_cards(
         counts=counts,
-        total_label="pairings in this test",
+        total_label="Total pairings",
         total_value=len(results),
     )
     scenario_actions = _external_chip("View test source", _scenario_source_url(scenario_id))
@@ -2101,7 +2096,7 @@ def _render_case_page(
         "<div class='mx-auto max-w-[1320px] px-4 py-4 sm:px-6 lg:px-8 lg:py-6'>"
         "<div class='grid gap-6 xl:grid-cols-[300px_minmax(0,1fr)]'>"
         "<aside class='sidebar-rail sidebar-rail-xl'>"
-        f"{_sidebar_nav(('Back to test', '../' + _scenario_href(scenario_id), 'Return to the pairing list for this test.'), ('Back to overview', '../index.html', 'Return to the matrix-first overview.'))}"
+        f"{_sidebar_nav(('Back to test', '../' + _scenario_href(scenario_id), 'All pairings for this test.'), ('Back to overview', '../index.html', 'All test results.'))}"
         "<section class='surface p-5'>"
         "<p class='eyebrow'>Run facts</p>"
         "<div class='keyval mt-4'>"
