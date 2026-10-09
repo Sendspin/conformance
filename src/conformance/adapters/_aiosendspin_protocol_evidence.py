@@ -40,7 +40,8 @@ Evidence fidelity by assertion:
   the same wrapper, which is what orders them.
 - ``client/state`` received and ``stream/start`` sent, in order: full fidelity
   on an encrypted connection, from the same recorder, which also wraps
-  ``EncryptedWebSocket.receive``. The SDK applies a ``client/state`` and sends
+  ``EncryptedWebSocket.receive`` and ``receive_timed``, whichever the SDK
+  reads with. The SDK applies a ``client/state`` and sends
   a ``stream/start`` from its own loops, and its parser rewrites a legacy
   ``state`` into ``available``, so only the transport shows what arrived and
   when. An unencrypted legacy connection bypasses that transport and is not
