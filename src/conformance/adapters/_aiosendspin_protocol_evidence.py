@@ -187,8 +187,7 @@ class ControlMessageRecorder:
             trace.append({**entry, "phase": "sent"})
             self._record_other_sent(socket, began_at)
 
-        async def receive(transport: Any) -> Any:
-            received = await self._original_receive(transport)
+        def observe(transport: Any, received: Any) -> Any:
             if received.type is not WSMsgType.TEXT:
                 return received
             # Marks the socket as one whose incoming text is observed, so that
@@ -214,8 +213,21 @@ class ControlMessageRecorder:
                 time_exchange.append(message)
             return received
 
+        async def receive(transport: Any) -> Any:
+            return observe(transport, await self._original_receive(transport))
+
+        # The SDK reads an encrypted connection through receive_timed(), which
+        # does not go through receive(); both are observed.
+        self._original_receive_timed = getattr(EncryptedWebSocket, "receive_timed", None)
+
+        async def receive_timed(transport: Any, clock: Any) -> Any:
+            received, received_at = await self._original_receive_timed(transport, clock)
+            return observe(transport, received), received_at
+
         EncryptedWebSocket.send_str = send_str  # type: ignore[method-assign]
         EncryptedWebSocket.receive = receive  # type: ignore[method-assign]
+        if self._original_receive_timed is not None:
+            EncryptedWebSocket.receive_timed = receive_timed  # type: ignore[method-assign]
 
     def initial_activation(self, connection: Any) -> dict[str, Any] | None:
         """
@@ -298,6 +310,8 @@ class ControlMessageRecorder:
         """Restore the SDK transport's own ``send_str`` and ``receive``."""
         self._transport_class.send_str = self._original_send_str  # type: ignore[method-assign]
         self._transport_class.receive = self._original_receive  # type: ignore[method-assign]
+        if self._original_receive_timed is not None:
+            self._transport_class.receive_timed = self._original_receive_timed  # type: ignore[method-assign]
 
     def _record_other_sent(self, socket: Any, began_at: int) -> None:
         # Nothing precedes position 0 for the entry to follow, and one entry
@@ -475,13 +489,23 @@ class ReceivedBinaryFrameRecorder:
         self._original_receive = EncryptedWebSocket.receive
         self._frames: list[dict[str, Any]] = []
 
-        async def receive(transport: Any) -> Any:
-            message = await self._original_receive(transport)
+        def observe(message: Any) -> Any:
             if message.type is WSMsgType.BINARY:
                 self._frames.append(binary_frame_record(message.data))
             return message
 
+        async def receive(transport: Any) -> Any:
+            return observe(await self._original_receive(transport))
+
+        self._original_receive_timed = getattr(EncryptedWebSocket, "receive_timed", None)
+
+        async def receive_timed(transport: Any, clock: Any) -> Any:
+            message, received_at = await self._original_receive_timed(transport, clock)
+            return observe(message), received_at
+
         EncryptedWebSocket.receive = receive  # type: ignore[method-assign]
+        if self._original_receive_timed is not None:
+            EncryptedWebSocket.receive_timed = receive_timed  # type: ignore[method-assign]
 
     def frames(self) -> list[dict[str, Any]]:
         """Return one ``{"byte_count": ..., "leading_hex": ...}`` record per frame received."""
@@ -490,6 +514,8 @@ class ReceivedBinaryFrameRecorder:
     def uninstall(self) -> None:
         """Restore the SDK transport's own ``receive``."""
         self._transport_class.receive = self._original_receive  # type: ignore[method-assign]
+        if self._original_receive_timed is not None:
+            self._transport_class.receive_timed = self._original_receive_timed  # type: ignore[method-assign]
 
 
 def record_handshake_evidence_server(
