@@ -33,7 +33,7 @@ Every implementation is modeled as exactly two CLIs:
 - `server`
 - `client`
 
-An implementation whose role is not `supported` at all gets no cases in that role: the runner skips it before case creation and the report draws no row (server) or column (client) for it, so a server-only or client-only implementation adds no dead cells to the matrix. Both the runner and the site take that list from `implementations_with_role()`.
+An implementation whose role is not `supported` at all gets no cases in that role: the runner skips it before case creation and the report draws no row (server) or column (client) for it, so a server-only or client-only implementation adds no dead cells to the matrix. Both the runner and the site take the client list from `implementations_with_role()` and the server list from `implementations_for_scenario()`.
 
 The filters differ per side. Server rows are also dropped per scenario, wherever `RoleSpec.unsupported_reason()` returns a reason. Client columns are not: a client that implements the role but cannot run one scenario still gets a case, which fails fast through the placeholder adapter and reads as "Unsupported" in that column.
 
