@@ -233,6 +233,7 @@ remote, so any such list goes stale on the next merge.
 - `adapters/SendspinKit/client/`: real Swift client adapter source with an adapter-owned inbound WebSocket listener for server-initiated scenarios
 - `adapters/sendspin-rs/client/`: real Rust client adapter source
 - `adapters/sendspin-js/client.mjs`: real Node.js client adapter source that drives the public `SendspinCore` SDK over an adapter-owned WebSocket
+- `adapters/sendspin-cpp/client/`: real C++ client adapter source, built against `repos/sendspin-cpp` with CMake, whose audio and protocol evidence comes from the library's message trace
 - `adapters/sendspin-server-cpp/server/`: real C++ server adapter source, built against `repos/sendspin-server-cpp` with CMake, whose evidence comes from the library's message trace
 - `src/conformance/adapters/placeholder.py`: generic fail-fast adapter
 
