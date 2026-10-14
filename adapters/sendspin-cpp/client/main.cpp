@@ -34,6 +34,16 @@ static const char* const AUDIO_NOT_OBSERVABLE_REASON =
 static const char* const CHUNK_FRAMES_NOT_OBSERVABLE_REASON =
     "sendspin-cpp exposes no public hook for transported audio chunks, so the adapter cannot "
     "report the raw frames it received";
+// The library writes the protocol messages and consumes the audio chunks itself, with no
+// public trace of either, so none of the baseline's assertions can be observed.
+static const char* const PROTOCOL_EVIDENCE_NOT_OBSERVABLE_REASON =
+    "sendspin-cpp exposes no public hook for the protocol messages it exchanges or the audio "
+    "chunks it receives, so the adapter cannot record protocol evidence";
+// PlayerRole builds its client/state player object internally and offers no setter for the
+// `format` field.
+static const char* const FORMAT_PREFERENCE_NOT_SUPPORTED_REASON =
+    "sendspin-cpp exposes no public way to set the client/state player format, so the adapter "
+    "cannot send the format preference this scenario asks for";
 
 struct Args {
     std::string client_name;
@@ -152,11 +162,20 @@ static bool is_chunk_framing_scenario(const std::string& id) {
     return id == "server-initiated-audio-chunk-framing";
 }
 
+static bool is_protocol_baseline_scenario(const std::string& id) {
+    return id == "server-initiated-protocol-baseline-v1";
+}
+
+static bool is_state_format_scenario(const std::string& id) {
+    return id == "client-initiated-state-format-pcm" || id == "client-initiated-state-format-flac";
+}
+
 static bool is_player_scenario(const std::string& id) {
     return id == "client-initiated-pcm" || id == "server-initiated-pcm" ||
            id == "server-initiated-flac" || id == "server-initiated-opus" ||
            id == "server-initiated-pcm-24bit" || id == "server-initiated-legacy-unencrypted" ||
-           is_chunk_framing_scenario(id);
+           is_chunk_framing_scenario(id) || is_protocol_baseline_scenario(id) ||
+           is_state_format_scenario(id);
 }
 
 static bool is_metadata_scenario(const std::string& id) {
@@ -516,7 +535,17 @@ static PlayerRoleConfig build_player_config(const Args& args) {
             bit_depth,
         };
         config.audio_formats = {format};
-        if (codec == SendspinCodecFormat::OPUS) {
+        if (args.scenario_id == "client-initiated-state-format-pcm") {
+            // The server starts in the first entry; the scenario's preference targets the
+            // second.
+            config.audio_formats = {{SendspinCodecFormat::PCM, 1, 8000, 24},
+                                    {SendspinCodecFormat::PCM, 1, 8000, 16}};
+        } else if (args.scenario_id == "client-initiated-state-format-flac") {
+            // The server starts in the first entry; the scenario's preference targets the
+            // second.
+            config.audio_formats = {{SendspinCodecFormat::PCM, 1, 8000, 16},
+                                    {SendspinCodecFormat::FLAC, 1, 8000, 16}};
+        } else if (codec == SendspinCodecFormat::OPUS) {
             // Every player has to list flac or pcm; opus stays first so the server's
             // priority choice is what the case exercises.
             config.audio_formats.push_back(
@@ -598,6 +627,21 @@ static JsonDocument build_summary(const Args& args, const SessionState& state,
         add_optional_string(stream, "codec_header", state.stream->codec_header);
     } else {
         doc["stream"] = nullptr;
+    }
+
+    if (is_protocol_baseline_scenario(args.scenario_id)) {
+        // adapters/README.md "Protocol evidence contract": an assertion that cannot be observed
+        // is reported failed, naming the missing hook. The revision is the one
+        // conformance.protocol.SPEC_REVISION names.
+        auto protocol = doc["protocol"].to<JsonObject>();
+        protocol["spec_revision"] = "8c9577ea8719ad082d051ec13cc73ef15ed68948";
+        auto assertions = protocol["assertions"].to<JsonObject>();
+        for (const char* id : {"CORE-001", "CORE-002", "CORE-003", "CORE-004", "PLAYER-001"}) {
+            auto assertion = assertions[id].to<JsonObject>();
+            assertion["status"] = "failed";
+            assertion["detail"] = PROTOCOL_EVIDENCE_NOT_OBSERVABLE_REASON;
+            assertion["events"].to<JsonArray>();
+        }
     }
 
     if (is_player_scenario(args.scenario_id)) {
@@ -793,6 +837,12 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
         for (int i = 0; i < 10; i++) {
             client.loop();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (is_protocol_baseline_scenario(args.scenario_id)) {
+            return emit_summary(args, state, "error", PROTOCOL_EVIDENCE_NOT_OBSERVABLE_REASON);
+        }
+        if (is_state_format_scenario(args.scenario_id)) {
+            return emit_summary(args, state, "error", FORMAT_PREFERENCE_NOT_SUPPORTED_REASON);
         }
         if (is_chunk_framing_scenario(args.scenario_id)) {
             return emit_summary(args, state, "error", CHUNK_FRAMES_NOT_OBSERVABLE_REASON);

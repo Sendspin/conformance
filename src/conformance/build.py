@@ -309,44 +309,57 @@ def _gradle_build_result() -> BuildResult:
     )
 
 
-def _cmake_build_result() -> BuildResult:
+def _cmake_build_result(
+    *,
+    adapter: str,
+    adapter_dir: str,
+    repo_dirname: str,
+) -> BuildResult:
     cmake = find_cmake()
     if cmake is None:
         return {
-            "adapter": "sendspin-cpp-client",
+            "adapter": adapter,
             "status": "failed",
             "detail": "cmake executable is not available",
         }
 
     try:
-        ensure_repo_checkout("sendspin-cpp")
+        ensure_repo_checkout(repo_dirname)
     except FileNotFoundError as err:
         return {
-            "adapter": "sendspin-cpp-client",
+            "adapter": adapter,
             "status": "failed",
             "detail": str(err),
         }
 
-    adapter_root = repo_root() / "adapters" / "sendspin-cpp" / "client"
+    adapter_root = repo_root() / adapter_dir
     build_dir = adapter_root / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
     suffix = ".exe" if os.name == "nt" else ""
-    binary_path = build_dir / f"conformance-sendspin-cpp-client{suffix}"
+    binary_path = build_dir / f"conformance-{adapter}{suffix}"
 
     configure = _run_command(
         [cmake, "-S", str(adapter_root), "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Release"],
     )
     if configure.returncode != 0:
-        return _built_result(adapter="sendspin-cpp-client", completed=configure)
+        return _built_result(adapter=adapter, completed=configure)
 
     completed = _run_command(
-        [cmake, "--build", str(build_dir), "--config", "Release"],
+        [
+            cmake,
+            "--build",
+            str(build_dir),
+            "--config",
+            "Release",
+            "--parallel",
+            str(os.cpu_count() or 1),
+        ],
     )
     runtime_command_prefix = None
     if completed.returncode == 0 and binary_path.exists():
         runtime_command_prefix = [str(binary_path)]
     return _built_result(
-        adapter="sendspin-cpp-client",
+        adapter=adapter,
         completed=completed,
         runtime_command_prefix=runtime_command_prefix,
     )
@@ -406,7 +419,22 @@ def _build_plan() -> BuildPlan:
         ("sendspin-dotnet-client", _dotnet_build_result),
         ("sendspin-rs-client", _cargo_build_result),
         ("SendspinKit-client", _swift_build_result),
-        ("sendspin-cpp-client", _cmake_build_result),
+        (
+            "sendspin-cpp-client",
+            lambda: _cmake_build_result(
+                adapter="sendspin-cpp-client",
+                adapter_dir="adapters/sendspin-cpp/client",
+                repo_dirname="sendspin-cpp",
+            ),
+        ),
+        (
+            "sendspin-server-cpp-server",
+            lambda: _cmake_build_result(
+                adapter="sendspin-server-cpp-server",
+                adapter_dir="adapters/sendspin-server-cpp/server",
+                repo_dirname="sendspin-server-cpp",
+            ),
+        ),
         (
             "sendspin-go-client",
             lambda: _go_build_result(

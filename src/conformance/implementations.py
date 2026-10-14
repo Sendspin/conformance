@@ -185,7 +185,34 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supported=False,
             adapter_kind="placeholder",
             entrypoint="conformance.adapters.placeholder",
-            reason="sendspin-cpp is currently a client library in this workspace.",
+            reason=(
+                "sendspin-cpp is a client library; its server counterpart is "
+                "sendspin-server-cpp."
+            ),
+        ),
+    ),
+    "sendspin-server-cpp": ImplementationSpec(
+        name="sendspin-server-cpp",
+        display_name="sendspin-server-cpp",
+        repo_dirname="sendspin-server-cpp",
+        remote_url="https://github.com/Sendspin/sendspin-server-cpp.git",
+        client=RoleSpec(
+            supported=False,
+            adapter_kind="placeholder",
+            entrypoint="conformance.adapters.placeholder",
+            reason=(
+                "sendspin-server-cpp is a server library; its client counterpart is "
+                "sendspin-cpp."
+            ),
+        ),
+        server=RoleSpec(
+            supported=True,
+            adapter_kind="cmake",
+            build_adapter="sendspin-server-cpp-server",
+            entrypoint="adapters/sendspin-server-cpp/server",
+            supports_server_initiated=True,
+            supports_client_initiated=True,
+            supported_role_families=("player",),
         ),
     ),
     "sendspin-go": ImplementationSpec(
