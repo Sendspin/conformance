@@ -26,6 +26,7 @@ dependencies = [
 
 [project.scripts]
 conformance = "conformance.cli:main"
+sendspin-validate = "conformance.validator.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
