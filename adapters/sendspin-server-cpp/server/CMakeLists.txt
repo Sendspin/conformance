@@ -17,6 +17,8 @@ add_subdirectory(${SENDSPIN_SERVER_CPP_REPO} sendspin-server-cpp EXCLUDE_FROM_AL
 
 find_package(OpenSSL 3 REQUIRED)
 
+# The artwork scenarios encode their JPEG with the stb_image_write the library vendors, through its
+# sendspin_server_cpp_stb target.
 add_executable(conformance-sendspin-server-cpp-server
     main.cpp
     fixture.cpp
@@ -29,5 +31,6 @@ target_link_libraries(conformance-sendspin-server-cpp-server PRIVATE
     sendspin_server_cpp
     ArduinoJson
     micro_flac
+    sendspin_server_cpp_stb
     OpenSSL::Crypto
 )

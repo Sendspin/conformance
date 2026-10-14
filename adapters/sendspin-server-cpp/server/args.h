@@ -20,6 +20,25 @@ struct Args {
     double timeout_seconds = 30.0;
     double clip_seconds = 5.0;
     int port = 8927;
+
+    std::string metadata_title = "Almost Silent";
+    std::string metadata_artist = "Sendspin Conformance";
+    std::string metadata_album_artist = "Sendspin";
+    std::string metadata_album = "Protocol Fixtures";
+    std::string metadata_artwork_url = "https://example.invalid/almost-silent.jpg";
+    int metadata_year = 2026;
+    int metadata_track = 1;
+    int metadata_track_progress = 12000;
+    int metadata_track_duration = 180000;
+    int metadata_playback_speed = 1000;
+
+    std::string controller_command = "next";
+    std::string controller_repeat = "all";
+    std::string controller_shuffle = "false";
+
+    std::string artwork_format = "jpeg";
+    int artwork_width = 256;
+    int artwork_height = 256;
 };
 
 }  // namespace conformance

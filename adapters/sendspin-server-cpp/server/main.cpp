@@ -58,6 +58,25 @@ Args parse_args(int argc, char** argv) {
         {"client-id", &args.client_id},
         {"server-id", &args.server_id},
         {"server-name", &args.server_name},
+        {"metadata-title", &args.metadata_title},
+        {"metadata-artist", &args.metadata_artist},
+        {"metadata-album-artist", &args.metadata_album_artist},
+        {"metadata-album", &args.metadata_album},
+        {"metadata-artwork-url", &args.metadata_artwork_url},
+        {"controller-command", &args.controller_command},
+        {"controller-repeat", &args.controller_repeat},
+        {"controller-shuffle", &args.controller_shuffle},
+        {"artwork-format", &args.artwork_format},
+    };
+    std::map<std::string, int*> integers = {
+        {"port", &args.port},
+        {"metadata-year", &args.metadata_year},
+        {"metadata-track", &args.metadata_track},
+        {"metadata-track-progress", &args.metadata_track_progress},
+        {"metadata-track-duration", &args.metadata_track_duration},
+        {"metadata-playback-speed", &args.metadata_playback_speed},
+        {"artwork-width", &args.artwork_width},
+        {"artwork-height", &args.artwork_height},
     };
     for (int i = 1; i < argc; ++i) {
         const std::string flag = argv[i];
@@ -70,12 +89,12 @@ Args parse_args(int argc, char** argv) {
         const std::string value = has_value ? argv[++i] : "true";
         if (const auto found = strings.find(name); found != strings.end()) {
             *found->second = value;
+        } else if (const auto number = integers.find(name); number != integers.end()) {
+            *number->second = std::stoi(value);
         } else if (name == "timeout-seconds") {
             args.timeout_seconds = std::stod(value);
         } else if (name == "clip-seconds") {
             args.clip_seconds = std::stod(value);
-        } else if (name == "port") {
-            args.port = std::stoi(value);
         } else {
             std::cerr << "ignoring --" << name << ' ' << value << '\n';
         }
@@ -193,7 +212,7 @@ int run(const Args& args, Clock::time_point started) {
         session.open_connection(deadline);
         set_stage("waiting for the client to take the connection");
         client = session.wait_for_client(deadline);
-        set_stage("streaming the fixture");
+        set_stage("driving the scenario");
         try {
             drive_scenario(args, session, recorder, fixture, *client, deadline);
         } catch (const std::exception& err) {

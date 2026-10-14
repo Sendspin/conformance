@@ -212,7 +212,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             entrypoint="adapters/sendspin-server-cpp/server",
             supports_server_initiated=True,
             supports_client_initiated=True,
-            supported_role_families=("player",),
+            supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
     ),
     "sendspin-go": ImplementationSpec(

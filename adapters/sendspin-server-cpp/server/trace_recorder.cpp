@@ -15,6 +15,14 @@ using sendspin::server::TraceDirection;
 constexpr uint8_t JSON_MESSAGE_ID = 0;
 constexpr uint8_t FRAGMENT_MESSAGE_ID = 1;
 constexpr uint8_t AUDIO_CHUNK_MESSAGE_ID = 4;
+// spec roles/artwork/v1.md "Artwork (Binary)": IDs 8 to 11 carry channels 0 to 3
+constexpr uint8_t FIRST_ARTWORK_MESSAGE_ID = 8;
+constexpr uint8_t LAST_ARTWORK_MESSAGE_ID = 11;
+constexpr uint8_t ARTWORK_CANCEL_FLAG = 0x01;
+constexpr uint8_t ARTWORK_ANNOUNCE_FLAG = 0x02;
+constexpr size_t ARTWORK_ANNOUNCE_BYTES = 14;
+constexpr size_t ARTWORK_HEADER_BYTES = 2;
+constexpr size_t ARTWORK_TOTAL_SIZE_BYTES = 4;
 constexpr uint8_t FIRST_FRAGMENT_FLAG = 0x02;
 constexpr uint8_t LAST_FRAGMENT_FLAG = 0x01;
 // Spans the player audio chunk header (type, int64 timestamp, uint32 send_ahead)
@@ -31,12 +39,16 @@ std::string hex_prefix(const uint8_t* data, size_t size) {
     return out;
 }
 
-int64_t read_be_int64(const uint8_t* data) {
+uint64_t read_be(const uint8_t* data, size_t size) {
     uint64_t value = 0;
-    for (size_t i = 0; i < TIMESTAMP_BYTES; ++i) {
+    for (size_t i = 0; i < size; ++i) {
         value = (value << 8) | data[i];
     }
-    return static_cast<int64_t>(value);
+    return value;
+}
+
+int64_t read_be_int64(const uint8_t* data) {
+    return static_cast<int64_t>(read_be(data, TIMESTAMP_BYTES));
 }
 
 std::string serialized(JsonVariantConst value) {
@@ -52,7 +64,7 @@ void TraceRecorder::on_message(const TracedMessage& message) {
     Connection& connection = this->connections_[message.connection_id];
     connection.record.connection_id = message.connection_id;
     if (message.written) {
-        this->on_written(connection);
+        this->on_written(connection, message.stamp_us);
     } else if (message.direction == TraceDirection::INBOUND) {
         const uint8_t id =
             message.binary && !message.plaintext.empty() ? message.plaintext[0] : JSON_MESSAGE_ID;
@@ -97,8 +109,29 @@ std::optional<ConnectionRecord> TraceRecorder::snapshot() const {
     return record;
 }
 
-void TraceRecorder::on_written(Connection& connection) {
+void TraceRecorder::on_written(Connection& connection, int64_t stamp_us) {
     // A write completion covers every outbound message traced before it on the connection.
+    ConnectionRecord& record = connection.record;
+    for (const std::string& metadata : connection.unwritten_metadata) {
+        if (!record.first_metadata_state.has_value()) {
+            JsonDocument doc;
+            deserializeJson(doc, metadata);
+            if (doc["timestamp"].is<int64_t>()) {
+                record.first_metadata_state =
+                    FirstMetadataState{doc["timestamp"].as<int64_t>(), stamp_us};
+            }
+        }
+        record.metadata = metadata;
+    }
+    connection.unwritten_metadata.clear();
+    if (!connection.unwritten_controller.empty()) {
+        record.controller_state = connection.unwritten_controller.back();
+        connection.unwritten_controller.clear();
+    }
+    for (SentArtwork& image : connection.unwritten_artwork) {
+        record.artwork_images.push_back(std::move(image));
+    }
+    connection.unwritten_artwork.clear();
     std::fill(connection.time_confirmed.begin(), connection.time_confirmed.end(), true);
     for (std::vector<std::string>& roles : connection.unwritten_stream_starts) {
         connection.record.availability_trace.push_back({true, std::nullopt, true, std::move(roles)});
@@ -139,6 +172,11 @@ void TraceRecorder::on_inbound(Connection& connection, bool binary, uint8_t mess
     } else if (type == "client/time") {
         record.time_exchange.push_back({TimeEntry::Kind::CLIENT_TIME, text});
         connection.time_confirmed.push_back(true);
+    } else if (type == "client/command") {
+        JsonVariantConst controller = doc["payload"]["controller"];
+        if (!record.client_command.has_value() && controller.is<JsonObjectConst>()) {
+            record.client_command = serialized(controller);
+        }
     }
 }
 
@@ -197,6 +235,9 @@ void TraceRecorder::on_outbound(Connection& connection, const TracedMessage& mes
         return;
     }
     record.events.push_back({false, true, id, {}});
+    if (id >= FIRST_ARTWORK_MESSAGE_ID && id <= LAST_ARTWORK_MESSAGE_ID) {
+        on_outbound_artwork(connection, plaintext);
+    }
     record.sent_frames.push_back(
         {plaintext.size(), hex_prefix(plaintext.data(), plaintext.size()),
          id == AUDIO_CHUNK_MESSAGE_ID ? std::optional<size_t>(message.audio_bytes) : std::nullopt});
@@ -254,8 +295,54 @@ void TraceRecorder::on_outbound_json(Connection& connection, const std::string& 
         if (player.is<JsonObjectConst>()) {
             record.stream_player = serialized(player);
         }
+        JsonVariantConst artwork = doc["payload"]["artwork"];
+        if (artwork.is<JsonObjectConst>()) {
+            record.stream_artwork = serialized(artwork);
+        }
     } else if (type == "stream/end") {
         connection.stream_end_traced = true;
+    } else if (type == "server/state") {
+        JsonVariantConst metadata = doc["payload"]["metadata"];
+        if (metadata.is<JsonObjectConst>()) {
+            connection.unwritten_metadata.push_back(serialized(metadata));
+        }
+        JsonVariantConst controller = doc["payload"]["controller"];
+        if (controller.is<JsonObjectConst>()) {
+            connection.unwritten_controller.push_back(serialized(controller));
+        }
+    }
+}
+
+void TraceRecorder::on_outbound_artwork(Connection& connection,
+                                        const std::vector<uint8_t>& plaintext) {
+    if (plaintext.size() < ARTWORK_HEADER_BYTES) {
+        return;
+    }
+    const size_t channel = plaintext[0] - FIRST_ARTWORK_MESSAGE_ID;
+    const uint8_t flags = plaintext[1];
+    std::optional<SentArtwork>& transfer = connection.artwork_transfer;
+    if ((flags & ARTWORK_CANCEL_FLAG) != 0) {
+        if (transfer.has_value() && transfer->channel == channel) {
+            transfer.reset();
+        }
+        return;
+    }
+    if ((flags & ARTWORK_ANNOUNCE_FLAG) != 0) {
+        if (plaintext.size() != ARTWORK_ANNOUNCE_BYTES) {
+            return;
+        }
+        transfer = SentArtwork{channel, {}};
+        connection.artwork_total_size = static_cast<size_t>(read_be(
+            plaintext.data() + ARTWORK_HEADER_BYTES + TIMESTAMP_BYTES, ARTWORK_TOTAL_SIZE_BYTES));
+    } else if (transfer.has_value() && transfer->channel == channel) {
+        const auto data = plaintext.begin() + static_cast<std::ptrdiff_t>(ARTWORK_HEADER_BYTES);
+        transfer->bytes.insert(transfer->bytes.end(), data, plaintext.end());
+    } else {
+        return;
+    }
+    if (transfer->bytes.size() >= connection.artwork_total_size) {
+        connection.unwritten_artwork.push_back(std::move(*transfer));
+        transfer.reset();
     }
 }
 
