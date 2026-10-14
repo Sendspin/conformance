@@ -10,6 +10,7 @@ on:
       - "scripts/**"
       - "patches/**"
       - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/ci.yml"
   pull_request:
     branches:
@@ -37,7 +38,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install package
-        run: uv sync
+        run: uv sync --locked
 
       # Fails when src/conformance/_vendor/ was edited by hand or a patch in
       # patches/aiosendspin/ no longer produces the committed tree.
