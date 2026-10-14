@@ -248,8 +248,8 @@ remote, so any such list goes stale on the next merge.
 ### CI
 
 - `.github/workflows/publish.yml`: macOS build + run + Pages publishing
+- `.github/workflows/vendor.yml`: fails when `src/conformance/_vendor/` differs from a rebuild, its dependencies drift from upstream's, or it references top-level `aiosendspin`
 - `scripts/detect_regressions.py`: compares local results against the published baseline to detect regressions
-- `.github/workflows/vendor.yml`: fails when `src/conformance/_vendor/` differs from a rebuild
 
 ## Standard commands
 

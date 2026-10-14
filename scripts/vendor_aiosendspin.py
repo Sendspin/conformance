@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,7 +55,8 @@ def build(ref: str, dest: Path, *, commit: str | None = None) -> None:
     Write the complete _vendor tree for upstream `ref` into `dest`.
 
     `commit` pins the export to that commit while VENDORED.md still records
-    `ref`. Raises SystemExit when the export fails or a patch does not apply.
+    `ref`. Raises SystemExit when the export fails, a patch does not apply, or
+    pyproject.toml lacks a dependency the bundled copy declares.
     """
     patches = sorted(PATCH_DIR.glob("*.patch"))
     with tempfile.TemporaryDirectory() as work:
@@ -64,6 +66,11 @@ def build(ref: str, dest: Path, *, commit: str | None = None) -> None:
             raise SystemExit(f"fetched {exported} for pinned commit {commit}")
         for patch in patches:
             _apply_patch(patch, checkout)
+        missing = missing_dependencies(checkout / "pyproject.toml")
+        if missing:
+            raise SystemExit(
+                f"pyproject.toml lacks dependencies aiosendspin {ref} declares: {', '.join(missing)}"
+            )
 
         dest.mkdir(parents=True, exist_ok=True)
         (dest / "__init__.py").write_text(
@@ -98,6 +105,24 @@ def rewrite_imports(text: str, source: Path) -> str:
 
     text = _FROM_IMPORT.sub(rf"\1from {VENDORED_PACKAGE}", text)
     return _PLAIN_IMPORT.sub(plain, text)
+
+
+def missing_dependencies(upstream_pyproject: Path) -> list[str]:
+    """
+    Return the upstream runtime and server requirements pyproject.toml does not declare.
+
+    A requirement counts as declared only with the same specifier, ignoring case
+    and whitespace, so a range upstream tightened is reported too.
+    """
+    upstream = tomllib.loads(upstream_pyproject.read_text())["project"]
+    required = [*upstream["dependencies"], *upstream["optional-dependencies"]["server"]]
+    ours = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["dependencies"]
+    declared = {_normalise_requirement(requirement) for requirement in ours}
+    return [
+        requirement
+        for requirement in required
+        if _normalise_requirement(requirement) not in declared
+    ]
 
 
 def recorded_source() -> tuple[str, str]:
@@ -180,6 +205,10 @@ def _git(cwd: Path, *args: str) -> str:
     if result.returncode != 0:
         raise SystemExit(f"git {' '.join(args)} failed:\n{result.stderr.strip()}")
     return result.stdout
+
+
+def _normalise_requirement(requirement: str) -> str:
+    return "".join(requirement.split()).lower()
 
 
 def _vendored_md(ref: str, commit: str, patches: list[Path]) -> str:

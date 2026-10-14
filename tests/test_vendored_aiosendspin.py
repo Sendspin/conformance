@@ -3,12 +3,14 @@
 import re
 import subprocess
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 
 import conformance._vendor
 
 VENDOR_DIR = Path(conformance._vendor.__file__).parent
+PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 TOP_LEVEL_REFERENCE = re.compile(
     r"^\s*(?:from|import)\s+aiosendspin\b|[\"']aiosendspin[.\"']", re.MULTILINE
 )
@@ -34,6 +36,16 @@ class VendoredAiosendspinTests(unittest.TestCase):
             for match in TOP_LEVEL_REFERENCE.finditer(path.read_text())
         ]
         self.assertEqual(offenders, [])
+
+    def test_every_bundled_data_file_ships_as_package_data(self):
+        package = VENDOR_DIR / "aiosendspin"
+        data_files = sorted(
+            path.relative_to(package).as_posix()
+            for path in package.rglob("*")
+            if path.is_file() and path.suffix not in {".py", ".pyc"}
+        )
+        package_data = tomllib.loads(PYPROJECT.read_text())["tool"]["setuptools"]["package-data"]
+        self.assertEqual(data_files, sorted(package_data["conformance._vendor.aiosendspin"]))
 
 
 if __name__ == "__main__":
