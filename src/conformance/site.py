@@ -13,7 +13,12 @@ from urllib.parse import quote
 
 from .declared_formats import collect_declared_formats, declared_formats_for_implementation
 from .environment import build_log_filename
-from .implementations import IMPLEMENTATIONS, implementation_names, implementations_for_scenario
+from .implementations import (
+    IMPLEMENTATIONS,
+    implementation_names,
+    implementations_for_scenario,
+    implementations_with_role,
+)
 from .io import read_json, write_json
 from .repository_versions import collect_repository_versions
 from .scenarios import get_scenario, ordered_scenarios
@@ -1312,12 +1317,12 @@ def _render_matrix(
 
 def _matrix_axes(results: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     if not results:
-        return implementation_names(), implementation_names()
+        return implementation_names(), implementations_with_role("client")
 
     scenario_id = str(results[0]["scenario_id"])
     scenario = get_scenario(scenario_id)
     known_names = implementation_names()
-    client_impls = list(known_names)
+    client_impls = implementations_with_role("client", names=known_names)
     client_impls.extend(
         sorted(
             {

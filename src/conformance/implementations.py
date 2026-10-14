@@ -279,6 +279,21 @@ def role_supports_scenario(
     ) is None
 
 
+def implementations_with_role(
+    role: RoleName,
+    *,
+    names: list[str] | None = None,
+) -> list[str]:
+    """Return implementations that implement a role at all, whatever the scenario."""
+    candidates = names if names is not None else implementation_names()
+    return [
+        implementation
+        for implementation in candidates
+        if (specification := IMPLEMENTATIONS.get(implementation)) is not None
+        and (specification.server if role == "server" else specification.client).supported
+    ]
+
+
 def implementations_for_scenario(
     *,
     role: RoleName,

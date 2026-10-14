@@ -33,7 +33,9 @@ Every implementation is modeled as exactly two CLIs:
 - `server`
 - `client`
 
-Client-side unsupported roles still need a CLI surface that the harness can invoke. Those cases should fail fast, emit a summary, and exit non-zero. Server-side unsupported scenarios are filtered out before case creation, so the runner does not create dead server rows in the matrix.
+An implementation whose role is not `supported` at all gets no cases in that role: the runner skips it before case creation and the report draws no row (server) or column (client) for it, so a server-only or client-only implementation adds no dead cells to the matrix. Both the runner and the site take the client list from `implementations_with_role()` and the server list from `implementations_for_scenario()`.
+
+The filters differ per side. Server rows are also dropped per scenario, wherever `RoleSpec.unsupported_reason()` returns a reason. Client columns are not: a client that implements the role but cannot run one scenario still gets a case, which fails fast through the placeholder adapter and reads as "Unsupported" in that column.
 
 When the harness judges a case unsupported — the role is not `supported`, or
 `RoleSpec.unsupported_reason()` returns a reason for the scenario — it stamps
@@ -325,8 +327,8 @@ If a scenario requires new behavior that does not fit the existing generic contr
 ## How to add or upgrade an implementation adapter
 
 1. Add or update the implementation entry in `src/conformance/implementations.py`.
-2. Expose both `server` and `client` roles.
-3. If a role is unsupported, wire it to a fail-fast adapter and give a precise `reason`.
+2. Declare both `server` and `client` roles.
+3. If a role is unsupported, set `supported=False`, wire it to the placeholder adapter and give a precise `reason`. The matrix then has no row or column for that role.
 4. Keep adapter summaries aligned with the common summary contract.
 5. Update `adapters/README.md` if the adapter contract changes.
 6. Verify both build-time and run-time behavior.

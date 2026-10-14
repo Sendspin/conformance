@@ -26,6 +26,7 @@ from .implementations import (
     IMPLEMENTATIONS,
     ensure_repo_checkout,
     implementations_for_scenario,
+    implementations_with_role,
     parse_implementation_filter,
     resolve_repo_path,
 )
@@ -1650,7 +1651,10 @@ async def run_matrix(
     data_dir.mkdir(parents=True, exist_ok=True)
     build_index = _build_result_index(build_results)
     server_impls = parse_implementation_filter(from_filter)
-    client_impls = parse_implementation_filter(to_filter)
+    client_impls = implementations_with_role(
+        "client",
+        names=parse_implementation_filter(to_filter),
+    )
     cases: list[tuple[int, str, str, str]] = []
     slot_index = 0
     for scenario in ordered_scenarios():

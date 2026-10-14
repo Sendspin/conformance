@@ -39,7 +39,7 @@ The `client-initiated-metadata`, `client-initiated-artwork` and `client-initiate
 
 The `server-initiated-audio-chunk-framing` scenario has no capability flag of its own either. A client adapter that is handed parsed chunks and never sees a raw frame reports that, and its case fails as a harness gap rather than being left out. Only the `aiosendspin` adapters, the `sendspin-go` server and the `sendspin-rs` client observe raw frames today.
 
-Unsupported client roles use fail-fast adapters that emit a summary and exit non-zero. Unsupported server roles are filtered out before case creation, so the matrix only shows server rows that can actually run a scenario.
+An implementation without a client role gets no client column, and one without a server role gets no server row. Server rows are also left out per scenario, so the matrix only shows server rows that can actually run it. A client that implements the role but cannot run one scenario keeps its column: its case fails fast through a placeholder adapter and reads as unsupported.
 
 ## Protocol conformance migration
 
