@@ -26,13 +26,22 @@ class DiscoveredClient:
         return f"{self.name!r} {self.url}" if self.name is not None else self.url
 
 
-async def discover_clients(seconds: float) -> list[DiscoveredClient]:
+@dataclass(frozen=True, slots=True)
+class Discovery:
     """
-    Browse for `seconds` and return every client that resolved to a WebSocket URL.
+    What a browse found.
 
-    A service whose TXT record lacks a `path` starting with `/` is left out, since the
-    spec makes `path` required. The list is sorted by URL.
+    `clients` resolved to a WebSocket URL, sorted by URL. `unusable` describes each
+    service that did not, and why, so a client advertising itself wrongly is shown
+    rather than missed.
     """
+
+    clients: list[DiscoveredClient]
+    unusable: list[str]
+
+
+async def discover_clients(seconds: float) -> Discovery:
+    """Browse for `_sendspin._tcp` services for `seconds` and resolve each one found."""
     found: set[str] = set()
 
     def on_change(
@@ -48,21 +57,32 @@ async def discover_clients(seconds: float) -> list[DiscoveredClient]:
     browser = AsyncServiceBrowser(async_zeroconf.zeroconf, CLIENT_SERVICE, handlers=[on_change])
     try:
         await asyncio.sleep(seconds)
-        resolved = [await _resolve(async_zeroconf.zeroconf, service) for service in sorted(found)]
+        resolved = await asyncio.gather(
+            *(_resolve(async_zeroconf.zeroconf, service) for service in sorted(found))
+        )
     finally:
         await browser.async_cancel()
         await async_zeroconf.async_close()
-    return sorted((client for client in resolved if client is not None), key=lambda c: c.url)
+    return Discovery(
+        clients=sorted(
+            (r for r in resolved if isinstance(r, DiscoveredClient)), key=lambda c: c.url
+        ),
+        unusable=[r for r in resolved if isinstance(r, str)],
+    )
 
 
-async def _resolve(zeroconf: Zeroconf, service: str) -> DiscoveredClient | None:
+async def _resolve(zeroconf: Zeroconf, service: str) -> DiscoveredClient | str:
+    """Return the client `service` advertises, or why it cannot be connected to."""
     info = AsyncServiceInfo(CLIENT_SERVICE, service)
     if not await info.async_request(zeroconf, _RESOLVE_TIMEOUT_MS) or info.port is None:
-        return None
+        return f"{service}: did not resolve to an address and port"
     addresses = info.parsed_addresses(IPVersion.V4Only)
+    if not addresses:
+        return f"{service}: has no IPv4 address"
     path = info.decoded_properties.get("path")
-    if not addresses or path is None or not path.startswith("/"):
-        return None
+    if path is None or not path.startswith("/"):
+        # connection.md:14 makes the TXT `path` key REQUIRED.
+        return f"{service}: TXT path is {path!r}, not a path starting with /"
     return DiscoveredClient(
         service=service,
         url=f"ws://{addresses[0]}:{info.port}{path}",

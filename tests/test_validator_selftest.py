@@ -25,6 +25,7 @@ from conformance._vendor.aiosendspin.models.player import (
 )
 from conformance._vendor.aiosendspin.models.types import AudioCodec, Roles
 from conformance._vendor.aiosendspin.noise import Identity, InMemoryClientPairingStore
+from conformance.validator.report import bundled_aiosendspin
 
 VALIDATOR = Path(sys.executable).with_name("sendspin-validate")
 RUN_TIMEOUT_S = 90.0
@@ -86,9 +87,7 @@ class ValidatorSelfTest(unittest.IsolatedAsyncioTestCase):
         await listener.start()
         self.addAsyncCleanup(listener.stop)
 
-        validator = await self._start_validator(
-            "--port", str(free_port()), "--connect", f"ws://127.0.0.1:{port}/sendspin"
-        )
+        validator = await self._start_validator("--connect", f"ws://127.0.0.1:{port}/sendspin")
 
         report = await self._finish(validator)
         self.assertEqual(report["connection_mode"], "server-initiated")
@@ -169,7 +168,7 @@ class ValidatorSelfTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["client"]["name"], "Validator Self-Test")
         self.assertEqual(report["client"]["client_id"], self.identity.peer_id)
         self.assertEqual(report["spec"], "1.0.0-rc1")
-        self.assertEqual(report["aiosendspin"]["ref"], "10.0.2")
+        self.assertEqual(report["aiosendspin"], bundled_aiosendspin())
         return report
 
 

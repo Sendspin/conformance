@@ -145,12 +145,13 @@ connects to. It records every frame, checks what the client sends against spec
 uvx --from git+https://github.com/Sendspin/conformance sendspin-validate
 ```
 
-It advertises `_sendspin-server._tcp` on port 8927 (`--port`) and asks how your app
-connects. In client-initiated mode your app finds the validator and connects. In
-server-initiated mode the validator lists the `_sendspin._tcp` clients it finds and
-connects to the one you pick. `--connect ws://host:port/path` skips mDNS. `--verbose`
-streams every decoded frame to stderr, and `--fresh` starts from a new validator
-identity. The identity is kept in the platform user-data directory.
+It asks how your app connects. In client-initiated mode it listens on port 8927
+(`--port`), announced as `_sendspin-server._tcp`, and judges the first client to
+connect. In server-initiated mode it lists the `_sendspin._tcp` clients it finds and
+connects to the one you pick, taking it over from any server holding it idle;
+`--connect ws://host:port/path` skips mDNS. `--verbose` streams every decoded frame to
+stderr, and `--fresh` starts from a new validator identity. The identity is kept in the
+platform user-data directory.
 
 This first version admits the client through unpaired access, so an app with unpaired
 access disabled gets the connection checks only; pairing arrives in a later version.

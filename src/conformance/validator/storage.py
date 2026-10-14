@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -23,30 +24,13 @@ class AdmitUnpairedStore(FileServerPairingStore):
     """
     A pairing store that approves every client for unpaired playback.
 
-    The person running the validator is the operator of whatever client connects, so
-    the validator admits it through unpaired access unless an approval is revoked.
-    Approvals and revocations last for the run only; pairing records persist.
+    The person running the validator is the operator of whatever client they test, so
+    the validator admits it through unpaired access without storing an approval.
     """
 
-    def __init__(self, path: str | Path) -> None:
-        super().__init__(path)
-        self._revoked: set[str] = set()
-
     async def trusted_unpaired(self, client_id: str) -> TrustedUnpairedClient | None:
-        """Return an approval for `client_id` unless it was revoked."""
-        if client_id in self._revoked:
-            return None
+        """Return an approval for `client_id`."""
         return await super().trusted_unpaired(client_id) or TrustedUnpairedClient(client_id)
-
-    async def add_trusted_unpaired(self, client: TrustedUnpairedClient) -> None:
-        """Approve `client` again after a revocation."""
-        self._revoked.discard(client.client_id)
-        await super().add_trusted_unpaired(client)
-
-    async def remove_trusted_unpaired(self, client_id: str) -> None:
-        """Revoke `client_id`'s unpaired-playback approval for the rest of the run."""
-        self._revoked.add(client_id)
-        await super().remove_trusted_unpaired(client_id)
 
 
 def user_data_dir() -> Path:
@@ -65,17 +49,20 @@ async def load_state(directory: Path, *, fresh: bool) -> tuple[Identity, AdmitUn
     discards every pairing record, since records made under the old identity no
     longer match it.
     """
+    identity = await asyncio.to_thread(_load_identity, directory, fresh=fresh)
+    return identity, await AdmitUnpairedStore.open(directory / _PAIRING_FILE)
+
+
+def _load_identity(directory: Path, *, fresh: bool) -> Identity:
     directory.mkdir(parents=True, exist_ok=True)
     identity_path = directory / _IDENTITY_FILE
-    pairing_path = directory / _PAIRING_FILE
-    if fresh or not identity_path.exists():
-        identity = Identity.generate()
-        _write_private(identity_path, json.dumps({"private_key": identity.private_b64u}))
-        pairing_path.unlink(missing_ok=True)
-    else:
+    if not fresh and identity_path.exists():
         stored = json.loads(identity_path.read_text(encoding="utf-8"))
-        identity = Identity.from_private_bytes(b64url_decode(stored["private_key"]))
-    return identity, await AdmitUnpairedStore.open(pairing_path)
+        return Identity.from_private_bytes(b64url_decode(stored["private_key"]))
+    identity = Identity.generate()
+    _write_private(identity_path, json.dumps({"private_key": identity.private_b64u}))
+    (directory / _PAIRING_FILE).unlink(missing_ok=True)
+    return identity
 
 
 def _write_private(path: Path, text: str) -> None:

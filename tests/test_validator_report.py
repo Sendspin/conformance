@@ -60,7 +60,7 @@ class ReportTests(unittest.TestCase):
     def test_records_provenance_and_identity(self) -> None:
         self.assertEqual(self.report["spec"], "1.0.0-rc1")
         self.assertRegex(self.report["tool"], r"^sendspin-validate \d")
-        self.assertEqual(self.report["aiosendspin"]["ref"], "10.0.2")
+        self.assertTrue(self.report["aiosendspin"]["ref"])
         self.assertRegex(self.report["aiosendspin"]["commit"], r"^[0-9a-f]{40}$")
         self.assertIn("0001-frame-observer.patch", self.report["aiosendspin"]["patches"])
         self.assertEqual(self.report["seed"], 7)

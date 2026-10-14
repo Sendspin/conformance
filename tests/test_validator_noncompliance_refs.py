@@ -1,36 +1,53 @@
 """Every reason the bundled aiosendspin can reject a client for has a spec reference."""
 
 import ast
+import re
 import unittest
 from pathlib import Path
 
-from conformance.validator.noncompliance_refs import UnmappedReasonError, spec_ref_for
+from conformance.validator.noncompliance_refs import _REFS, UnmappedReasonError, spec_ref_for
 
 VENDORED = Path(__file__).resolve().parents[1] / "src" / "conformance" / "_vendor" / "aiosendspin"
 _REPORTERS = {"flag_noncompliance", "_flag_noncompliance", "on_noncompliance"}
+COMPOSED_REASON_SITES = 36
 
 
-def literal_reasons() -> dict[str, str]:
-    """Return every reason the bundled source passes as a plain string, with its location."""
-    reasons = {}
+def reasons() -> tuple[dict[str, str], list[str]]:
+    """
+    Return the bundled source's reasons: plain strings with their locations, and the
+    locations of every reason composed at runtime.
+    """
+    literal, composed = {}, []
     for path in sorted(VENDORED.rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text())):
             if not isinstance(node, ast.Call) or not node.args:
                 continue
-            name = getattr(node.func, "attr", getattr(node.func, "id", None))
+            if getattr(node.func, "attr", getattr(node.func, "id", None)) not in _REPORTERS:
+                continue
+            location = f"{path.relative_to(VENDORED)}:{node.lineno}"
             argument = node.args[0]
-            if name in _REPORTERS and isinstance(argument, ast.Constant):
-                reasons[argument.value] = f"{path.relative_to(VENDORED)}:{node.lineno}"
-    return reasons
+            if isinstance(argument, ast.Constant):
+                literal[argument.value] = location
+            else:
+                composed.append(location)
+    return literal, composed
 
 
 class NoncomplianceRefsTests(unittest.TestCase):
-    def test_every_literal_reason_is_mapped(self) -> None:
-        reasons = literal_reasons()
-        self.assertGreater(len(reasons), 50)
-        for reason, location in reasons.items():
+    def test_every_literal_reason_matches_exactly_one_pattern(self) -> None:
+        literal, _ = reasons()
+        self.assertGreater(len(literal), 50)
+        for reason, location in literal.items():
             with self.subTest(reason=reason, location=location):
                 spec_ref_for(reason)
+                matches = [p for p, _ in _REFS if re.fullmatch(p, reason)]
+                self.assertEqual(len(matches), 1, matches)
+
+    def test_composed_reason_sites_are_the_ones_mapped(self) -> None:
+        # The table maps what these call sites compose. A changed count means the bundled
+        # copy gained or lost one: map its reasons in noncompliance_refs, then update this.
+        _, composed = reasons()
+        self.assertEqual(len(composed), COMPOSED_REASON_SITES, composed)
 
     def test_composed_reasons_are_mapped(self) -> None:
         self.assertEqual(

@@ -1,9 +1,9 @@
 """
-Runs one validation session: serve, let a client connect, and observe it.
+Runs one validation session: get a client connected, and observe it.
 
-The validator is a strict aiosendspin server. Phase 1 activates a client only
-through unpaired access and observes the connection's opening: the handshake, the
-hello exchange, activation, the initial client/state and time sync.
+The validator is a strict aiosendspin server. It activates a client only through
+unpaired access and observes the connection's opening: the handshake, the hello
+exchange, activation, the initial client/state and time sync.
 """
 
 from __future__ import annotations
@@ -23,12 +23,12 @@ from conformance._vendor.aiosendspin.server import (
     SendspinServer,
 )
 
+from .checks import ConnectionRecord
 from .discovery import DiscoveredClient, discover_clients
 from .prompter import Prompter, Reply
-from .recorder import RecordedFrame, Recorder
+from .recorder import Recorder
 
 SERVER_NAME = "Sendspin Validator"
-_POLL_S = 0.05
 # How long to browse for clients before listing them.
 _DISCOVERY_S = 3.0
 # How long to keep watching once the opening exchange is done, for client/time.
@@ -44,13 +44,17 @@ class ConnectionMode(StrEnum):
     SERVER_INITIATED = "server-initiated"
 
 
+class PortUnavailableError(OSError):
+    """Raised when the validator cannot listen on the requested port."""
+
+
 @dataclass(frozen=True, slots=True)
 class SessionOptions:
     """
     How to run a session.
 
-    `connect_url` skips mDNS and dials that client. `connect_timeout_s` bounds the wait
-    for a client to connect.
+    `port` is listened on in client-initiated mode. `connect_url` skips mDNS and dials
+    that client. `connect_timeout_s` bounds the wait for a client to connect.
     """
 
     port: int
@@ -60,9 +64,16 @@ class SessionOptions:
 
 @dataclass(frozen=True, slots=True)
 class SessionResult:
-    """What a session observed; `txt_name` is the discovered client's TXT `name`."""
+    """
+    What a session observed.
+
+    `connection` is the number of the observed connection; frames on any other belong
+    to other clients and are not judged. `txt_name` is the discovered client's TXT
+    `name`, when it was discovered over mDNS.
+    """
 
     mode: ConnectionMode
+    connection: int
     txt_name: str | None
 
 
@@ -74,9 +85,10 @@ async def run_session(
     options: SessionOptions,
 ) -> SessionResult | None:
     """
-    Serve one client until its opening exchange is observed, then close.
+    Get one client connected, observe its opening exchange, then close.
 
-    Returns None when no client connected. Raises OSError when the port is taken.
+    Returns None when no client connected. Raises PortUnavailableError when the
+    validator cannot listen on `options.port`.
     """
     server = SendspinServer(
         loop=asyncio.get_running_loop(),
@@ -88,13 +100,9 @@ async def run_session(
         noncompliance_observer=recorder.observe_noncompliance,
     )
     try:
-        await server.start_server(port=options.port, discover_clients=False)
-        prompter.instruct(
-            f"Advertising _sendspin-server._tcp on port {options.port} {SendspinServer.API_PATH}"
-        )
         result = await _connect(server, prompter, recorder, options)
         if result is not None:
-            await _Observation(server, prompter, recorder).run()
+            await _Observation(server, prompter, recorder, result.connection).run()
         return result
     finally:
         await server.close()
@@ -104,9 +112,9 @@ async def _connect(
     server: SendspinServer, prompter: Prompter, recorder: Recorder, options: SessionOptions
 ) -> SessionResult | None:
     """Get a client connected in the mode the user picks; None if none connected."""
+    target: DiscoveredClient | None = None
     if options.connect_url is not None:
-        mode, target = ConnectionMode.SERVER_INITIATED, None
-        url: str | None = options.connect_url
+        url = options.connect_url
     else:
         choice = await _choose(
             prompter,
@@ -119,56 +127,86 @@ async def _connect(
         if choice is None:
             return None
         if choice == 0:
-            mode, target, url = ConnectionMode.CLIENT_INITIATED, None, None
-        else:
-            mode = ConnectionMode.SERVER_INITIATED
-            target = await _pick_client(prompter)
-            if target is None:
-                return None
-            url = target.url
-
-    if url is None:
-        prompter.instruct("Waiting for your app to connect…")
-    else:
-        prompter.instruct(f"Connecting to {url}…")
-        try:
-            async with asyncio.timeout(options.connect_timeout_s):
-                # Declaring playback wins admission over a server that holds the client idle.
-                await server.connect_to_client_and_wait(
-                    url, connection_reason=ConnectionReason.PLAYBACK
-                )
-        except (ClientConnectionError, ClientResponseError, TimeoutError) as err:
-            prompter.instruct(f"Could not connect to {url}: {err or type(err).__name__}")
+            return await _accept(server, prompter, recorder, options)
+        target = await _pick_client(prompter)
+        if target is None:
             return None
-    if not await _wait_for(lambda: bool(recorder.frames), options.connect_timeout_s):
+        url = target.url
+
+    # The validator only dials here and does not listen, so no other client can reach it.
+    prompter.instruct(
+        f"Connecting to {url}… If another server is using this client idle, the validator "
+        "takes it over for the run."
+    )
+    try:
+        async with asyncio.timeout(options.connect_timeout_s):
+            # Declaring playback wins admission over a server that holds the client idle.
+            await server.connect_to_client_and_wait(
+                url, connection_reason=ConnectionReason.PLAYBACK
+            )
+            await recorder.wait_until(lambda: bool(recorder.frames))
+    except (ClientConnectionError, ClientResponseError, TimeoutError) as err:
+        prompter.instruct(f"Could not connect to {url}: {err or type(err).__name__}")
+        return None
+    return SessionResult(
+        mode=ConnectionMode.SERVER_INITIATED,
+        connection=recorder.frames[0].connection,
+        txt_name=target.name if target is not None else None,
+    )
+
+
+async def _accept(
+    server: SendspinServer, prompter: Prompter, recorder: Recorder, options: SessionOptions
+) -> SessionResult | None:
+    """Listen and wait for a client to connect; None if none did in time."""
+    try:
+        await server.start_server(port=options.port, discover_clients=False)
+    except OSError as err:
+        raise PortUnavailableError(err.errno, f"cannot listen on port {options.port}") from err
+    prompter.instruct(
+        f"Listening on port {options.port} {SendspinServer.API_PATH}, announced as "
+        "_sendspin-server._tcp over mDNS."
+    )
+    prompter.instruct("Waiting for your app to connect…")
+    try:
+        async with asyncio.timeout(options.connect_timeout_s):
+            await recorder.wait_until(lambda: bool(recorder.frames))
+    except TimeoutError:
         prompter.instruct(f"No client connected within {options.connect_timeout_s:.0f} s.")
         return None
-    return SessionResult(mode=mode, txt_name=target.name if target is not None else None)
+    return SessionResult(
+        mode=ConnectionMode.CLIENT_INITIATED,
+        connection=recorder.frames[0].connection,
+        txt_name=None,
+    )
 
 
 async def _pick_client(prompter: Prompter) -> DiscoveredClient | None:
     """Browse for clients until the user picks one; None if they skip."""
     while True:
         prompter.instruct("Browsing for _sendspin._tcp clients…")
-        clients = await discover_clients(_DISCOVERY_S)
-        for client in clients:
+        discovery = await discover_clients(_DISCOVERY_S)
+        for client in discovery.clients:
             prompter.instruct(f"Found: {client.label}")
-        if not clients:
+        for unusable in discovery.unusable:
+            prompter.instruct(f"Found but cannot connect: {unusable}")
+        if not discovery.clients:
             prompter.instruct(
-                "No client found. Check that your app advertises _sendspin._tcp on this "
-                "network, or pass --connect ws://host:port/path."
+                "No usable client found. Check that your app advertises _sendspin._tcp with "
+                "a TXT path on this network, or pass --connect ws://host:port/path."
             )
             answer = await prompter.confirm("Browse again?")
             if answer.reply is Reply.RETRY or (answer.reply is Reply.ANSWERED and answer.value):
                 continue
             return None
         answer = await prompter.ask_choice(
-            "Which client should the validator connect to?", [c.label for c in clients]
+            "Which client should the validator connect to?",
+            [c.label for c in discovery.clients],
         )
         if answer.reply is Reply.RETRY:
             continue
         if answer.reply is Reply.ANSWERED and answer.value is not None:
-            return clients[answer.value]
+            return discovery.clients[answer.value]
         return None
 
 
@@ -183,27 +221,28 @@ async def _choose(prompter: Prompter, question: str, choices: list[str]) -> int 
 
 
 class _Observation:
-    """Watches the first connection through its opening exchange."""
+    """Watches one connection through its opening exchange."""
 
-    def __init__(self, server: SendspinServer, prompter: Prompter, recorder: Recorder) -> None:
+    def __init__(
+        self, server: SendspinServer, prompter: Prompter, recorder: Recorder, connection: int
+    ) -> None:
         self._prompter = prompter
         self._recorder = recorder
-        self._connection = recorder.frames[0].connection
+        self._connection = connection
         self._disconnected = False
         server.add_event_listener(self._on_event)
 
     async def run(self) -> None:
         """Return once the opening exchange is observed, or the connection has ended."""
         await self._watch()
-        if goodbye := self._first_in("client/goodbye"):
+        if goodbye := next(iter(self._record().inbound("client/goodbye")), None):
             reason = (goodbye.payload or {}).get("reason")
             self._prompter.instruct(f"Your app closed the connection: goodbye {reason!r}.")
 
     async def _watch(self) -> None:
-        if not await self._until(lambda: self._first_in("client/hello") is not None):
+        if not await self._until(lambda record: bool(record.inbound("client/hello"))):
             return
-        hello = self._first_in("client/hello")
-        assert hello is not None
+        hello = self._record().inbound("client/hello")[0]
         access = (hello.payload or {}).get("unpaired_access")
         if isinstance(access, dict) and access.get("enabled") is False:
             self._prompter.instruct(
@@ -211,65 +250,46 @@ class _Observation:
                 "playback without pairing. Pairing support arrives in a later version of "
                 "sendspin-validate; only the connection checks run this time."
             )
-        if not await self._until(lambda: self._first_out("server/activate") is not None):
+        if not await self._until(lambda record: bool(record.outbound("server/activate"))):
             return
-        activation = self._first_out("server/activate")
-        assert activation is not None
+        activation = self._record().outbound("server/activate")[0]
         if (activation.payload or {}).get("active_roles") and not await self._until(
-            lambda: self._first_in("client/state") is not None
+            lambda record: bool(record.inbound("client/state"))
         ):
             return
-        await self._until(lambda: False, timeout_s=_SETTLE_S)
+        await self._until(lambda _record: False, timeout_s=_SETTLE_S)
 
     async def _until(
-        self, condition: Callable[[], bool], *, timeout_s: float = _STEP_TIMEOUT_S
+        self,
+        condition: Callable[[ConnectionRecord], bool],
+        *,
+        timeout_s: float = _STEP_TIMEOUT_S,
     ) -> bool:
         """Wait for `condition`; False if the connection ended or time ran out first."""
-        return await _wait_for(lambda: condition() or self._ended(), timeout_s) and condition()
+        try:
+            async with asyncio.timeout(timeout_s):
+                await self._recorder.wait_until(lambda: condition(self._record()) or self._ended())
+        except TimeoutError:
+            return False
+        return condition(self._record())
+
+    def _record(self) -> ConnectionRecord:
+        return ConnectionRecord.of(
+            self._connection, self._recorder.frames, self._recorder.noncompliance
+        )
 
     def _ended(self) -> bool:
-        """Whether the observed connection is over, or the server has already redialed."""
+        """Whether the connection is over: closed, rejected, or answered with server/error."""
+        record = self._record()
         return (
             self._disconnected
-            or self._first_out("server/error") is not None
-            or any(o.connection == self._connection for o in self._recorder.noncompliance)
-            or any(f.connection != self._connection for f in self._recorder.frames)
-        )
-
-    def _first_in(self, message_type: str) -> RecordedFrame | None:
-        return next(
-            (
-                f
-                for f in self._recorder.frames
-                if f.connection == self._connection and f.inbound and f.type == message_type
-            ),
-            None,
-        )
-
-    def _first_out(self, message_type: str) -> RecordedFrame | None:
-        return next(
-            (
-                f
-                for f in self._recorder.frames
-                if f.connection == self._connection and not f.inbound and f.type == message_type
-            ),
-            None,
+            or record.rejected
+            or bool(record.outbound("server/error", phase="cleartext"))
         )
 
     def _on_event(self, _server: SendspinServer, event: SendspinEvent) -> None:
         if isinstance(event, ClientDisconnectedEvent) and any(
-            f.connection == self._connection and f.client_id == event.client_id
-            for f in self._recorder.frames
+            f.client_id == event.client_id for f in self._record().frames
         ):
             self._disconnected = True
-
-
-async def _wait_for(condition: Callable[[], bool], timeout_s: float) -> bool:
-    """Return True once `condition` holds, or False after `timeout_s`."""
-    try:
-        async with asyncio.timeout(timeout_s):
-            while not condition():
-                await asyncio.sleep(_POLL_S)
-    except TimeoutError:
-        return False
-    return True
+            self._recorder.notify()

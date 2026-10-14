@@ -9,9 +9,10 @@ at an earlier failure, is N/A rather than FAIL or PASS.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from .findings import Finding, Verdict
@@ -40,6 +41,11 @@ SPEC_REFS = {
 }
 STRICT_CHECK_ID = "CORE-STRICT-001"
 RECORDER_CHECK_ID = "CORE-RECORDER-001"
+# The strict server's reason when Noise message 2's payload is wrong, CORE-NOISE-001's
+# only evidence, since the payload is encrypted.
+NOISE_PAYLOAD_REASON = "Noise message 2 payload is not the literal bytes {}"
+
+logger = logging.getLogger(__name__)
 
 SUITES = frozenset({"25519_ChaChaPoly_SHA256", "25519_AESGCM_SHA256"})
 # Role versions whose support object client/hello must carry when they are listed.
@@ -79,6 +85,20 @@ class ConnectionRecord:
             f for f in self.frames if not f.inbound and f.phase == phase and f.type == message_type
         ]
 
+    @classmethod
+    def of(
+        cls,
+        number: int,
+        frames: Iterable[RecordedFrame],
+        noncompliance: Iterable[RecordedNoncompliance],
+    ) -> ConnectionRecord:
+        """Return what a session recorded on connection `number`."""
+        return cls(
+            number,
+            tuple(f for f in frames if f.connection == number),
+            tuple(o for o in noncompliance if o.connection == number),
+        )
+
     @property
     def rejected(self) -> bool:
         """Whether the strict server flagged a violation, which ends the connection."""
@@ -88,60 +108,37 @@ class ConnectionRecord:
 Check = Callable[[ConnectionRecord], list[Finding]]
 
 
-def group_connections(
-    frames: Iterable[RecordedFrame], noncompliance: Iterable[RecordedNoncompliance]
-) -> list[ConnectionRecord]:
-    """Split a session's recording into its connections, ordered by connection number."""
-    by_number: dict[int, list[RecordedFrame]] = {}
-    for frame in frames:
-        by_number.setdefault(frame.connection, []).append(frame)
-    flagged: dict[int | None, list[RecordedNoncompliance]] = {}
-    for observation in noncompliance:
-        flagged.setdefault(observation.connection, []).append(observation)
-    return [
-        ConnectionRecord(number, tuple(by_number[number]), tuple(flagged.get(number, ())))
-        for number in sorted(by_number)
-    ]
-
-
 def judge_session(
     frames: Sequence[RecordedFrame],
     noncompliance: Sequence[RecordedNoncompliance],
     tool_errors: Sequence[str],
     *,
+    connection: int,
     txt_name: str | None = None,
 ) -> list[Finding]:
     """
-    Return every finding for a recorded session.
+    Return every finding for the observed `connection` of a recorded session.
 
-    Each connection is judged on its own; when there was more than one, each finding's
-    message names its connection. A frame the recorder could not process is a
-    TOOL_ERROR, since every check on that connection may have missed it.
+    Frames and violations of any other connection belong to other clients and are
+    not judged. A frame the recorder could not process is a TOOL_ERROR, since any
+    check may have missed it.
     """
-    connections = group_connections(frames, noncompliance)
-    findings: list[Finding] = []
-    for connection in connections:
-        judged = run_checks(connection, txt_name=txt_name)
-        if len(connections) > 1:
-            judged = [
-                replace(f, message=f"connection {connection.number}: {f.message}") for f in judged
-            ]
-        findings += judged
-    findings += check_noncompliance(noncompliance)
-    findings += [
-        Finding(RECORDER_CHECK_ID, Verdict.TOOL_ERROR, "-", error) for error in tool_errors
+    record = ConnectionRecord.of(connection, frames, noncompliance)
+    return [
+        *run_checks(record, txt_name=txt_name),
+        *check_noncompliance(record.noncompliance),
+        *(Finding(RECORDER_CHECK_ID, Verdict.TOOL_ERROR, "-", error) for error in tool_errors),
     ]
-    return findings
 
 
 def run_checks(connection: ConnectionRecord, *, txt_name: str | None = None) -> list[Finding]:
     """
-    Run every check on `connection` and return their findings.
+    Run every check on `connection` and return their findings, in check order.
 
     `txt_name` is the TXT `name` the client advertised over mDNS, when the validator
     discovered it. A check that raises reports TOOL_ERROR instead of a verdict.
     """
-    checks: dict[str, Check] = {
+    checks = {
         **CHECKS,
         "CORE-HELLO-007": lambda record: check_hello_name_matches_txt(record, txt_name),
     }
@@ -150,6 +147,7 @@ def run_checks(connection: ConnectionRecord, *, txt_name: str | None = None) -> 
         try:
             findings.extend(check(connection))
         except Exception as exc:  # noqa: BLE001 - a check bug must surface, never pass silently
+            logger.exception("Check %s failed", check_id)
             findings.append(
                 _finding(
                     check_id,
@@ -166,6 +164,7 @@ def check_noncompliance(noncompliance: Sequence[RecordedNoncompliance]) -> list[
 
     The strict server rejects a client at its first violation, so this is the verdict
     of every rule aiosendspin enforces, including those no other check covers. A
+    violation CORE-NOISE-001 already reports is left to it. A
     rejection for something spec 1.0.0-rc1 does not forbid, or for a reason with no
     known spec reference, is the validator's TOOL_ERROR, never the client's FAIL.
     """
@@ -178,7 +177,11 @@ def check_noncompliance(noncompliance: Sequence[RecordedNoncompliance]) -> list[
                 "aiosendspin's strict mode accepted every message",
             )
         ]
-    return [_strict_finding(observation) for observation in noncompliance]
+    return [
+        _strict_finding(observation)
+        for observation in noncompliance
+        if observation.reason != NOISE_PAYLOAD_REASON
+    ]
 
 
 def check_opens_with_client_init(connection: ConnectionRecord) -> list[Finding]:
@@ -264,7 +267,7 @@ def check_noise_message_2(connection: ConnectionRecord) -> list[Finding]:
     """
     message_2 = next(iter(connection.inbound("noise/handshake", phase="cleartext")), None)
     rejection = next(
-        (o for o in connection.noncompliance if o.reason.startswith("Noise message 2 payload")),
+        (o for o in connection.noncompliance if o.reason == NOISE_PAYLOAD_REASON),
         None,
     )
     if message_2 is None:
@@ -708,6 +711,8 @@ CHECKS: dict[str, Check] = {
     "CORE-HELLO-004": check_hello_pair_methods,
     "CORE-HELLO-005": check_hello_unpaired_access,
     "CORE-HELLO-006": check_hello_fields,
+    # run_checks replaces this with the TXT name bound, keeping its place in the order.
+    "CORE-HELLO-007": lambda connection: check_hello_name_matches_txt(connection, None),
     "CORE-STATE-001": check_initial_state_sent,
     "CORE-STATE-002": check_state_available,
     "CORE-STATE-003": check_state_role_objects,

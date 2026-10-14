@@ -7,7 +7,9 @@ outlives the frame, `--verbose` output, or the protocol log.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
@@ -121,14 +123,26 @@ class Recorder:
         self.tool_errors: list[str] = []
         self._secrets: set[str] = set()
         self._verbose = verbose
+        self._changed = asyncio.Event()
 
     def add_secret(self, secret: str) -> None:
         """Redact `secret`, such as a pairing token or an entered code, wherever it appears."""
         if secret:
             self._secrets.add(secret)
 
+    def notify(self) -> None:
+        """Wake every `wait_until`, for a change the recorder does not see, like a disconnect."""
+        self._changed.set()
+
+    async def wait_until(self, condition: Callable[[], bool]) -> None:
+        """Return once `condition` holds, testing it again after every recorded event."""
+        while not condition():
+            self._changed.clear()
+            await self._changed.wait()
+
     def observe_frame(self, frame: ObservedFrame) -> None:
         """Record one frame the server sent or received."""
+        self._changed.set()
         try:
             recorded = self._decode(frame)
         except Exception as exc:  # noqa: BLE001 - aiosendspin would swallow it unreported
@@ -143,6 +157,7 @@ class Recorder:
 
     def observe_noncompliance(self, observation: ObservedNoncompliance) -> None:
         """Record one spec violation the server flagged."""
+        self._changed.set()
         after_frame = next(
             (f.id for f in reversed(self.frames) if f.connection == observation.connection),
             None,

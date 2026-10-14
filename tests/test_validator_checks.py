@@ -360,26 +360,28 @@ class SessionTests(unittest.TestCase):
 
     def test_strict_rejection_fails_with_its_spec_reference(self) -> None:
         reason = "sent a message before the first server/activate"
-        findings = judge_session(self.frames(), [rejection(reason, after_frame=7)], [])
+        findings = judge_session(
+            self.frames(), [rejection(reason, after_frame=7)], [], connection=1
+        )
         [strict] = [f for f in findings if f.id == checks.STRICT_CHECK_ID]
         self.assertIs(strict.verdict, Verdict.FAIL)
         self.assertEqual(strict.spec_ref, "messaging.md:14")
         self.assertEqual(strict.frames, (7,))
 
     def test_no_rejection_passes(self) -> None:
-        findings = judge_session(self.frames(), [], [])
+        findings = judge_session(self.frames(), [], [], connection=1)
         [strict] = [f for f in findings if f.id == checks.STRICT_CHECK_ID]
         self.assertIs(strict.verdict, Verdict.PASS)
 
     def test_rejection_rc1_does_not_make_is_a_tool_error(self) -> None:
         for reason in ("sent an unsolicited management/result", "a reason nobody mapped"):
             with self.subTest(reason=reason):
-                findings = judge_session(self.frames(), [rejection(reason)], [])
+                findings = judge_session(self.frames(), [rejection(reason)], [], connection=1)
                 [strict] = [f for f in findings if f.id == checks.STRICT_CHECK_ID]
                 self.assertIs(strict.verdict, Verdict.TOOL_ERROR)
 
     def test_recorder_errors_are_tool_errors(self) -> None:
-        findings = judge_session(self.frames(), [], ["could not record frame 3"])
+        findings = judge_session(self.frames(), [], ["could not record frame 3"], connection=1)
         [recorder] = [f for f in findings if f.id == checks.RECORDER_CHECK_ID]
         self.assertIs(recorder.verdict, Verdict.TOOL_ERROR)
 
@@ -396,16 +398,23 @@ class SessionTests(unittest.TestCase):
         [time] = [f for f in findings if f.id == "CORE-TIME-001"]
         self.assertIs(time.verdict, Verdict.TOOL_ERROR)
 
-    def test_several_connections_name_theirs(self) -> None:
-        second = [
+    def test_other_connections_are_not_judged(self) -> None:
+        stray = [
             RecordedFrame(**{**vars_of(f), "id": f.id + 100, "connection": 2})
-            for f in self.frames()
+            for f in record(session(client_init={"version": 2})).frames
         ]
-        findings = judge_session(self.frames() + second, [], [])
-        messages = [f.message for f in findings if f.id == "CORE-INIT-001"]
-        self.assertEqual(
-            sorted(m.split(":")[0] for m in messages), ["connection 1", "connection 2"]
+        flagged = RecordedNoncompliance(
+            2, "stray", "sent a message before the first server/activate", 0, 101
         )
+        findings = judge_session(self.frames() + stray, [flagged], [], connection=1)
+        self.assertEqual([f for f in findings if f.verdict is Verdict.FAIL], [])
+        self.assertEqual(len([f for f in findings if f.id == "CORE-INIT-001"]), 1)
+
+    def test_noise_rejection_is_reported_once(self) -> None:
+        steps = session()[:4]
+        flagged = rejection(checks.NOISE_PAYLOAD_REASON, after_frame=4)
+        findings = judge_session(list(record(steps).frames), [flagged], [], connection=1)
+        self.assertEqual([f.id for f in findings if f.verdict is Verdict.FAIL], ["CORE-NOISE-001"])
 
 
 def vars_of(recorded: RecordedFrame) -> dict[str, Any]:
