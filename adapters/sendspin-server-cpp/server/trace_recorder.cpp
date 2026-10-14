@@ -132,6 +132,11 @@ void TraceRecorder::on_written(Connection& connection, int64_t stamp_us) {
         record.artwork_images.push_back(std::move(image));
     }
     connection.unwritten_artwork.clear();
+    for (const std::vector<uint8_t>& audio : connection.unwritten_audio) {
+        record.sent_audio.insert(record.sent_audio.end(), audio.begin(), audio.end());
+        ++record.sent_audio_chunk_count;
+    }
+    connection.unwritten_audio.clear();
     std::fill(connection.time_confirmed.begin(), connection.time_confirmed.end(), true);
     for (std::vector<std::string>& roles : connection.unwritten_stream_starts) {
         connection.record.availability_trace.push_back({true, std::nullopt, true, std::move(roles)});
@@ -232,6 +237,11 @@ void TraceRecorder::on_outbound(Connection& connection, const TracedMessage& mes
         if (*original == AUDIO_CHUNK_MESSAGE_ID && data.size() >= TIMESTAMP_BYTES) {
             record.chunk_timestamps_us.push_back(read_be_int64(data.data()));
         }
+        // The reassembled message without its ID byte: the timestamp, send_ahead, then audio
+        if (*original == AUDIO_CHUNK_MESSAGE_ID && data.size() >= FRAME_PREFIX_BYTES - 1) {
+            connection.unwritten_audio.emplace_back(
+                data.begin() + static_cast<std::ptrdiff_t>(FRAME_PREFIX_BYTES - 1), data.end());
+        }
         return;
     }
     record.events.push_back({false, true, id, {}});
@@ -243,6 +253,13 @@ void TraceRecorder::on_outbound(Connection& connection, const TracedMessage& mes
          id == AUDIO_CHUNK_MESSAGE_ID ? std::optional<size_t>(message.audio_bytes) : std::nullopt});
     if (id == AUDIO_CHUNK_MESSAGE_ID && plaintext.size() >= 1 + TIMESTAMP_BYTES) {
         record.chunk_timestamps_us.push_back(read_be_int64(plaintext.data() + 1));
+    }
+    // The audio follows the header only when the trace's audio length agrees; otherwise none is
+    // recorded and the case fails on its hash
+    if (id == AUDIO_CHUNK_MESSAGE_ID && plaintext.size() >= FRAME_PREFIX_BYTES &&
+        plaintext.size() - FRAME_PREFIX_BYTES == message.audio_bytes) {
+        connection.unwritten_audio.emplace_back(
+            plaintext.begin() + static_cast<std::ptrdiff_t>(FRAME_PREFIX_BYTES), plaintext.end());
     }
 }
 

@@ -28,7 +28,7 @@ from conformance.scenarios import require_scenario
 
 HANDSHAKE_REASON = "client closed the connection before client/init"
 UNSUPPORTED_REASON = (
-    "sendspin-server-cpp server adapter does not support scenario server-initiated-flac"
+    "sendspin-server-cpp server adapter does not support scenario server-initiated-legacy-unencrypted"
 )
 
 # Stand-ins for an adapter CLI: each writes the files named on its command line.

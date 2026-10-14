@@ -96,6 +96,10 @@ struct ConnectionRecord {
     std::optional<bool> latest_available;
     /// The timestamp of each audio chunk sent, in order
     std::vector<int64_t> chunk_timestamps_us;
+    /// The audio every audio chunk written carried after its 13-byte header, concatenated in
+    /// order, and the number of those chunks
+    std::vector<uint8_t> sent_audio;
+    size_t sent_audio_chunk_count{0};
     std::vector<SentFrame> sent_frames;
     /// A stream/end was sent and its write completed
     bool stream_end_written{false};
@@ -143,6 +147,8 @@ private:
         /// Roles of each stream/start traced and not yet covered by a write completion
         std::vector<std::vector<std::string>> unwritten_stream_starts;
         bool stream_end_traced{false};
+        /// The audio of each audio chunk traced and not yet covered by a write completion
+        std::vector<std::vector<uint8_t>> unwritten_audio;
         /// server/state metadata and controller objects traced and not yet covered by a write
         /// completion
         std::vector<std::string> unwritten_metadata;
