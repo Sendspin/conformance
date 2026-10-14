@@ -273,7 +273,7 @@ def check_noise_message_2(connection: ConnectionRecord) -> list[Finding]:
                 _finding(
                     "CORE-NOISE-001",
                     Verdict.NOT_APPLICABLE,
-                    "the validator answered client/init with server/error",
+                    "the validator answered the opening frame with server/error",
                 )
             ]
         return [

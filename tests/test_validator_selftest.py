@@ -3,7 +3,8 @@
 
 Runs the real console script against a known-good client in both connection
 directions over localhost, so the machine checks are proven to give no false FAIL
-or TOOL_ERROR. mDNS is not used: multicast is unreliable on CI runners.
+or TOOL_ERROR, and against a client that skips the handshake, so a fault is shown
+to fail the run. mDNS is not used: multicast is unreliable on CI runners.
 """
 
 import asyncio
@@ -15,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from aiohttp import ClientError
+from aiohttp import ClientError, ClientSession, WSMsgType
 
 from conformance._vendor.aiosendspin.client import ClientListener, SendspinClient
 from conformance._vendor.aiosendspin.models.player import (
@@ -107,6 +108,28 @@ class ValidatorSelfTest(unittest.IsolatedAsyncioTestCase):
         report = await self._finish(validator)
         self.assertEqual(report["connection_mode"], "client-initiated")
 
+    async def test_client_without_a_handshake_fails(self) -> None:
+        port = free_port()
+        validator = await self._start_validator("--port", str(port))
+        hello = {"type": "client/hello", "payload": {"name": "Legacy", "supported_roles": []}}
+
+        async with asyncio.timeout(RUN_TIMEOUT_S), ClientSession() as session:
+            while True:
+                try:
+                    ws = await session.ws_connect(f"ws://127.0.0.1:{port}/sendspin")
+                    break
+                except (ClientError, OSError):
+                    await asyncio.sleep(0.2)
+            await ws.send_str(json.dumps(hello))
+            while (await ws.receive()).type is WSMsgType.TEXT:
+                pass
+            report = await self._report(validator)
+
+        self.assertEqual(validator.returncode, 1)
+        verdicts = {f["id"]: f["verdict"] for f in report["findings"]}
+        self.assertEqual(verdicts["CORE-INIT-001"], "FAIL")
+        self.assertEqual(verdicts["CORE-INIT-002"], "N/A")
+
     async def _start_validator(self, *args: str) -> asyncio.subprocess.Process:
         env = {**os.environ, "HOME": str(self.workdir), "XDG_DATA_HOME": str(self.workdir)}
         return await asyncio.create_subprocess_exec(
@@ -122,18 +145,22 @@ class ValidatorSelfTest(unittest.IsolatedAsyncioTestCase):
             stderr=asyncio.subprocess.STDOUT,
         )
 
-    async def _finish(self, validator: asyncio.subprocess.Process) -> dict:
-        """Wait for the validator, then return its report after checking it is clean."""
+    async def _report(self, validator: asyncio.subprocess.Process) -> dict:
+        """Wait for the validator, check it wrote all three files, and return its report."""
         async with asyncio.timeout(RUN_TIMEOUT_S):
             output, _ = await validator.communicate()
-        transcript = output.decode()
+        self.transcript = output.decode()
         runs = list((self.workdir / "runs").glob("sendspin-validate-*"))
-        self.assertEqual(len(runs), 1, transcript)
+        self.assertEqual(len(runs), 1, self.transcript)
         run = runs[0]
         for name in ("report.json", "report.html", "protocol.log.jsonl"):
-            self.assertTrue((run / name).is_file(), f"{name} missing\n{transcript}")
-        report = json.loads((run / "report.json").read_text())
+            self.assertTrue((run / name).is_file(), f"{name} missing\n{self.transcript}")
+        return json.loads((run / "report.json").read_text())
 
+    async def _finish(self, validator: asyncio.subprocess.Process) -> dict:
+        """Wait for the validator, then return its report after checking it is clean."""
+        report = await self._report(validator)
+        transcript = self.transcript
         faults = [f for f in report["findings"] if f["verdict"] in {"FAIL", "TOOL_ERROR"}]
         self.assertEqual(faults, [], transcript)
         self.assertEqual(validator.returncode, 0, transcript)

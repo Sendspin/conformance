@@ -15,6 +15,7 @@ from enum import StrEnum
 
 from aiohttp import ClientConnectionError, ClientResponseError
 
+from conformance._vendor.aiosendspin.models.types import ConnectionReason
 from conformance._vendor.aiosendspin.noise import Identity, ServerPairingStore
 from conformance._vendor.aiosendspin.server import (
     ClientDisconnectedEvent,
@@ -132,7 +133,10 @@ async def _connect(
         prompter.instruct(f"Connecting to {url}…")
         try:
             async with asyncio.timeout(options.connect_timeout_s):
-                await server.connect_to_client_and_wait(url)
+                # Declaring playback wins admission over a server that holds the client idle.
+                await server.connect_to_client_and_wait(
+                    url, connection_reason=ConnectionReason.PLAYBACK
+                )
         except (ClientConnectionError, ClientResponseError, TimeoutError) as err:
             prompter.instruct(f"Could not connect to {url}: {err or type(err).__name__}")
             return None
@@ -190,6 +194,12 @@ class _Observation:
 
     async def run(self) -> None:
         """Return once the opening exchange is observed, or the connection has ended."""
+        await self._watch()
+        if goodbye := self._first_in("client/goodbye"):
+            reason = (goodbye.payload or {}).get("reason")
+            self._prompter.instruct(f"Your app closed the connection: goodbye {reason!r}.")
+
+    async def _watch(self) -> None:
         if not await self._until(lambda: self._first_in("client/hello") is not None):
             return
         hello = self._first_in("client/hello")
@@ -210,9 +220,6 @@ class _Observation:
         ):
             return
         await self._until(lambda: False, timeout_s=_SETTLE_S)
-        if goodbye := self._first_in("client/goodbye"):
-            reason = (goodbye.payload or {}).get("reason")
-            self._prompter.instruct(f"Your app closed the connection: goodbye {reason!r}.")
 
     async def _until(
         self, condition: Callable[[], bool], *, timeout_s: float = _STEP_TIMEOUT_S
@@ -221,8 +228,12 @@ class _Observation:
         return await _wait_for(lambda: condition() or self._ended(), timeout_s) and condition()
 
     def _ended(self) -> bool:
-        return self._disconnected or any(
-            o.connection == self._connection for o in self._recorder.noncompliance
+        """Whether the observed connection is over, or the server has already redialed."""
+        return (
+            self._disconnected
+            or self._first_out("server/error") is not None
+            or any(o.connection == self._connection for o in self._recorder.noncompliance)
+            or any(f.connection != self._connection for f in self._recorder.frames)
         )
 
     def _first_in(self, message_type: str) -> RecordedFrame | None:
