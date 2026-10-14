@@ -459,6 +459,8 @@ async def _run(args: argparse.Namespace) -> int:
         artwork_channels=artwork_channels,
         state_supported_commands=state_supported_commands,
     )
+    # Lets a server that holds no record for this client activate it unpaired.
+    await client.set_unpaired_access(enabled=True)
 
     client.add_stream_start_listener(on_stream_start)
     client.add_artwork_listener(on_artwork_chunk)
