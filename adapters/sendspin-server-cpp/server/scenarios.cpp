@@ -2,8 +2,11 @@
 
 #include "json_file.h"
 
+#include <stb_image_write.h>
+
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -29,6 +32,13 @@ constexpr const char* SERVER_INITIATED_AUDIO_CHUNK_FRAMING =
 constexpr const char* SERVER_INITIATED_PROTOCOL_BASELINE =
     "server-initiated-protocol-baseline-v1";
 
+constexpr const char* CLIENT_INITIATED_METADATA = "client-initiated-metadata";
+constexpr const char* SERVER_INITIATED_METADATA = "server-initiated-metadata";
+constexpr const char* CLIENT_INITIATED_ARTWORK = "client-initiated-artwork";
+constexpr const char* SERVER_INITIATED_ARTWORK = "server-initiated-artwork";
+constexpr const char* CLIENT_INITIATED_CONTROLLER = "client-initiated-controller";
+constexpr const char* SERVER_INITIATED_CONTROLLER = "server-initiated-controller";
+
 // The scenarios that stream the fixture to a player; each also judges the stream it got.
 const std::set<std::string> PLAYER_STREAM_SCENARIOS = {
     CLIENT_INITIATED_PCM,
@@ -39,7 +49,18 @@ const std::set<std::string> PLAYER_STREAM_SCENARIOS = {
     SERVER_INITIATED_PROTOCOL_BASELINE,
 };
 
+// The role each of the other scenarios exercises, with no audio
+const std::map<std::string, std::string> STATE_SCENARIO_ROLES = {
+    {CLIENT_INITIATED_METADATA, "metadata@v1"},  {SERVER_INITIATED_METADATA, "metadata@v1"},
+    {CLIENT_INITIATED_ARTWORK, "artwork@v1"},    {SERVER_INITIATED_ARTWORK, "artwork@v1"},
+    {CLIENT_INITIATED_CONTROLLER, "controller@v1"}, {SERVER_INITIATED_CONTROLLER, "controller@v1"},
+};
+
 constexpr auto PACED_BLOCK = std::chrono::milliseconds(100);
+// How long the client is given to take in the last message before the server stops, which ends
+// the connection
+constexpr auto CLIENT_SETTLE = std::chrono::milliseconds(500);
+constexpr int ARTWORK_JPEG_QUALITY = 85;
 constexpr auto WRITABLE_WAIT = std::chrono::milliseconds(500);
 constexpr uint8_t FIRST_ROLE_MESSAGE_ID = 4;
 
@@ -69,6 +90,15 @@ std::string joined(const std::vector<std::string>& items) {
         out += (out.empty() ? "" : ", ") + item;
     }
     return out.empty() ? "none" : out;
+}
+
+/// The group the client joined: the server's default group, as every case runs one client
+GroupId case_group(SendspinServer& server) {
+    const std::optional<GroupId> group = server.default_group();
+    if (!group.has_value()) {
+        throw std::runtime_error("the server has no default group");
+    }
+    return *group;
 }
 
 /// Writes frames frames of s16 PCM, waiting while the input is full
@@ -102,14 +132,10 @@ void write_frames(GroupInput& input, const int16_t* pcm, size_t frames, uint8_t 
 void stream_fixture(ServerSession& session, TraceRecorder& recorder, const Fixture& fixture,
                     bool paced, Deadline deadline) {
     SendspinServer& server = session.server();
-    const std::optional<GroupId> group = server.default_group();
-    if (!group.has_value()) {
-        throw std::runtime_error("the server has no default group");
-    }
     InputOptions options;
     options.format = {fixture.sample_rate, fixture.channels, SampleFormat::S16};
     options.kind = InputKind::BUFFERED;
-    OpenedInput opened = server.open_input(*group, options);
+    OpenedInput opened = server.open_input(case_group(server), options);
     if (opened.result != OpenInputResult::OK) {
         throw std::runtime_error("open_input() failed: OpenInputResult " +
                                  std::to_string(static_cast<int>(opened.result)));
@@ -391,10 +417,232 @@ void judge_player_stream(JsonObject assertions, const ConnectionRecord& record) 
                        std::to_string(timestamps.size()) + " audio chunks in timestamp order";
 }
 
+/// Sets the --metadata-* track as the group's current metadata and waits until a server/state
+/// carrying it is on the wire
+void send_metadata(const Args& args, ServerSession& session, TraceRecorder& recorder,
+                   Deadline deadline) {
+    SendspinServer& server = session.server();
+    Metadata metadata;
+    metadata.title = args.metadata_title;
+    metadata.artist = args.metadata_artist;
+    metadata.album_artist = args.metadata_album_artist;
+    metadata.album = args.metadata_album;
+    metadata.artwork_url = args.metadata_artwork_url;
+    metadata.year = static_cast<uint32_t>(args.metadata_year);
+    metadata.track = static_cast<uint32_t>(args.metadata_track);
+    metadata.progress = MetadataProgress{static_cast<uint32_t>(args.metadata_track_progress),
+                                         static_cast<uint32_t>(args.metadata_track_duration),
+                                         static_cast<uint32_t>(args.metadata_playback_speed)};
+    if (!server.set_metadata(case_group(server), metadata, server.now_us())) {
+        throw std::runtime_error("set_metadata() refused the --metadata-* track");
+    }
+    if (!recorder.wait_until(deadline, [&](const ConnectionRecord& record) {
+            return parse_json(record.metadata)["title"] == args.metadata_title;
+        })) {
+        throw std::runtime_error("no server/state carrying the metadata set was written");
+    }
+}
+
+/// A --artwork-width by --artwork-height JPEG of three horizontal bands
+std::vector<uint8_t> encode_artwork(const Args& args) {
+    if (args.artwork_format != "jpeg") {
+        throw std::runtime_error("the adapter encodes --artwork-format jpeg only, not " +
+                                 args.artwork_format);
+    }
+    if (args.artwork_width <= 0 || args.artwork_height <= 0) {
+        throw std::runtime_error("--artwork-width and --artwork-height must be positive");
+    }
+    static const uint8_t BANDS[][3] = {{0xc9, 0x78, 0x3b}, {0x93, 0x52, 0x28}, {0x4b, 0x2f, 0x1b}};
+    const size_t width = static_cast<size_t>(args.artwork_width);
+    const size_t height = static_cast<size_t>(args.artwork_height);
+    std::vector<uint8_t> rgb;
+    rgb.reserve(width * height * 3);
+    for (size_t y = 0; y < height; ++y) {
+        const uint8_t* band = BANDS[y * std::size(BANDS) / height];
+        for (size_t x = 0; x < width; ++x) {
+            rgb.insert(rgb.end(), band, band + 3);
+        }
+    }
+    std::vector<uint8_t> jpeg;
+    const auto append = [](void* context, void* data, int size) {
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        static_cast<std::vector<uint8_t>*>(context)->insert(
+            static_cast<std::vector<uint8_t>*>(context)->end(), bytes, bytes + size);
+    };
+    if (stbi_write_jpg_to_func(append, &jpeg, args.artwork_width, args.artwork_height, 3,
+                               rgb.data(), ARTWORK_JPEG_QUALITY) == 0) {
+        throw std::runtime_error("stb_image_write could not encode the artwork");
+    }
+    return jpeg;
+}
+
+/// Sets the artwork as the group's album image and waits until a transfer of it is on the wire
+void send_artwork(const Args& args, ServerSession& session, TraceRecorder& recorder,
+                  Deadline deadline) {
+    SendspinServer& server = session.server();
+    const std::vector<uint8_t> image = encode_artwork(args);
+    if (!server.set_artwork(case_group(server), ArtworkSource::ALBUM, image, server.now_us())) {
+        throw std::runtime_error("set_artwork() refused the artwork");
+    }
+    if (!recorder.wait_until(deadline, [](const ConnectionRecord& record) {
+            return std::any_of(record.artwork_images.begin(), record.artwork_images.end(),
+                               [](const SentArtwork& sent) { return !sent.bytes.empty(); });
+        })) {
+        const std::optional<ConnectionRecord> record = recorder.snapshot();
+        const bool cleared = record.has_value() && !record->artwork_images.empty();
+        throw std::runtime_error(std::string("no artwork transfer of the image was written in "
+                                             "full") +
+                                 (cleared ? " (only an empty image, clearing the channel, was)"
+                                          : "") +
+                                 "; listener: " + joined(session.listener_reports()));
+    }
+}
+
+/// @return the command the host carries out for a `client/command` name; nullopt for one the
+/// library carries out itself, or none
+std::optional<TransportCommand> transport_command(const std::string& name) {
+    static const std::map<std::string, TransportCommand> COMMANDS = {
+        {"play", TransportCommand::PLAY},
+        {"pause", TransportCommand::PAUSE},
+        {"stop", TransportCommand::STOP},
+        {"next", TransportCommand::NEXT},
+        {"previous", TransportCommand::PREVIOUS},
+        {"repeat_off", TransportCommand::REPEAT_OFF},
+        {"repeat_one", TransportCommand::REPEAT_ONE},
+        {"repeat_all", TransportCommand::REPEAT_ALL},
+        {"shuffle", TransportCommand::SHUFFLE},
+        {"unshuffle", TransportCommand::UNSHUFFLE},
+    };
+    const auto found = COMMANDS.find(name);
+    return found == COMMANDS.end() ? std::nullopt : std::optional(found->second);
+}
+
+/// @return the repeat mode a `server/state` controller `repeat` names; throws for another
+RepeatMode repeat_mode(const std::string& name) {
+    if (name == "off") {
+        return RepeatMode::OFF;
+    }
+    if (name == "one") {
+        return RepeatMode::ONE;
+    }
+    if (name == "all") {
+        return RepeatMode::ALL;
+    }
+    throw std::runtime_error("unknown --controller-repeat " + name);
+}
+
+/// Offers --controller-command with the --controller-repeat and --controller-shuffle state and
+/// waits for the client's client/command. A command the library carries out itself (`volume`,
+/// `mute`, `switch`) is offered by the library, not through the caps.
+void exchange_controller_command(const Args& args, ServerSession& session,
+                                 TraceRecorder& recorder, Deadline deadline) {
+    SendspinServer& server = session.server();
+    ControllerCaps caps;
+    static const std::set<std::string> LIBRARY_COMMANDS = {"volume", "mute", "switch"};
+    const std::optional<TransportCommand> command = transport_command(args.controller_command);
+    if (command.has_value()) {
+        caps.commands.push_back(*command);
+    } else if (LIBRARY_COMMANDS.count(args.controller_command) == 0) {
+        throw std::runtime_error("the adapter cannot offer --controller-command " +
+                                 args.controller_command);
+    }
+    caps.repeat = repeat_mode(args.controller_repeat);
+    static const std::set<std::string> TRUE_VALUES = {"1", "true", "yes", "on"};
+    caps.shuffle = TRUE_VALUES.count(args.controller_shuffle) != 0;
+    if (!server.set_controller_caps(case_group(server), caps)) {
+        throw std::runtime_error("set_controller_caps() refused the caps");
+    }
+    if (!recorder.wait_until(deadline, [](const ConnectionRecord& record) {
+            return record.client_command.has_value();
+        })) {
+        throw std::runtime_error("the client sent no client/command with a controller object");
+    }
+    if (!recorder.wait_until(deadline, [&](const ConnectionRecord& record) {
+            const JsonDocument state = parse_json(record.controller_state);
+            for (JsonVariantConst offered : state["supported_commands"].as<JsonArrayConst>()) {
+                if (offered == args.controller_command) {
+                    return true;
+                }
+            }
+            return false;
+        })) {
+        throw std::runtime_error("no server/state offering " + args.controller_command +
+                                 " in its controller object was written");
+    }
+}
+
+/// The metadata scenarios' fields: the last metadata state written and the first one's bound
+void add_metadata_evidence(JsonObject summary, const ConnectionRecord& record) {
+    const JsonDocument sent = parse_json(record.metadata);
+    JsonObject metadata = summary["metadata"].to<JsonObject>();
+    // The snapshot shape conformance.runner compares, with a field the state omitted as null
+    JsonObject expected = metadata["expected"].to<JsonObject>();
+    for (const char* field :
+         {"title", "artist", "album_artist", "album", "artwork_url", "year", "track"}) {
+        expected[field] = sent[field];
+    }
+    JsonVariantConst progress = sent["progress"];
+    if (progress.is<JsonObjectConst>()) {
+        for (const char* field : {"track_progress", "track_duration", "playback_speed"}) {
+            expected["progress"][field] = progress[field];
+        }
+    } else {
+        expected["progress"] = nullptr;
+    }
+    if (record.first_metadata_state.has_value()) {
+        JsonObject first = metadata["first_state_sent"].to<JsonObject>();
+        first["timestamp_us"] = record.first_metadata_state->timestamp_us;
+        first["bound_us"] = record.first_metadata_state->bound_us;
+    }
+}
+
+/// The artwork scenarios' fields: the last image sent in full, with its channel's configuration
+void add_artwork_evidence(JsonObject summary, const ConnectionRecord& record) {
+    JsonObject artwork = summary["artwork"].to<JsonObject>();
+    const auto sent = std::find_if(record.artwork_images.rbegin(), record.artwork_images.rend(),
+                                   [](const SentArtwork& image) { return !image.bytes.empty(); });
+    if (sent == record.artwork_images.rend()) {
+        artwork["channel"] = nullptr;
+        artwork["encoded_sha256"] = nullptr;
+        artwork["byte_count"] = 0;
+        return;
+    }
+    artwork["channel"] = sent->channel;
+    // The channel's configuration, which the library encoded the image to
+    const JsonDocument stream = parse_json(record.stream_artwork);
+    JsonVariantConst channel = stream["channels"][sent->channel];
+    for (const char* field : {"source", "format", "width", "height"}) {
+        artwork[field] = channel[field];
+    }
+    artwork["encoded_sha256"] = sha256_hex(sent->bytes.data(), sent->bytes.size());
+    artwork["byte_count"] = sent->bytes.size();
+}
+
+/// The controller scenarios' fields: the command received and the last controller state written
+void add_controller_evidence(JsonObject summary, const Args& args, const ConnectionRecord& record) {
+    JsonObject controller = summary["controller"].to<JsonObject>();
+    controller["expected_command"]["command"] = args.controller_command;
+    controller["received_command"] = parse_json(record.client_command).as<JsonVariantConst>();
+    const JsonDocument state = parse_json(record.controller_state);
+    std::vector<std::string> commands;
+    for (JsonVariantConst command : state["supported_commands"].as<JsonArrayConst>()) {
+        commands.emplace_back(command | "");
+    }
+    std::sort(commands.begin(), commands.end());
+    JsonArray supported = controller["supported_commands"].to<JsonArray>();
+    for (const std::string& command : commands) {
+        supported.add(command);
+    }
+    for (const char* field : {"volume", "muted", "repeat", "shuffle"}) {
+        controller[field] = state[field];
+    }
+}
+
 }  // namespace
 
 bool scenario_supported(const std::string& scenario_id) {
-    return PLAYER_STREAM_SCENARIOS.count(scenario_id) != 0;
+    return PLAYER_STREAM_SCENARIOS.count(scenario_id) != 0 ||
+           STATE_SCENARIO_ROLES.count(scenario_id) != 0;
 }
 
 void drive_scenario(const Args& args, ServerSession& session, TraceRecorder& recorder,
@@ -404,11 +652,28 @@ void drive_scenario(const Args& args, ServerSession& session, TraceRecorder& rec
     const std::optional<ConnectionRecord> record = recorder.snapshot();
     const std::vector<std::string> active =
         record.has_value() ? record->active_roles : std::vector<std::string>{};
-    if (std::find(active.begin(), active.end(), "player@v1") == active.end()) {
-        throw std::runtime_error("the server did not activate player@v1 for the client (client/hello "
-                                 "supported_roles it implements: " + joined(client.roles) +
-                                 "; active_roles: " + joined(active) + "; listener: " +
-                                 joined(session.listener_reports()) + ")");
+    const auto state_role = STATE_SCENARIO_ROLES.find(args.scenario_id);
+    const std::string role =
+        state_role == STATE_SCENARIO_ROLES.end() ? "player@v1" : state_role->second;
+    if (std::find(active.begin(), active.end(), role) == active.end()) {
+        throw std::runtime_error("the server did not activate " + role + " for the client "
+                                 "(client/hello supported_roles it implements: " +
+                                 joined(client.roles) + "; active_roles: " + joined(active) +
+                                 "; listener: " + joined(session.listener_reports()) + ")");
+    }
+    if (state_role != STATE_SCENARIO_ROLES.end()) {
+        if (role == "metadata@v1") {
+            send_metadata(args, session, recorder, deadline);
+        } else if (role == "artwork@v1") {
+            send_artwork(args, session, recorder, deadline);
+        } else {
+            exchange_controller_command(args, session, recorder, deadline);
+        }
+        // The server's stop ends the connection, so the client gets time to take in what the
+        // server sent last, and a controller command time to change the state both sides report.
+        std::this_thread::sleep_until(std::min<Clock::time_point>(Clock::now() + CLIENT_SETTLE,
+                                                                  deadline));
+        return;
     }
     // The library holds stream/start until the client is available, but its timeline starts
     // when the input opens, so audio written to a client that becomes available later is lost.
@@ -423,6 +688,17 @@ void drive_scenario(const Args& args, ServerSession& session, TraceRecorder& rec
 
 void add_scenario_evidence(JsonObject summary, const Args& args, const ConnectionRecord& record,
                            const Fixture& fixture) {
+    const auto state_role = STATE_SCENARIO_ROLES.find(args.scenario_id);
+    if (state_role != STATE_SCENARIO_ROLES.end()) {
+        if (state_role->second == "metadata@v1") {
+            add_metadata_evidence(summary, record);
+        } else if (state_role->second == "artwork@v1") {
+            add_artwork_evidence(summary, record);
+        } else {
+            add_controller_evidence(summary, args, record);
+        }
+        return;
+    }
     summary["stream"] = parse_json(record.stream_player).as<JsonVariantConst>();
 
     JsonObject audio = summary["audio"].to<JsonObject>();

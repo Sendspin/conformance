@@ -18,27 +18,13 @@
 #include "sendspin/controller_role.h"
 #include "sendspin/metadata_role.h"
 #include "sendspin/player_role.h"
+#include "sha256.h"
+#include "trace_evidence.h"
 
 #include <ArduinoJson.h>
-#include <openssl/evp.h>
 
 using namespace sendspin;
 
-// sendspin-cpp decrypts and consumes audio chunks inside the library and exposes no public
-// hook for them. PlayerRoleListener::on_audio_write() is the synchronized playback output,
-// with priming and hard-sync silence added and late chunks dropped, so it is not the audio
-// the server transported and cannot stand in for it.
-static const char* const AUDIO_NOT_OBSERVABLE_REASON =
-    "sendspin-cpp exposes no public hook for transported audio chunks, so the adapter cannot "
-    "report the received audio hashes";
-static const char* const CHUNK_FRAMES_NOT_OBSERVABLE_REASON =
-    "sendspin-cpp exposes no public hook for transported audio chunks, so the adapter cannot "
-    "report the raw frames it received";
-// The library writes the protocol messages and consumes the audio chunks itself, with no
-// public trace of either, so none of the baseline's assertions can be observed.
-static const char* const PROTOCOL_EVIDENCE_NOT_OBSERVABLE_REASON =
-    "sendspin-cpp exposes no public hook for the protocol messages it exchanges or the audio "
-    "chunks it receives, so the adapter cannot record protocol evidence";
 // PlayerRole builds its client/state player object internally and offers no setter for the
 // `format` field.
 static const char* const FORMAT_PREFERENCE_NOT_SUPPORTED_REASON =
@@ -78,62 +64,6 @@ struct Args {
     int artwork_height = 256;
 };
 
-class Sha256Hasher {
-public:
-    Sha256Hasher() : ctx_(EVP_MD_CTX_new()) {
-        if (ctx_ == nullptr || EVP_DigestInit_ex(ctx_, EVP_sha256(), nullptr) != 1) {
-            throw std::runtime_error("Failed to initialize SHA-256 context");
-        }
-    }
-
-    Sha256Hasher(const Sha256Hasher&) = delete;
-    Sha256Hasher& operator=(const Sha256Hasher&) = delete;
-
-    ~Sha256Hasher() {
-        if (ctx_ != nullptr) {
-            EVP_MD_CTX_free(ctx_);
-        }
-    }
-
-    void update(const uint8_t* data, size_t len) {
-        if (EVP_DigestUpdate(ctx_, data, len) != 1) {
-            throw std::runtime_error("Failed to update SHA-256 digest");
-        }
-    }
-
-    std::string hexdigest() const {
-        EVP_MD_CTX* copy = EVP_MD_CTX_new();
-        if (copy == nullptr) {
-            throw std::runtime_error("Failed to clone SHA-256 context");
-        }
-        unsigned char hash[EVP_MAX_MD_SIZE];
-        unsigned int hash_len = 0;
-        std::string digest_hex;
-        if (EVP_MD_CTX_copy_ex(copy, ctx_) != 1 ||
-            EVP_DigestFinal_ex(copy, hash, &hash_len) != 1) {
-            EVP_MD_CTX_free(copy);
-            throw std::runtime_error("Failed to finalize SHA-256 digest");
-        }
-        digest_hex = hex_lower(hash, hash_len);
-        EVP_MD_CTX_free(copy);
-        return digest_hex;
-    }
-
-private:
-    static std::string hex_lower(const unsigned char* data, size_t len) {
-        static const char hex[] = "0123456789abcdef";
-        std::string out;
-        out.reserve(len * 2);
-        for (size_t i = 0; i < len; i++) {
-            out.push_back(hex[data[i] >> 4]);
-            out.push_back(hex[data[i] & 0x0F]);
-        }
-        return out;
-    }
-
-    EVP_MD_CTX* ctx_;
-};
-
 struct PeerInfo {
     std::string server_id;
     std::string server_name;
@@ -144,7 +74,6 @@ struct SessionState {
     // The id the client presents on the wire, derived by the library from its identity.
     std::string client_id;
     std::optional<PeerInfo> peer;
-    std::optional<ServerPlayerStreamObject> stream;
 
     int metadata_update_count{0};
     std::optional<ServerMetadataStateObject> metadata;
@@ -319,20 +248,6 @@ static std::optional<SendspinImageFormat> parse_image_format(const std::string& 
     return std::nullopt;
 }
 
-static const char* codec_name(SendspinCodecFormat codec) {
-    switch (codec) {
-        case SendspinCodecFormat::FLAC:
-            return "flac";
-        case SendspinCodecFormat::OPUS:
-            return "opus";
-        case SendspinCodecFormat::PCM:
-            return "pcm";
-        case SendspinCodecFormat::UNSUPPORTED:
-            break;
-    }
-    return "unsupported";
-}
-
 static const char* repeat_mode_name(SendspinRepeatMode mode) {
     switch (mode) {
         case SendspinRepeatMode::OFF:
@@ -396,26 +311,15 @@ public:
     }
 };
 
-class HashingPlayerListener : public PlayerRoleListener {
+class DrainingPlayerListener : public PlayerRoleListener {
 public:
-    HashingPlayerListener(SessionState& state, PlayerRole& player) : state_(state), player_(player) {}
-
     size_t on_audio_write(uint8_t* /*data*/, size_t length, uint32_t /*timeout_ms*/) override {
-        // Drain the player's synchronized playback buffer so the pipeline keeps
-        // flowing, but do not hash it: this buffer is the output of the real-time
-        // sync task, which injects initial-sync silence and soft-sync sample
-        // interpolation, so it is not byte-identical to the transported PCM.
+        // Drain the player's synchronized playback buffer so the pipeline keeps flowing. The
+        // audio evidence comes from the message trace instead: this buffer is the sync task's
+        // output, with initial-sync silence and soft-sync interpolation, not the transported
+        // audio.
         return length;
     }
-
-    void on_stream_start() override {
-        std::lock_guard<std::mutex> lock(state_.mu);
-        state_.stream = player_.get_current_stream_params();
-    }
-
-private:
-    SessionState& state_;
-    PlayerRole& player_;
 };
 
 class HashingMetadataListener : public MetadataRoleListener {
@@ -501,8 +405,12 @@ struct StopOnExit {
     }
 };
 
-static SendspinClientConfig build_client_config(const Args& args) {
+static SendspinClientConfig build_client_config(const Args& args,
+                                                conformance::TraceRecorder& recorder) {
     SendspinClientConfig config;
+    // Every message the client exchanges, as plaintext: the evidence the player and protocol
+    // scenarios report
+    config.message_trace = recorder.callback();
     config.name = args.client_name;
     config.product_name = "sendspin-cpp Conformance Client";
     config.manufacturer = "Sendspin Conformance";
@@ -569,6 +477,7 @@ static ArtworkRoleConfig build_artwork_config(const Args& args) {
 }
 
 static JsonDocument build_summary(const Args& args, const SessionState& state,
+                                  const std::vector<conformance::TraceEvent>& events,
                                   const std::string& status, const std::string& reason) {
     JsonDocument doc;
     doc["status"] = status;
@@ -602,57 +511,34 @@ static JsonDocument build_summary(const Args& args, const SessionState& state,
         doc["server"] = nullptr;
     }
 
-    if (state.stream.has_value()) {
-        auto stream = doc["stream"].to<JsonObject>();
-        if (state.stream->codec.has_value()) {
-            stream["codec"] = codec_name(state.stream->codec.value());
-        } else {
-            stream["codec"] = nullptr;
-        }
-        if (state.stream->sample_rate.has_value()) {
-            stream["sample_rate"] = state.stream->sample_rate.value();
-        } else {
-            stream["sample_rate"] = nullptr;
-        }
-        if (state.stream->channels.has_value()) {
-            stream["channels"] = state.stream->channels.value();
-        } else {
-            stream["channels"] = nullptr;
-        }
-        if (state.stream->bit_depth.has_value()) {
-            stream["bit_depth"] = state.stream->bit_depth.value();
-        } else {
-            stream["bit_depth"] = nullptr;
-        }
-        add_optional_string(stream, "codec_header", state.stream->codec_header);
+    const std::optional<JsonDocument> server_hello =
+        conformance::first_json(events, true, "server/hello");
+    if (server_hello.has_value()) {
+        doc["peer_hello"] = *server_hello;
     } else {
-        doc["stream"] = nullptr;
-    }
-
-    if (is_protocol_baseline_scenario(args.scenario_id)) {
-        // adapters/README.md "Protocol evidence contract": an assertion that cannot be observed
-        // is reported failed, naming the missing hook. The revision is the one
-        // conformance.protocol.SPEC_REVISION names.
-        auto protocol = doc["protocol"].to<JsonObject>();
-        protocol["spec_revision"] = "8c9577ea8719ad082d051ec13cc73ef15ed68948";
-        auto assertions = protocol["assertions"].to<JsonObject>();
-        for (const char* id : {"CORE-001", "CORE-002", "CORE-003", "CORE-004", "PLAYER-001"}) {
-            auto assertion = assertions[id].to<JsonObject>();
-            assertion["status"] = "failed";
-            assertion["detail"] = PROTOCOL_EVIDENCE_NOT_OBSERVABLE_REASON;
-            assertion["events"].to<JsonArray>();
-        }
+        doc["peer_hello"] = nullptr;
     }
 
     if (is_player_scenario(args.scenario_id)) {
+        conformance::add_stream(doc.as<JsonObject>(), events);
+        const conformance::ReceivedAudio received = conformance::received_audio(events);
         auto audio = doc["audio"].to<JsonObject>();
-        audio["audio_chunk_count"] = nullptr;
-        audio["received_encoded_sha256"] = nullptr;
-        audio["received_pcm_sha256"] = nullptr;
-        audio["received_sample_count"] = nullptr;
+        audio["audio_chunk_count"] = received.chunk_count;
+        audio["received_encoded_sha256"] = received.encoded_sha256;
+        if (received.pcm_sha256.has_value()) {
+            audio["received_pcm_sha256"] = *received.pcm_sha256;
+            audio["received_sample_count"] = *received.sample_count;
+        } else {
+            // A stream this adapter does not convert (FLAC, Opus, or PCM it cannot read)
+            audio["received_pcm_sha256"] = nullptr;
+            audio["received_sample_count"] = nullptr;
+        }
         if (is_chunk_framing_scenario(args.scenario_id)) {
-            audio["received_encoded_byte_count"] = nullptr;
-            audio["received_chunk_frames"] = nullptr;
+            audio["received_encoded_byte_count"] = received.encoded_byte_count;
+            conformance::add_received_chunk_frames(audio, events);
+        }
+        if (is_protocol_baseline_scenario(args.scenario_id)) {
+            conformance::add_protocol_evidence(doc.as<JsonObject>(), events, received);
         }
     } else if (is_metadata_scenario(args.scenario_id)) {
         auto metadata = doc["metadata"].to<JsonObject>();
@@ -725,9 +611,12 @@ static JsonDocument build_summary(const Args& args, const SessionState& state,
     return doc;
 }
 
-static int emit_summary(const Args& args, const SessionState& state, const std::string& status,
+static int emit_summary(const Args& args, const SessionState& state,
+                        const conformance::TraceRecorder& recorder, const std::string& status,
                         const std::string& reason) {
-    auto summary = build_summary(args, state, status, reason);
+    auto summary =
+        build_summary(args, state, conformance::session_events(recorder.snapshot()), status,
+                      reason);
     write_json_file(args.summary, summary);
     std::string out;
     serializeJson(summary, out);
@@ -740,7 +629,9 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
     SendspinClient::set_log_level(level);
 
     SessionState state;
-    SendspinClientConfig config = build_client_config(args);
+    // Declared before the client, so it outlives the protocol task that calls into it
+    conformance::TraceRecorder recorder;
+    SendspinClientConfig config = build_client_config(args, recorder);
     SendspinClient client(std::move(config));
     AlwaysReadyNetworkProvider network_provider;
     client.set_network_provider(&network_provider);
@@ -748,7 +639,7 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
     // client is unpaired with every server and takes part only under unpaired access.
     client.set_unpaired_access_enabled(true);
 
-    std::unique_ptr<HashingPlayerListener> player_listener;
+    std::unique_ptr<DrainingPlayerListener> player_listener;
     std::unique_ptr<HashingMetadataListener> metadata_listener;
     std::unique_ptr<HashingControllerListener> controller_listener;
     std::unique_ptr<HashingArtworkListener> artwork_listener;
@@ -756,7 +647,7 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
     if (is_player_scenario(args.scenario_id)) {
         auto player_config = build_player_config(args);
         auto& player = client.add_player(std::move(player_config));
-        player_listener = std::make_unique<HashingPlayerListener>(state, player);
+        player_listener = std::make_unique<DrainingPlayerListener>();
         player.set_listener(player_listener.get());
     }
 
@@ -783,7 +674,7 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
     // by the library rather than returned.
     if (!client.start()) {
         SessionState empty;
-        return emit_summary(args, empty, "error", "Failed to start client roles");
+        return emit_summary(args, empty, recorder, "error", "Failed to start client roles");
     }
     StopOnExit stop_on_exit{client};
     state.client_id = client.client_id();
@@ -793,7 +684,7 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
     if (args.initiator_role == "client") {
         if (!connect_url.has_value()) {
             SessionState empty;
-            return emit_summary(args, empty, "error", "No transport path was configured");
+            return emit_summary(args, empty, recorder, "error", "No transport path was configured");
         }
         client.connect_to(connect_url.value());
     }
@@ -838,26 +729,19 @@ static int run_session(const Args& args, const std::optional<std::string>& conne
             client.loop();
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        if (is_protocol_baseline_scenario(args.scenario_id)) {
-            return emit_summary(args, state, "error", PROTOCOL_EVIDENCE_NOT_OBSERVABLE_REASON);
-        }
         if (is_state_format_scenario(args.scenario_id)) {
-            return emit_summary(args, state, "error", FORMAT_PREFERENCE_NOT_SUPPORTED_REASON);
+            return emit_summary(args, state, recorder, "error",
+                                FORMAT_PREFERENCE_NOT_SUPPORTED_REASON);
         }
-        if (is_chunk_framing_scenario(args.scenario_id)) {
-            return emit_summary(args, state, "error", CHUNK_FRAMES_NOT_OBSERVABLE_REASON);
-        }
-        if (is_player_scenario(args.scenario_id)) {
-            return emit_summary(args, state, "error", AUDIO_NOT_OBSERVABLE_REASON);
-        }
-        return emit_summary(args, state, "ok", "");
+        return emit_summary(args, state, recorder, "ok", "");
     }
 
     if (!had_handshake) {
-        return emit_summary(args, state, "error", "Timed out waiting for server connection");
+        return emit_summary(args, state, recorder, "error",
+                            "Timed out waiting for server connection");
     }
 
-    return emit_summary(args, state, "error", "Timed out waiting for server disconnect");
+    return emit_summary(args, state, recorder, "error", "Timed out waiting for server disconnect");
 }
 
 int main(int argc, char* argv[]) {
@@ -869,9 +753,11 @@ int main(int argc, char* argv[]) {
             wait_for_server_url(args.registry, args.server_name, args.timeout_seconds);
         if (server_url.empty()) {
             SessionState empty;
+            conformance::TraceRecorder no_trace;
             return emit_summary(
                 args,
                 empty,
+                no_trace,
                 "error",
                 "Timed out waiting for server " + args.server_name);
         }

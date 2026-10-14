@@ -13,9 +13,9 @@ Current checked-in adapters:
 - `adapters/sendspin-go/`: real Go client adapter source for the current client scenario set
 - `adapters/SendspinKit/client/`: real Swift client adapter source for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios
 - `adapters/sendspin-js/client.mjs`: real Node.js client adapter for client-initiated PCM plus the server-initiated PCM, metadata, and controller scenarios, driving the public `SendspinCore` SDK over an adapter-owned WebSocket
-- `adapters/sendspin-cpp/client/`: real C++ client adapter source for the server-initiated metadata, artwork, and controller scenarios, built on the public `SendspinClient` API only. sendspin-cpp exposes no public hook for transported audio chunks, so the player scenarios report the negotiated stream and then fail with that reason instead of an audio hash. It takes part as a player in the protocol-baseline and `client-initiated-state-format-*` scenarios too, then fails naming the hook it lacks: sendspin-cpp has no public trace of the messages it exchanges, and no public way to set the `client/state` player `format`
+- `adapters/sendspin-cpp/client/`: real C++ client adapter source for the client- and server-initiated PCM, metadata, artwork and controller scenarios plus the server-initiated FLAC, OPUS, 24-bit PCM, legacy-unencrypted, protocol-baseline and audio-chunk-framing scenarios, built on the public `SendspinClient` API only. Its audio and protocol evidence comes from the library's message trace (`SendspinClientConfig::message_trace`, built with `SENDSPIN_ENABLE_MESSAGE_TRACE`), which reports each message's plaintext, inbound after decryption and outbound immediately before encryption, and for each player audio chunk the encoded audio it carried (`SendspinTracedMessage::audio_bytes`). Its PCM hash is computed from the traced chunk payloads, not from the library's player output; FLAC and OPUS are not decoded, so their decoded audio is not judged. It takes part as a player in the `client-initiated-state-format-*` scenarios too, then fails: sendspin-cpp has no public way to set the `client/state` player `format`
 - `adapters/sendspin-rs/client/`: real Rust client adapter source for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios
-- `adapters/sendspin-server-cpp/server/`: real C++ server adapter source for the client- and server-initiated PCM, 24-bit PCM, protocol-baseline, audio-chunk-framing and `client-initiated-state-format-pcm` scenarios, built on the public `SendspinServer` API only. All of its evidence comes from the library's message trace (`ServerConfig::trace` with `trace_writes`), which reports each message's plaintext, inbound after decryption and outbound immediately before encryption, and each completed write
+- `adapters/sendspin-server-cpp/server/`: real C++ server adapter source for the client- and server-initiated PCM, 24-bit PCM, protocol-baseline, audio-chunk-framing, metadata, artwork and controller scenarios and `client-initiated-state-format-pcm`, built on the public `SendspinServer` API only. All of its evidence comes from the library's message trace (`ServerConfig::trace` with `trace_writes`), which reports each message's plaintext, inbound after decryption and outbound immediately before encryption, and each completed write
 - `src/conformance/adapters/placeholder.py`: fail-fast placeholder for unsupported roles
 
 Current placeholders in the matrix are modeled in `src/conformance/implementations.py` and fail immediately with a summary explaining why the role is unavailable for a scenario.
@@ -212,6 +212,10 @@ The matrix requires both sides to name the same `timestamp_us` before applying
 the bound, so the two are known to describe the same state. If they differ,
 nothing is judged.
 
+The sendspin-server-cpp server adapter takes `bound_us` from the stamp of the
+library's first write-completion trace entry after that state, which is
+`now_us()` as the write was handed to the kernel.
+
 ## Protocol evidence contract
 
 Protocol scenarios are authoritative conformance tests, not audio-rendering tests. For
@@ -303,6 +307,13 @@ hands over with the audio and which the frame carries in bytes 1-8.
 The sendspin-server-cpp adapter reports the count the library itself gives with each
 traced audio chunk (`TracedMessage::audio_bytes`), counted from the audio frames it
 packed into that chunk rather than from the message's size.
+The sendspin-cpp adapter reports the count the library gives with each traced inbound
+audio chunk (`SendspinTracedMessage::audio_bytes`). Unlike the server's, it is not
+counted at runtime: it is the message's size less the fixed 13-byte offset at which the
+library's player starts reading the audio, so the client-side header check confirms only
+that fixed offset. The library traces an inbound message once reassembled, so a
+fragmented audio chunk would read as one frame; no chunk in this scenario is large
+enough to be fragmented.
 
 The server's `audio` block adds:
 
