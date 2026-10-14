@@ -163,3 +163,4 @@ The generated site includes:
 - `scripts/run_all.py`: build + run + report orchestration
 - `scripts/merge_results.py`: merges multiple host result directories into one report
 - `.github/workflows/publish.yml`: macOS GitHub Pages publishing
+- `.github/workflows/ci.yml`: Linux unit tests

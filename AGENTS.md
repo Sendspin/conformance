@@ -169,6 +169,13 @@ GitHub Actions should still publish artifacts and GitHub Pages even when the con
 
 Build/setup failures are different: those can still be real workflow failures.
 
+Two workflows run on pull requests and pushes to `main`:
+
+- `publish.yml` builds every implementation, runs the full matrix on macOS and publishes Pages. Only changes that can alter the matrix or the site start it: `src/conformance/**`, `adapters/**`, `scripts/**`, `pyproject.toml` and the workflow itself. The client validator (`src/conformance/validator/**`), its vendored aiosendspin (`src/conformance/_vendor/**`) and `scripts/vendor_aiosendspin.py` are excluded, because the matrix never runs them. Changes to `tests/`, docs or other workflows do not start it either. The nightly schedule and manual dispatch always run it.
+- `ci.yml` runs `tests/` on Linux whenever `src/`, `tests/`, `scripts/`, `pyproject.toml` or the workflow itself changes. Checks that need no implementation clones or macOS toolchains belong here.
+
+A new path the matrix depends on must be added to `publish.yml`'s path filters, or changes to it will merge without a matrix run.
+
 The published workflow currently runs on `macos-latest` and publishes one matrix without host-specific sections in the UI. Internal environment metadata may still exist in raw artifacts for build-log lookup or local merged runs, but the public report should read as one authoritative matrix.
 
 ### Regression detection
@@ -247,6 +254,7 @@ remote, so any such list goes stale on the next merge.
 ### CI
 
 - `.github/workflows/publish.yml`: macOS build + run + Pages publishing
+- `.github/workflows/ci.yml`: Linux unit tests
 - `scripts/detect_regressions.py`: compares local results against the published baseline to detect regressions
 
 ## Standard commands
@@ -358,7 +366,8 @@ Typical minimum:
 
 `tests/` holds stdlib `unittest` coverage for harness rules that the matrix
 cannot reach on a machine without every toolchain installed. It needs no test
-dependency beyond the package itself and is not wired into CI.
+dependency beyond the package itself and runs in `ci.yml`. A test that needs an
+implementation clone or a macOS toolchain skips itself when that is missing.
 
 If you changed CI, read `.github/workflows/publish.yml` afterward and confirm:
 
