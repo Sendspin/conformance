@@ -26,7 +26,7 @@ Current scenarios:
 - `sendspin-dotnet`: real client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
 - `SendspinKit`: real Swift client adapter for client-initiated PCM, Flac, and Opus plus the server-initiated PCM, Flac, Opus, metadata, artwork, and controller scenarios; server placeholer
 - `sendspin-cpp`: real C++ client adapter for client-initiated PCM plus the server-initiated PCM, 24-bit PCM, metadata, artwork, controller, FLAC, OPUS, legacy-unencrypted, protocol-baseline and audio-chunk-framing scenarios, evidenced from the library's message trace; it joins the `client-initiated-state-format-*` scenarios as a player but fails them, since the library exposes no way to set the `client/state` player `format`; server placeholder
-- `sendspin-go`: real Go client adapter across the PCM, FLAC, metadata, artwork, and controller scenarios (no OPUS yet); server placeholder, since its server library has no RC1 `client/init` or Noise handshake
+- `sendspin-go`: not currently tested. Both roles are placeholders: the server library has no RC1 `client/init` or Noise handshake, and the Go client adapter source in `adapters/sendspin-go/` is kept but no longer built or run
 - `sendspin-js`: real Node.js client adapter driving the public `SendspinCore` SDK over an adapter-owned WebSocket; covers client-initiated PCM plus the server-initiated PCM, metadata, and controller scenarios (FLAC/OPUS decode and `artwork@v1` are not exposed by the public SDK in a headless Node environment); server placeholder
 - `sendspin-jvm`: real JVM client adapter written in Kotlin, for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
 - `sendspin-rs`: real Rust client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
@@ -36,7 +36,7 @@ The OPUS scenario is currently exercised only by the `SendspinKit` and `sendspin
 
 The `client-initiated-state-format-*` scenarios have no capability flag of their own: RC1 gives every player the `client/state` `format` preference, so a client that never sends one shows as a failed case. The FLAC variant still needs a client that can list FLAC (`supports_flac`). The `aiosendspin` and `SendspinKit` client adapters drive them today.
 
-The `client-initiated-metadata`, `client-initiated-artwork` and `client-initiated-controller` scenarios have no capability flag of their own either: RC1 requires every server to support client-initiated connections, whichever roles the client brings. The `aiosendspin`, `sendspin-dotnet`, `SendspinKit` and `sendspin-cpp` client adapters drive all three over the outbound path they use for `client-initiated-pcm`. The `sendspin-js` client adapter drives the metadata and controller scenarios the same way; it declares no `artwork` role family, so the harness marks its `client-initiated-artwork` cases unsupported before launching anything. The `sendspin-go` and `sendspin-rs` client adapters have an outbound path for player sessions only, so their cases fail as a harness gap rather than being left out.
+The `client-initiated-metadata`, `client-initiated-artwork` and `client-initiated-controller` scenarios have no capability flag of their own either: RC1 requires every server to support client-initiated connections, whichever roles the client brings. The `aiosendspin`, `sendspin-dotnet`, `SendspinKit` and `sendspin-cpp` client adapters drive all three over the outbound path they use for `client-initiated-pcm`. The `sendspin-js` client adapter drives the metadata and controller scenarios the same way; it declares no `artwork` role family, so the harness marks its `client-initiated-artwork` cases unsupported before launching anything. The `sendspin-rs` client adapter has an outbound path for player sessions only, so its cases fail as a harness gap rather than being left out.
 
 The `server-initiated-audio-chunk-framing` scenario has no capability flag of its own either. A client adapter that is handed parsed chunks and never sees a raw frame reports that, and its case fails as a harness gap rather than being left out. Only the `aiosendspin` adapters, the `sendspin-server-cpp` server and the `sendspin-rs` and `sendspin-cpp` clients observe raw frames today.
 
@@ -154,7 +154,7 @@ The generated site includes:
 ## Repository layout
 
 - `src/conformance/`: runner, adapters, fixture decoding, report generation
-- `adapters/sendspin-go/`: Go client adapter source
+- `adapters/sendspin-go/`: Go client adapter source, kept but not currently built or tested
 - `adapters/sendspin-server-cpp/server/`: C++ server adapter source
 - `adapters/sendspin-dotnet/`: `.NET` client adapter source
 - `adapters/README.md`: CLI contract for adapters
