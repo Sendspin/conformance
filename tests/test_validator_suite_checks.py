@@ -43,9 +43,7 @@ class Connection:
         return self._add("in", message_type, payload, **kw)
 
     def event(self, kind: EventKind, psk_category: str | None = None) -> None:
-        self.events.append(
-            RecordedEvent(1, CLIENT_ID, kind, self.last, psk_category=psk_category)
-        )
+        self.events.append(RecordedEvent(1, CLIENT_ID, kind, self.last, psk_category=psk_category))
 
     def opening(
         self, *, keyed: str | None = "sentinel", unpaired: bool = True, mismatch: bool = False

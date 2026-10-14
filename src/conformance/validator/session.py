@@ -139,9 +139,7 @@ async def _run_suites(
     opening = ConnectionRecord.of(result.connection, recorder.frames, recorder.noncompliance)
     init = next(iter(opening.inbound("client/init", phase="cleartext")), None)
     client_id = (init.payload or {}).get("client_id") if init is not None else None
-    if not isinstance(client_id, str) or not any(
-        e.client_id == client_id for e in recorder.events
-    ):
+    if not isinstance(client_id, str) or not any(e.client_id == client_id for e in recorder.events):
         prompter.instruct("The suites need a client that completes the opening; none ran.")
         return result
     link = Link(

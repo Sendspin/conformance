@@ -278,9 +278,7 @@ def check_pair_init(record: ConnectionRecord, since: int) -> list[Finding]:
     if payload.get("pairing_index") != expected_index or isinstance(
         payload.get("pairing_index"), bool
     ):
-        problems.append(
-            f"pairing_index is {payload.get('pairing_index')!r}, not {expected_index}"
-        )
+        problems.append(f"pairing_index is {payload.get('pairing_index')!r}, not {expected_index}")
     if "commit_B" in payload:
         problems.append("it carries commit_B, which only the dynamic pairing code flow sends")
     if problems:
@@ -493,9 +491,7 @@ def check_unpair_goodbye(record: ConnectionRecord) -> list[Finding]:
     if unpair is None:
         return [_n_a("POSTPAIR-003", "the validator sent no server/unpair")]
     keyed = [
-        e
-        for e in record.events
-        if e.kind is EventKind.KEYED and (e.after_frame or 0) < unpair.id
+        e for e in record.events if e.kind is EventKind.KEYED and (e.after_frame or 0) < unpair.id
     ]
     if not keyed or keyed[-1].psk_category != LONG_TERM:
         return [_n_a("POSTPAIR-003", "the session was not keyed by the long-term PSK")]
@@ -570,7 +566,11 @@ def check_restart_keeps_output_delay(
         return [_n_a("POSTPAIR-006", "the client reported no player output_delay_ms before")]
     last, expected = reported[-1]
     first = next(
-        ((f, delay) for f in after.inbound("client/state") if (delay := _output_delay(f)) is not None),
+        (
+            (f, delay)
+            for f in after.inbound("client/state")
+            if (delay := _output_delay(f)) is not None
+        ),
         None,
     )
     if first is None:
@@ -627,7 +627,11 @@ def _judge_keying(
     message_1 = next(iter(record.outbound("noise/handshake", phase="cleartext")), None)
     if keying is None:
         message_2 = next(iter(record.inbound("noise/handshake", phase="cleartext")), None)
-        if message_1 is None or record.rejected or any(f.phase == "transport" for f in record.frames):
+        if (
+            message_1 is None
+            or record.rejected
+            or any(f.phase == "transport" for f in record.frames)
+        ):
             return [_not_reached(check_id)]
         if message_2 is None:
             return [
@@ -793,9 +797,11 @@ def _pairing_activation(record: ConnectionRecord, since: int) -> RecordedFrame |
     return _first(
         record,
         since,
-        lambda f: _out(f, "server/activate")
-        and "pairing" in _activities(f.payload or {})
-        and ((f.payload or {}).get("pairing") or {}).get("method") == "pairing_psk",
+        lambda f: (
+            _out(f, "server/activate")
+            and "pairing" in _activities(f.payload or {})
+            and ((f.payload or {}).get("pairing") or {}).get("method") == "pairing_psk"
+        ),
     )
 
 
@@ -827,10 +833,12 @@ def _first_inbound(
     return _first(
         record,
         after.id,
-        lambda f: f.inbound
-        and f.phase == "transport"
-        and f.type not in {"client/time"}
-        and (types is None or f.type in types),
+        lambda f: (
+            f.inbound
+            and f.phase == "transport"
+            and f.type not in {"client/time"}
+            and (types is None or f.type in types)
+        ),
     )
 
 
