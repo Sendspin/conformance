@@ -72,7 +72,6 @@ def _conformance_client_repo_path(key: str) -> str | None:
         "sendspin-js": "adapters/sendspin-js/client.mjs",
         "sendspin-rs": "adapters/sendspin-rs/client/src/main.rs",
         "sendspin-cpp": "adapters/sendspin-cpp/client/main.cpp",
-        "sendspin-go": "adapters/sendspin-go/client/main.go",
     }.get(key)
 
 

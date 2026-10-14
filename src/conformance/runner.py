@@ -9,7 +9,6 @@ import os
 import re
 import shutil
 import sys
-from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,21 +56,6 @@ _STREAMED_ROLE_FAMILIES = frozenset({"player", "artwork"})
 
 # "error" as a word of its own, so a dependency named quick-error or thiserror is not one.
 _BUILD_ERROR_LINE = re.compile(r"(?<![\w-])error(?![\w-])", re.IGNORECASE)
-
-
-def _case_resource_keys(
-    *,
-    scenario_id: str,
-    server_impl: str,
-    client_impl: str,
-) -> tuple[str, ...]:
-    """Return shared resources that make a case incompatible with parallel peers."""
-    keys: list[str] = []
-    if client_impl == "sendspin-go":
-        # The Go adapter is stable under the matrix, but local parallel runs can stall before
-        # the paired server writes its ready file. Serialize Go client cases to match CI.
-        keys.append("sendspin-go-client-runtime")
-    return tuple(keys)
 
 
 @dataclass(frozen=True)
@@ -1671,7 +1655,6 @@ async def run_matrix(
                 slot_index += 1
 
     semaphore = asyncio.Semaphore(jobs)
-    resource_locks: dict[str, asyncio.Lock] = {}
 
     async def _run_limited(
         *,
@@ -1681,27 +1664,18 @@ async def run_matrix(
         client_impl: str,
     ) -> dict[str, Any]:
         async with semaphore:
-            async with AsyncExitStack() as stack:
-                for resource_key in _case_resource_keys(
-                    scenario_id=scenario_id,
-                    server_impl=server_impl,
-                    client_impl=client_impl,
-                ):
-                    await stack.enter_async_context(
-                        resource_locks.setdefault(resource_key, asyncio.Lock())
-                    )
-                result = await run_case(
-                    results_dir=data_dir,
-                    scenario_id=scenario_id,
-                    server_impl=server_impl,
-                    client_impl=client_impl,
-                    timeout_s=timeout_s,
-                    slot_index=slot_index,
-                    build_index=build_index,
-                    environment_id=environment_id,
-                    environment_name=environment_name,
-                )
-                return result.__dict__
+            result = await run_case(
+                results_dir=data_dir,
+                scenario_id=scenario_id,
+                server_impl=server_impl,
+                client_impl=client_impl,
+                timeout_s=timeout_s,
+                slot_index=slot_index,
+                build_index=build_index,
+                environment_id=environment_id,
+                environment_name=environment_name,
+            )
+            return result.__dict__
 
     results = await asyncio.gather(
         *[
