@@ -226,6 +226,14 @@ void TraceRecorder::on_outbound_json(Connection& connection, const std::string& 
         if (!record.activation.has_value()) {
             record.activation = text;
         }
+        // A later server/activate that omits active_roles keeps the ones in force
+        JsonVariantConst active_roles = doc["payload"]["active_roles"];
+        if (active_roles.is<JsonArrayConst>()) {
+            record.active_roles.clear();
+            for (JsonVariantConst role : active_roles.as<JsonArrayConst>()) {
+                record.active_roles.emplace_back(role | "");
+            }
+        }
     } else if (type == "group/update") {
         if (record.activation.has_value()) {
             record.group_updates.push_back(text);

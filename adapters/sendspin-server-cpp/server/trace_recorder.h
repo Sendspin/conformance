@@ -65,6 +65,8 @@ struct ConnectionRecord {
     std::optional<std::string> client_hello;
     /// The first server/activate sent
     std::optional<std::string> activation;
+    /// The active_roles the server/activate messages sent so far leave in force
+    std::vector<std::string> active_roles;
     /// Every group/update sent after the first server/activate
     std::vector<std::string> group_updates;
     std::vector<AvailabilityEntry> availability_trace;

@@ -399,9 +399,15 @@ bool scenario_supported(const std::string& scenario_id) {
 
 void drive_scenario(const Args& args, ServerSession& session, TraceRecorder& recorder,
                     const Fixture& fixture, const ClientInfo& client, Deadline deadline) {
-    if (std::find(client.roles.begin(), client.roles.end(), "player@v1") == client.roles.end()) {
-        throw std::runtime_error("the server did not activate player@v1 for the client (active "
-                                 "roles: " + joined(client.roles) + "; listener: " +
+    // The client took the connection after the activation it answered, so the trace already
+    // holds the roles that activation left active.
+    const std::optional<ConnectionRecord> record = recorder.snapshot();
+    const std::vector<std::string> active =
+        record.has_value() ? record->active_roles : std::vector<std::string>{};
+    if (std::find(active.begin(), active.end(), "player@v1") == active.end()) {
+        throw std::runtime_error("the server did not activate player@v1 for the client (client/hello "
+                                 "supported_roles it implements: " + joined(client.roles) +
+                                 "; active_roles: " + joined(active) + "; listener: " +
                                  joined(session.listener_reports()) + ")");
     }
     // The library holds stream/start until the client is available, but its timeline starts

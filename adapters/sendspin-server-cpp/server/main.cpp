@@ -216,7 +216,8 @@ int run(const Args& args, Clock::time_point started) {
         peer["name"] = client->name;
         peer["supported_roles"] = summary["peer_hello"]["payload"]["supported_roles"];
         JsonArray active_roles = peer["active_roles"].to<JsonArray>();
-        for (const std::string& role : client->roles) {
+        for (const std::string& role :
+             record.has_value() ? record->active_roles : std::vector<std::string>{}) {
             active_roles.add(role);
         }
         if (record.has_value()) {
