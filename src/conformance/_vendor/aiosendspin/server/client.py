@@ -147,6 +147,12 @@ class SendspinClient:
 
     def flag_noncompliance(self, reason: str) -> None:
         """Log a tolerated spec violation once, or reject it when the server is strict."""
+        connection = self._connection
+        self._server._observe_noncompliance(  # noqa: SLF001
+            connection.connection_number if connection is not None else None,
+            self._client_id,
+            reason,
+        )
         subject = noncompliance_subject(self._description)
         if not self._server.allow_noncompliant_clients:
             self._logger.error("rejecting %s: %s", subject, reason)

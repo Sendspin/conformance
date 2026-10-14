@@ -232,6 +232,29 @@ class ObservedFrame:
 FrameObserver = Callable[[ObservedFrame], None]
 
 
+@dataclass(frozen=True, slots=True)
+class ObservedNoncompliance:
+    """One spec violation the server flagged, as handed to a ``NoncomplianceObserver``.
+
+    A server with ``allow_noncompliant_clients=False`` rejects the client right after
+    reporting it; a lenient one tolerates it and reports every occurrence.
+    """
+
+    connection: int | None
+    """Number of the offending connection, as in ``ObservedFrame``, or ``None`` when the
+    client had no connection."""
+    client_id: str | None
+    """The client's id, or ``None`` until the handshake has named it."""
+    reason: str
+    """What the client did wrong, in the words the server logs."""
+    monotonic_us: int
+    """Server clock time when the violation was flagged."""
+
+
+# Called synchronously where the violation is flagged, so it must be cheap and must not block.
+NoncomplianceObserver = Callable[[ObservedNoncompliance], None]
+
+
 logger = logging.getLogger(__name__)
 
 MAX_PENDING_MSG = 4096  # Default queue cap (per role queues, and global control queues)
@@ -405,7 +428,7 @@ class SendspinConnection:
         # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
         self._sent_psk_pair_init = False
         self._connection_done = asyncio.Event()
-        # Taken when the handshake starts, and only for a server with a frame observer.
+        # Taken when the handshake starts, and only for a server with an observer.
         self._connection_number: int | None = None
         self._frame_observer_failed = False
         self._transport: Transport | None = None
@@ -1230,8 +1253,13 @@ class SendspinConnection:
         ``HandshakeAbortedError``.
         """
         frame_tap = None
-        if self._server._frame_observer is not None:  # noqa: SLF001
+        observed = (
+            self._server._frame_observer is not None  # noqa: SLF001
+            or self._server._noncompliance_observer is not None  # noqa: SLF001
+        )
+        if observed:
             self._connection_number = next(self._server._connection_numbers)  # noqa: SLF001
+        if self._server._frame_observer is not None:  # noqa: SLF001
             frame_tap = self._observe_frame
         first_text = await receive_client_init_frame(raw, frame_tap=frame_tap)
         if _peek_message_type(first_text) == "client/hello" and self._pairing_attempt is None:
@@ -1456,6 +1484,9 @@ class SendspinConnection:
         if self._client is not None:
             self._client.flag_noncompliance(reason)
             return
+        self._server._observe_noncompliance(  # noqa: SLF001
+            self._connection_number, self._client_id, reason
+        )
         subject = noncompliance_subject(self._hello_description)
         if not self._server.allow_noncompliant_clients:
             self._logger.error("rejecting %s: %s", subject, reason)
@@ -1763,6 +1794,11 @@ class SendspinConnection:
             )
             return False
         return True
+
+    @property
+    def connection_number(self) -> int | None:
+        """Number of this connection as reported to the server's observers, if it has one."""
+        return self._connection_number
 
     @property
     def _playback_capable(self) -> bool:

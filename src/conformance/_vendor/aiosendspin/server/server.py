@@ -44,7 +44,12 @@ from conformance._vendor.aiosendspin.noise.trust_store import ServerPairingStore
 from conformance._vendor.aiosendspin.util import create_task, get_local_ip, warn_deprecated
 
 from .client import SendspinClient
-from .connection import FrameObserver, SendspinConnection
+from .connection import (
+    FrameObserver,
+    NoncomplianceObserver,
+    ObservedNoncompliance,
+    SendspinConnection,
+)
 from .group import SendspinGroup
 from .roles.visualizer.v1 import warn_pitch_deprecated
 
@@ -190,7 +195,7 @@ class SendspinServer:
     _pending_connections: set[SendspinConnection]
     """Incoming connections that have not finished their handshake/message loop yet."""
 
-    def __init__(  # noqa: PLR0915
+    def __init__(  # noqa: PLR0913, PLR0915
         self,
         loop: asyncio.AbstractEventLoop,
         identity: Identity,
@@ -203,6 +208,7 @@ class SendspinServer:
         languages: Sequence[str] | None = None,
         clock: Clock | None = None,
         frame_observer: FrameObserver | None = None,
+        noncompliance_observer: NoncomplianceObserver | None = None,
     ) -> None:
         """Initialize a Sendspin server instance.
 
@@ -227,6 +233,11 @@ class SendspinServer:
                 receives, handshake included, for protocol tracing; or None. A legacy
                 unencrypted connection reports only its first frame. It runs
                 synchronously on the connection's I/O path, so it must be cheap and must
+                not block. An exception it raises is logged and does not affect the
+                connection.
+            noncompliance_observer: Called with every spec violation the server flags in
+                a client, before it is tolerated or the client rejected; or None. It runs
+                synchronously where the violation is flagged, so it must be cheap and must
                 not block. An exception it raises is logged and does not affect the
                 connection.
 
@@ -259,6 +270,7 @@ class SendspinServer:
             )
         self._clock: Clock = clock or RawMonotonicClock()
         self._frame_observer = frame_observer
+        self._noncompliance_observer = noncompliance_observer
         self._connection_numbers = itertools.count(1)
 
         self._clients: dict[str, SendspinClient] = {}
@@ -512,6 +524,25 @@ class SendspinServer:
                 self._event_cbs.remove(callback)
 
         return _remove
+
+    def _observe_noncompliance(
+        self, connection: int | None, client_id: str | None, reason: str
+    ) -> None:
+        """Hand one flagged spec violation to the non-compliance observer, if there is one."""
+        observer = self._noncompliance_observer
+        if observer is None:
+            return
+        try:
+            observer(
+                ObservedNoncompliance(
+                    connection=connection,
+                    client_id=client_id,
+                    reason=reason,
+                    monotonic_us=self._clock.now_us(),
+                )
+            )
+        except Exception:
+            logger.exception("Error in non-compliance observer")
 
     def _signal_event(self, event: SendspinEvent) -> None:
         for cb in self._event_cbs:

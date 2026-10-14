@@ -1,0 +1,469 @@
+From f4d8b1e520e635f9ea94e45c1f9c0067eb4107c8 Mon Sep 17 00:00:00 2001
+From: Chris Uthe <chris.uthe@openhomefoundation.org>
+Date: Wed, 14 Oct 2026 13:58:51 -0500
+Subject: [PATCH] Add an optional non-compliance observer to the server
+
+SendspinServer takes a noncompliance_observer that is called with every
+spec violation the server flags in a client, before the server tolerates it
+or, with allow_noncompliant_clients=False, rejects the client. Until now a
+violation reached only the log, so a tool that judges clients had to parse
+log text to learn why one was rejected.
+
+Each ObservedNoncompliance carries the reason as the server logs it, the
+server clock time, the client id once the handshake names it, and the
+connection number the frame observer uses, so a violation can be matched to
+the frames that led to it. A lenient server reports every occurrence, though
+it logs each reason once. Without an observer nothing changes. An observer
+that raises is logged and never affects the connection.
+---
+ aiosendspin/server/__init__.py                |   4 +-
+ aiosendspin/server/client.py                  |   6 +
+ aiosendspin/server/connection.py              |  40 ++++-
+ aiosendspin/server/server.py                  |  35 +++-
+ .../test_noncompliance_observer.py            | 169 ++++++++++++++++++
+ tests/server/test_management_issuer.py        |   6 +-
+ tests/server/test_multi_server.py             |   8 +
+ tests/server/test_player_client_format.py     |   1 +
+ tests/server/test_stream_request_format.py    |   1 +
+ 9 files changed, 264 insertions(+), 6 deletions(-)
+ create mode 100644 tests/integration/test_noncompliance_observer.py
+
+diff --git a/aiosendspin/server/__init__.py b/aiosendspin/server/__init__.py
+index bc91c2b..ba832f3 100644
+--- a/aiosendspin/server/__init__.py
++++ b/aiosendspin/server/__init__.py
+@@ -32,7 +32,9 @@ __all__ = [
+     "GroupRoleEvent",
+     "GroupStateChangedEvent",
+     "MinBufferChangedEvent",
++    "NoncomplianceObserver",
+     "ObservedFrame",
++    "ObservedNoncompliance",
+     "OutputDelayChangedEvent",
+     "RequiredLeadTimeChangedEvent",
+     "SendspinClient",
+@@ -52,7 +54,7 @@ from aiosendspin.noise.wire import FrameDirection, FramePhase
+ 
+ from .audio import AudioFormat
+ from .client import ConnectionSecurity, DisconnectBehaviour, SendspinClient
+-from .connection import FrameObserver, ObservedFrame
++from .connection import FrameObserver, NoncomplianceObserver, ObservedFrame, ObservedNoncompliance
+ from .events import (
+     ClientEvent,
+     ClientGroupChangedEvent,
+diff --git a/aiosendspin/server/client.py b/aiosendspin/server/client.py
+index 7881bd4..30eb0af 100644
+--- a/aiosendspin/server/client.py
++++ b/aiosendspin/server/client.py
+@@ -147,6 +147,12 @@ class SendspinClient:
+ 
+     def flag_noncompliance(self, reason: str) -> None:
+         """Log a tolerated spec violation once, or reject it when the server is strict."""
++        connection = self._connection
++        self._server._observe_noncompliance(  # noqa: SLF001
++            connection.connection_number if connection is not None else None,
++            self._client_id,
++            reason,
++        )
+         subject = noncompliance_subject(self._description)
+         if not self._server.allow_noncompliant_clients:
+             self._logger.error("rejecting %s: %s", subject, reason)
+diff --git a/aiosendspin/server/connection.py b/aiosendspin/server/connection.py
+index d3ceff3..f90bc91 100644
+--- a/aiosendspin/server/connection.py
++++ b/aiosendspin/server/connection.py
+@@ -232,6 +232,29 @@ class ObservedFrame:
+ FrameObserver = Callable[[ObservedFrame], None]
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class ObservedNoncompliance:
++    """One spec violation the server flagged, as handed to a ``NoncomplianceObserver``.
++
++    A server with ``allow_noncompliant_clients=False`` rejects the client right after
++    reporting it; a lenient one tolerates it and reports every occurrence.
++    """
++
++    connection: int | None
++    """Number of the offending connection, as in ``ObservedFrame``, or ``None`` when the
++    client had no connection."""
++    client_id: str | None
++    """The client's id, or ``None`` until the handshake has named it."""
++    reason: str
++    """What the client did wrong, in the words the server logs."""
++    monotonic_us: int
++    """Server clock time when the violation was flagged."""
++
++
++# Called synchronously where the violation is flagged, so it must be cheap and must not block.
++NoncomplianceObserver = Callable[[ObservedNoncompliance], None]
++
++
+ logger = logging.getLogger(__name__)
+ 
+ MAX_PENDING_MSG = 4096  # Default queue cap (per role queues, and global control queues)
+@@ -405,7 +428,7 @@ class SendspinConnection:
+         # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+         self._sent_psk_pair_init = False
+         self._connection_done = asyncio.Event()
+-        # Taken when the handshake starts, and only for a server with a frame observer.
++        # Taken when the handshake starts, and only for a server with an observer.
+         self._connection_number: int | None = None
+         self._frame_observer_failed = False
+         self._transport: Transport | None = None
+@@ -1230,8 +1253,13 @@ class SendspinConnection:
+         ``HandshakeAbortedError``.
+         """
+         frame_tap = None
+-        if self._server._frame_observer is not None:  # noqa: SLF001
++        observed = (
++            self._server._frame_observer is not None  # noqa: SLF001
++            or self._server._noncompliance_observer is not None  # noqa: SLF001
++        )
++        if observed:
+             self._connection_number = next(self._server._connection_numbers)  # noqa: SLF001
++        if self._server._frame_observer is not None:  # noqa: SLF001
+             frame_tap = self._observe_frame
+         first_text = await receive_client_init_frame(raw, frame_tap=frame_tap)
+         if _peek_message_type(first_text) == "client/hello" and self._pairing_attempt is None:
+@@ -1456,6 +1484,9 @@ class SendspinConnection:
+         if self._client is not None:
+             self._client.flag_noncompliance(reason)
+             return
++        self._server._observe_noncompliance(  # noqa: SLF001
++            self._connection_number, self._client_id, reason
++        )
+         subject = noncompliance_subject(self._hello_description)
+         if not self._server.allow_noncompliant_clients:
+             self._logger.error("rejecting %s: %s", subject, reason)
+@@ -1764,6 +1795,11 @@ class SendspinConnection:
+             return False
+         return True
+ 
++    @property
++    def connection_number(self) -> int | None:
++        """Number of this connection as reported to the server's observers, if it has one."""
++        return self._connection_number
++
+     @property
+     def _playback_capable(self) -> bool:
+         """Whether this connection may ever carry playback."""
+diff --git a/aiosendspin/server/server.py b/aiosendspin/server/server.py
+index 2dca034..f633b01 100644
+--- a/aiosendspin/server/server.py
++++ b/aiosendspin/server/server.py
+@@ -44,7 +44,12 @@ from aiosendspin.noise.trust_store import ServerPairingStore, TrustedUnpairedCli
+ from aiosendspin.util import create_task, get_local_ip, warn_deprecated
+ 
+ from .client import SendspinClient
+-from .connection import FrameObserver, SendspinConnection
++from .connection import (
++    FrameObserver,
++    NoncomplianceObserver,
++    ObservedNoncompliance,
++    SendspinConnection,
++)
+ from .group import SendspinGroup
+ from .roles.visualizer.v1 import warn_pitch_deprecated
+ 
+@@ -190,7 +195,7 @@ class SendspinServer:
+     _pending_connections: set[SendspinConnection]
+     """Incoming connections that have not finished their handshake/message loop yet."""
+ 
+-    def __init__(  # noqa: PLR0915
++    def __init__(  # noqa: PLR0913, PLR0915
+         self,
+         loop: asyncio.AbstractEventLoop,
+         identity: Identity,
+@@ -203,6 +208,7 @@ class SendspinServer:
+         languages: Sequence[str] | None = None,
+         clock: Clock | None = None,
+         frame_observer: FrameObserver | None = None,
++        noncompliance_observer: NoncomplianceObserver | None = None,
+     ) -> None:
+         """Initialize a Sendspin server instance.
+ 
+@@ -229,6 +235,11 @@ class SendspinServer:
+                 synchronously on the connection's I/O path, so it must be cheap and must
+                 not block. An exception it raises is logged and does not affect the
+                 connection.
++            noncompliance_observer: Called with every spec violation the server flags in
++                a client, before it is tolerated or the client rejected; or None. It runs
++                synchronously where the violation is flagged, so it must be cheap and must
++                not block. An exception it raises is logged and does not affect the
++                connection.
+ 
+         Raises:
+             TypeError: If ``languages`` is a single string rather than a sequence of tags.
+@@ -259,6 +270,7 @@ class SendspinServer:
+             )
+         self._clock: Clock = clock or RawMonotonicClock()
+         self._frame_observer = frame_observer
++        self._noncompliance_observer = noncompliance_observer
+         self._connection_numbers = itertools.count(1)
+ 
+         self._clients: dict[str, SendspinClient] = {}
+@@ -513,6 +525,25 @@ class SendspinServer:
+ 
+         return _remove
+ 
++    def _observe_noncompliance(
++        self, connection: int | None, client_id: str | None, reason: str
++    ) -> None:
++        """Hand one flagged spec violation to the non-compliance observer, if there is one."""
++        observer = self._noncompliance_observer
++        if observer is None:
++            return
++        try:
++            observer(
++                ObservedNoncompliance(
++                    connection=connection,
++                    client_id=client_id,
++                    reason=reason,
++                    monotonic_us=self._clock.now_us(),
++                )
++            )
++        except Exception:
++            logger.exception("Error in non-compliance observer")
++
+     def _signal_event(self, event: SendspinEvent) -> None:
+         for cb in self._event_cbs:
+             try:
+diff --git a/tests/integration/test_noncompliance_observer.py b/tests/integration/test_noncompliance_observer.py
+new file mode 100644
+index 0000000..b8c4f49
+--- /dev/null
++++ b/tests/integration/test_noncompliance_observer.py
+@@ -0,0 +1,169 @@
++"""End-to-end tests for the server's non-compliance observer."""
++
++from __future__ import annotations
++
++import asyncio
++import json
++from collections.abc import AsyncIterator
++from contextlib import asynccontextmanager
++
++import pytest
++from aiohttp import ClientSession, WSMsgType, web
++from aiohttp.test_utils import TestServer
++
++from aiosendspin.models.types import Roles
++from aiosendspin.noise.keys import Identity
++from aiosendspin.noise.trust_store import InMemoryClientPairingStore, InMemoryServerPairingStore
++from aiosendspin.server import ObservedFrame, ObservedNoncompliance, SendspinServer
++from aiosendspin.server.compliance import ClientComplianceError
++from tests.conftest import make_sdk_client
++from tests.noise.conftest import non_canonical_peer_id
++
++
++def _make_server(
++    observed: list[ObservedNoncompliance],
++    *,
++    allow_noncompliant_clients: bool = False,
++    frames: list[ObservedFrame] | None = None,
++) -> SendspinServer:
++    return SendspinServer(
++        loop=asyncio.get_running_loop(),
++        identity=Identity.generate(),
++        server_name="test-server",
++        pairing_store=InMemoryServerPairingStore(),
++        allow_noncompliant_clients=allow_noncompliant_clients,
++        frame_observer=frames.append if frames is not None else None,
++        noncompliance_observer=observed.append,
++    )
++
++
++@asynccontextmanager
++async def _serve(server: SendspinServer) -> AsyncIterator[str]:
++    app = web.Application()
++    app.router.add_get(SendspinServer.API_PATH, server.on_client_connect)
++    test_server = TestServer(app)
++    await test_server.start_server()
++    try:
++        yield f"ws://127.0.0.1:{test_server.port}{SendspinServer.API_PATH}"
++    finally:
++        await test_server.close()
++        await server.close()
++
++
++async def test_observer_sees_a_violation_before_the_handshake_names_the_client() -> None:
++    """A client/init violation is reported with its connection and no client id."""
++    observed: list[ObservedNoncompliance] = []
++    frames: list[ObservedFrame] = []
++    server = _make_server(observed, frames=frames)
++    client_init = {
++        "type": "client/init",
++        "payload": {
++            "client_id": non_canonical_peer_id(Identity.generate().peer_id),
++            "version": 1,
++            "suite": "25519_ChaChaPoly_SHA256",
++        },
++    }
++    async with (
++        _serve(server) as url,
++        ClientSession() as session,
++        session.ws_connect(url) as ws,
++    ):
++        await ws.send_str(json.dumps(client_init))
++        while (await asyncio.wait_for(ws.receive(), timeout=5)).type is WSMsgType.TEXT:
++            pass
++
++    assert [(o.connection, o.client_id, o.reason) for o in observed] == [
++        (frames[0].connection, None, "client/init client_id is not canonical base64url")
++    ]
++
++
++async def test_observer_sees_a_violation_by_an_attached_client() -> None:
++    """A violation after the handshake carries the client id and its connection number."""
++    observed: list[ObservedNoncompliance] = []
++    frames: list[ObservedFrame] = []
++    flagged = asyncio.Event()
++
++    def observe(observation: ObservedNoncompliance) -> None:
++        observed.append(observation)
++        flagged.set()
++
++    server = SendspinServer(
++        loop=asyncio.get_running_loop(),
++        identity=Identity.generate(),
++        server_name="test-server",
++        pairing_store=InMemoryServerPairingStore(),
++        allow_noncompliant_clients=False,
++        frame_observer=frames.append,
++        noncompliance_observer=observe,
++    )
++    client_identity = Identity.generate()
++
++    async with _serve(server) as url:
++        client = make_sdk_client(
++            identity=client_identity,
++            pairing_store=InMemoryClientPairingStore(),
++            client_name="c",
++            roles=[Roles.CONTROLLER],
++        )
++        try:
++            await client.connect(url)
++            connection = client._admitted_connection  # noqa: SLF001
++            assert connection is not None
++            assert connection._ws is not None  # noqa: SLF001
++            await connection._ws.send_str(  # noqa: SLF001
++                json.dumps({"type": "client/state", "payload": {}})
++            )
++            async with asyncio.timeout(5):
++                await flagged.wait()
++        finally:
++            await client.disconnect()
++
++    assert [(o.connection, o.client_id, o.reason) for o in observed] == [
++        (
++            frames[0].connection,
++            client_identity.peer_id,
++            "client/state omitted the required 'available' field",
++        )
++    ]
++    assert observed[0].monotonic_us >= frames[0].monotonic_us
++
++
++async def test_lenient_server_reports_every_occurrence() -> None:
++    """A tolerated violation reaches the observer each time, though it is logged once."""
++    observed: list[ObservedNoncompliance] = []
++    server = _make_server(observed, allow_noncompliant_clients=True)
++    client = server.get_or_create_client("dev")
++
++    client.flag_noncompliance("legacy thing")
++    client.flag_noncompliance("legacy thing")
++
++    assert [(o.connection, o.client_id, o.reason) for o in observed] == [
++        (None, "dev", "legacy thing"),
++        (None, "dev", "legacy thing"),
++    ]
++    await server.close()
++
++
++async def test_observer_that_raises_does_not_change_the_verdict(
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    """An observer's exception is logged, and a strict server still rejects the client."""
++
++    def fail(_: ObservedNoncompliance) -> None:
++        raise ValueError("observer broke")
++
++    server = SendspinServer(
++        loop=asyncio.get_running_loop(),
++        identity=Identity.generate(),
++        server_name="test-server",
++        pairing_store=InMemoryServerPairingStore(),
++        allow_noncompliant_clients=False,
++        noncompliance_observer=fail,
++    )
++    client = server.get_or_create_client("dev")
++
++    with pytest.raises(ClientComplianceError):
++        client.flag_noncompliance("legacy thing")
++
++    assert "Error in non-compliance observer" in caplog.messages
++    await server.close()
+diff --git a/tests/server/test_management_issuer.py b/tests/server/test_management_issuer.py
+index 703d04b..f7b6241 100644
+--- a/tests/server/test_management_issuer.py
++++ b/tests/server/test_management_issuer.py
+@@ -36,7 +36,11 @@ def _bare_connection() -> SendspinConnection:
+     conn._management_waiter = None  # noqa: SLF001
+     conn._client = None  # noqa: SLF001
+     conn._hello_description = ""  # noqa: SLF001
+-    conn._server = SimpleNamespace(allow_noncompliant_clients=True)  # type: ignore[assignment]  # noqa: SLF001
++    conn._connection_number = None  # noqa: SLF001
++    conn._client_id = None  # noqa: SLF001
++    conn._server = SimpleNamespace(  # type: ignore[assignment]  # noqa: SLF001
++        allow_noncompliant_clients=True, _observe_noncompliance=lambda *_: None
++    )
+     conn._legacy_hello = True  # noqa: SLF001
+     return conn
+ 
+diff --git a/tests/server/test_multi_server.py b/tests/server/test_multi_server.py
+index 3b8ecac..91212c3 100644
+--- a/tests/server/test_multi_server.py
++++ b/tests/server/test_multi_server.py
+@@ -103,6 +103,14 @@ class _MockServer:
+     def on_client_first_connect(self, client_id: str) -> None:  # noqa: ARG002
+         return
+ 
++    def _observe_noncompliance(
++        self,
++        connection: int | None,  # noqa: ARG002
++        client_id: str | None,  # noqa: ARG002
++        reason: str,  # noqa: ARG002
++    ) -> None:
++        return
++
+     def get_connection_reason(self, url: str) -> ConnectionReason:
+         return self._connection_reasons.get(url, ConnectionReason.DISCOVERY)
+ 
+diff --git a/tests/server/test_player_client_format.py b/tests/server/test_player_client_format.py
+index 6a2c86a..fa39ba0 100644
+--- a/tests/server/test_player_client_format.py
++++ b/tests/server/test_player_client_format.py
+@@ -36,6 +36,7 @@ OPUS_48K_24 = SupportedAudioFormat(
+ 
+ class _FakeConnection:
+     receives_group_updates = True
++    connection_number = None
+ 
+     def __init__(self) -> None:
+         self.sent: list[object] = []
+diff --git a/tests/server/test_stream_request_format.py b/tests/server/test_stream_request_format.py
+index 5bcbea5..118eae4 100644
+--- a/tests/server/test_stream_request_format.py
++++ b/tests/server/test_stream_request_format.py
+@@ -28,6 +28,7 @@ from aiosendspin.server.roles.player.v1 import PlayerV1Role
+ 
+ class _FakeConnection:
+     receives_group_updates = True
++    connection_number = None
+ 
+     def __init__(self) -> None:
+         self.sent: list[object] = []
+-- 
+2.55.0
+
