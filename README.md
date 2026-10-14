@@ -30,7 +30,7 @@ Current scenarios:
 - `sendspin-js`: real Node.js client adapter driving the public `SendspinCore` SDK over an adapter-owned WebSocket; covers client-initiated PCM plus the server-initiated PCM, metadata, and controller scenarios (FLAC/OPUS decode and `artwork@v1` are not exposed by the public SDK in a headless Node environment); server placeholder
 - `sendspin-jvm`: real JVM client adapter written in Kotlin, for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
 - `sendspin-rs`: real Rust client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
-- `sendspin-server-cpp`: real C++ server adapter for the client- and server-initiated PCM, 24-bit PCM, protocol-baseline, audio-chunk-framing and `client-initiated-state-format-pcm` scenarios, built on the library's public API and evidenced from its message trace; client placeholder (its client counterpart is `sendspin-cpp`)
+- `sendspin-server-cpp`: real C++ server adapter for the client- and server-initiated PCM, 24-bit PCM, protocol-baseline, audio-chunk-framing, metadata, artwork and controller scenarios and `client-initiated-state-format-pcm`, built on the library's public API and evidenced from its message trace; client placeholder (its client counterpart is `sendspin-cpp`)
 
 The OPUS scenario is currently exercised only by the `SendspinKit` and `sendspin-cpp` clients against the `aiosendspin` server until other implementations opt in via `supports_opus`.
 

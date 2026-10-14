@@ -57,6 +57,21 @@ struct SentFrame {
     std::optional<size_t> payload_byte_count;
 };
 
+/// The first `server/state` sent whose metadata object carried a timestamp (adapters/README.md
+/// "Metadata scenario summary fields")
+struct FirstMetadataState {
+    int64_t timestamp_us{0};
+    /// now_us() at the write completion that put the state on the wire
+    int64_t bound_us{0};
+};
+
+/// One image the artwork transfers sent in full: its announce and every part (spec
+/// roles/artwork/v1.md "Artwork (Binary)")
+struct SentArtwork {
+    size_t channel{0};
+    std::vector<uint8_t> bytes;
+};
+
 /// What the trace showed of one connection. Every JSON message is kept as the text that crossed
 /// the transport.
 struct ConnectionRecord {
@@ -73,6 +88,8 @@ struct ConnectionRecord {
     std::vector<TimeEntry> time_exchange;
     /// The player object of the last stream/start sent that carried one
     std::optional<std::string> stream_player;
+    /// The artwork object of the last stream/start sent that carried one
+    std::optional<std::string> stream_artwork;
     /// The `format` of the last client/state player object that carried one
     std::optional<std::string> preferred_format;
     /// The `available` of the last client/state received; nullopt before one carried a boolean
@@ -82,6 +99,15 @@ struct ConnectionRecord {
     std::vector<SentFrame> sent_frames;
     /// A stream/end was sent and its write completed
     bool stream_end_written{false};
+    /// The metadata object of the last server/state written that carried one
+    std::optional<std::string> metadata;
+    std::optional<FirstMetadataState> first_metadata_state;
+    /// The controller object of the last server/state written that carried one
+    std::optional<std::string> controller_state;
+    /// The controller object of the first client/command received
+    std::optional<std::string> client_command;
+    /// Every artwork transfer completed and written, in order
+    std::vector<SentArtwork> artwork_images;
 };
 
 /// Builds the summary evidence from ServerConfig::trace, which reports each message's plaintext
@@ -117,18 +143,27 @@ private:
         /// Roles of each stream/start traced and not yet covered by a write completion
         std::vector<std::vector<std::string>> unwritten_stream_starts;
         bool stream_end_traced{false};
+        /// server/state metadata and controller objects traced and not yet covered by a write
+        /// completion
+        std::vector<std::string> unwritten_metadata;
+        std::vector<std::string> unwritten_controller;
+        /// The artwork transfer in flight, and the transfers completed and not yet written
+        std::optional<SentArtwork> artwork_transfer;
+        size_t artwork_total_size{0};
+        std::vector<SentArtwork> unwritten_artwork;
         /// An outbound fragmented message being reassembled
         std::optional<uint8_t> fragment_type;
         std::vector<uint8_t> fragment_data;
         Position fragment_position;
     };
 
-    void on_written(Connection& connection);
+    void on_written(Connection& connection, int64_t stamp_us);
     void on_inbound(Connection& connection, bool binary, uint8_t message_id,
                     const std::vector<uint8_t>& plaintext);
     void on_outbound(Connection& connection, const sendspin::server::TracedMessage& message);
     void on_outbound_json(Connection& connection, const std::string& text,
                           const Position& position, bool binary);
+    static void on_outbound_artwork(Connection& connection, const std::vector<uint8_t>& plaintext);
     static Position position_of(const Connection& connection);
 
     mutable std::mutex mutex_;
