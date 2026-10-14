@@ -17,7 +17,7 @@ from typing import Any
 
 from .findings import Finding, Verdict
 from .noncompliance_refs import UnmappedReasonError, spec_ref_for
-from .recorder import RecordedFrame, RecordedNoncompliance
+from .recorder import EventKind, RecordedEvent, RecordedFrame, RecordedNoncompliance
 
 SPEC_REFS = {
     "CORE-INIT-001": "messaging.md:5, messaging.md:16",
@@ -74,6 +74,7 @@ class ConnectionRecord:
     number: int
     frames: tuple[RecordedFrame, ...]
     noncompliance: tuple[RecordedNoncompliance, ...] = ()
+    events: tuple[RecordedEvent, ...] = ()
 
     def inbound(self, message_type: str, *, phase: str = "transport") -> list[RecordedFrame]:
         """Return the client's frames of `message_type` in `phase`."""
@@ -91,18 +92,25 @@ class ConnectionRecord:
         number: int,
         frames: Iterable[RecordedFrame],
         noncompliance: Iterable[RecordedNoncompliance],
+        events: Iterable[RecordedEvent] = (),
     ) -> ConnectionRecord:
         """Return what a session recorded on connection `number`."""
         return cls(
             number,
             tuple(f for f in frames if f.connection == number),
             tuple(o for o in noncompliance if o.connection == number),
+            tuple(e for e in events if e.connection == number),
         )
 
     @property
     def rejected(self) -> bool:
         """Whether the strict server flagged a violation, which ends the connection."""
         return bool(self.noncompliance)
+
+    @property
+    def closed(self) -> bool:
+        """Whether the server reported the connection ended."""
+        return any(e.kind is EventKind.CLOSED for e in self.events)
 
 
 Check = Callable[[ConnectionRecord], list[Finding]]
@@ -114,19 +122,23 @@ def judge_session(
     tool_errors: Sequence[str],
     *,
     connection: int,
+    later_connections: Sequence[int] = (),
     txt_name: str | None = None,
 ) -> list[Finding]:
     """
     Return every finding for the observed `connection` of a recorded session.
 
-    Frames and violations of any other connection belong to other clients and are
-    not judged. A frame the recorder could not process is a TOOL_ERROR, since any
-    check may have missed it.
+    `later_connections` are the client's connections the suites opened after it: the
+    checks of the opening exchange judge only `connection`, but a violation the strict
+    server flagged on any of them is reported. Frames and violations of any other
+    connection belong to other clients and are not judged. A frame the recorder could
+    not process is a TOOL_ERROR, since any check may have missed it.
     """
     record = ConnectionRecord.of(connection, frames, noncompliance)
+    judged = {connection, *later_connections}
     return [
         *run_checks(record, txt_name=txt_name),
-        *check_noncompliance(record.noncompliance),
+        *check_noncompliance([o for o in noncompliance if o.connection in judged]),
         *(Finding(RECORDER_CHECK_ID, Verdict.TOOL_ERROR, "-", error) for error in tool_errors),
     ]
 

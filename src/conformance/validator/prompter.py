@@ -77,8 +77,10 @@ class Prompter(Protocol):
     def report_check(self, finding: Finding) -> None:
         """Show a check's verdict as it resolves."""
 
-    async def ask_text(self, question: str, *, expected: str | None = None) -> Answer[str]:
-        """Ask for free text."""
+    async def ask_text(
+        self, question: str, *, expected: str | None = None, secret: bool = False
+    ) -> Answer[str]:
+        """Ask for free text; a `secret` answer, such as a pairing token, is never echoed back."""
 
     async def ask_choice(
         self, question: str, choices: Sequence[str], *, expected: int | None = None
@@ -119,7 +121,9 @@ class TerminalPrompter:
             f" ({finding.spec_ref}{frames})"
         )
 
-    async def ask_text(self, question: str, *, expected: str | None = None) -> Answer[str]:
+    async def ask_text(
+        self, question: str, *, expected: str | None = None, secret: bool = False
+    ) -> Answer[str]:
         """Ask for a non-empty line of text."""
         return await self._ask(f"{question} ({_CONTROLS_HINT}): ", lambda line: line or None)
 
@@ -168,11 +172,28 @@ class AutoAnswerPrompter(TerminalPrompter):
     A `Prompter` for CI that answers every question itself.
 
     It gives the expected answer when the validator knows one, and otherwise the
-    first choice, yes, or empty text. It prints what it answered.
+    first choice, yes, or empty text. A secret question the validator cannot know the
+    answer to, the pairing token, is answered with `secret_answer`. It prints what it
+    answered, except a secret.
     """
 
-    async def ask_text(self, question: str, *, expected: str | None = None) -> Answer[str]:
-        """Answer with `expected`, or empty text."""
+    def __init__(
+        self,
+        *,
+        secret_answer: str | None = None,
+        read_line: Callable[[str], str] = input,
+        output: TextIO = sys.stdout,
+    ) -> None:
+        super().__init__(read_line=read_line, output=output)
+        self._secret_answer = secret_answer
+
+    async def ask_text(
+        self, question: str, *, expected: str | None = None, secret: bool = False
+    ) -> Answer[str]:
+        """Answer with `expected`, with `secret_answer` for a secret, or with empty text."""
+        if secret:
+            self._write(f"{question} [auto-answered, hidden]")
+            return Answer(Reply.ANSWERED, expected or self._secret_answer or "")
         return self._answered(question, expected or "")
 
     async def ask_choice(

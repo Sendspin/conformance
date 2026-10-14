@@ -11,6 +11,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -107,12 +108,41 @@ class RecordedNoncompliance:
     after_frame: int | None
 
 
+class EventKind(StrEnum):
+    """Something that happened to a connection that no frame shows."""
+
+    KEYED = "keyed"
+    """A handshake completed; the event's `psk_category` names the PSK keying the session."""
+    CREDENTIAL_MISMATCH = "credential_mismatch"
+    """The client answered under the Sentinel PSK, unable to use the long-term PSK referenced."""
+    CLOSED = "closed"
+    """The connection ended."""
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedEvent:
+    """
+    A connection event the server reported, which the encrypted frames cannot show.
+
+    `psk_category` is aiosendspin's `PskCategory` value for a KEYED event, and None
+    otherwise. `after_frame` is the id of the last frame recorded on the connection
+    before it.
+    """
+
+    connection: int
+    client_id: str
+    kind: EventKind
+    after_frame: int | None
+    psk_category: str | None = None
+
+
 class Recorder:
     """
     Observer for the validator's `SendspinServer` that keeps every frame and violation.
 
     Pass `observe_frame` as its `frame_observer` and `observe_noncompliance` as its
-    `noncompliance_observer`. A frame the recorder itself fails to process is kept in
+    `noncompliance_observer`; the session reports connection events to `observe_event`.
+    A frame the recorder itself fails to process is kept in
     `tool_errors` rather than raised: aiosendspin would swallow the exception, and the
     validator must report what it could not observe.
     """
@@ -120,6 +150,7 @@ class Recorder:
     def __init__(self, *, verbose: TextIO | None = None) -> None:
         self.frames: list[RecordedFrame] = []
         self.noncompliance: list[RecordedNoncompliance] = []
+        self.events: list[RecordedEvent] = []
         self.tool_errors: list[str] = []
         self._secrets: set[str] = set()
         self._verbose = verbose
@@ -158,16 +189,12 @@ class Recorder:
     def observe_noncompliance(self, observation: ObservedNoncompliance) -> None:
         """Record one spec violation the server flagged."""
         self._changed.set()
-        after_frame = next(
-            (f.id for f in reversed(self.frames) if f.connection == observation.connection),
-            None,
-        )
         recorded = RecordedNoncompliance(
             connection=observation.connection,
             client_id=observation.client_id,
             reason=self._redact_text(observation.reason),
             monotonic_us=observation.monotonic_us,
-            after_frame=after_frame,
+            after_frame=self._last_frame(observation.connection),
         )
         self.noncompliance.append(recorded)
         if self._verbose is not None:
@@ -177,11 +204,37 @@ class Recorder:
                 flush=True,
             )
 
+    def observe_event(
+        self,
+        connection: int,
+        client_id: str,
+        kind: EventKind,
+        *,
+        psk_category: str | None = None,
+    ) -> None:
+        """Record one connection event the server reported."""
+        self._changed.set()
+        self.events.append(
+            RecordedEvent(
+                connection=connection,
+                client_id=client_id,
+                kind=kind,
+                after_frame=self._last_frame(connection),
+                psk_category=psk_category,
+            )
+        )
+        if self._verbose is not None:
+            detail = f" {psk_category}" if psk_category is not None else ""
+            print(f"~ c{connection} {kind}{detail}", file=self._verbose, flush=True)
+
     def write_log(self, path: Path) -> None:
         """Write every recorded frame to `path` as JSON lines, in recording order."""
         with path.open("w", encoding="utf-8") as log:
             for frame in self.frames:
                 log.write(json.dumps(frame.to_json(), sort_keys=True) + "\n")
+
+    def _last_frame(self, connection: int | None) -> int | None:
+        return next((f.id for f in reversed(self.frames) if f.connection == connection), None)
 
     def _decode(self, frame: ObservedFrame) -> RecordedFrame:
         common = {

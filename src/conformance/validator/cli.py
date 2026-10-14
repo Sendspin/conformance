@@ -25,6 +25,7 @@ from .report import (
 )
 from .session import PortUnavailableError, SessionOptions, SessionResult, run_session
 from .storage import load_state, user_data_dir
+from .suites import Suite, parse_suites
 
 DEFAULT_PORT = 8927
 # Exit statuses: every finding is clean, a FAIL or TOOL_ERROR was found, no report.
@@ -61,10 +62,25 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=300.0,
         metavar="SECONDS",
-        help="how long to wait for a client to connect (default: 300)",
+        help="how long to wait for a client to connect or reconnect (default: 300)",
+    )
+    parser.add_argument(
+        "--suite",
+        type=_suites,
+        default=frozenset(Suite),
+        metavar="NAMES",
+        help="comma-separated suites to run after the opening checks, in this order: "
+        f"{', '.join(Suite)} (default: all)",
+    )
+    parser.add_argument(
+        "--fault-injection",
+        action="store_true",
+        help="also run steps that send what no client may accept, such as U4",
     )
     # For CI only: answers every question with the answer the session expects.
     parser.add_argument("--auto-answer", action="store_true", help=argparse.SUPPRESS)
+    # For CI only: the pairing token --auto-answer pastes, which only the test knows.
+    parser.add_argument("--auto-answer-token", help=argparse.SUPPRESS)
     return parser
 
 
@@ -76,11 +92,21 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
-    prompter: Prompter = AutoAnswerPrompter() if args.auto_answer else TerminalPrompter()
+    prompter: Prompter = (
+        AutoAnswerPrompter(secret_answer=args.auto_answer_token)
+        if args.auto_answer
+        else TerminalPrompter()
+    )
     prompter.instruct(f"Sendspin Validator {tool_version().split()[-1]} — spec {SPEC_TAG}")
     recorder = Recorder(verbose=sys.stderr if args.verbose else None)
+    if args.auto_answer_token:
+        recorder.add_secret(args.auto_answer_token)
     options = SessionOptions(
-        port=args.port, connect_url=args.connect, connect_timeout_s=args.timeout
+        port=args.port,
+        connect_url=args.connect,
+        connect_timeout_s=args.timeout,
+        suites=args.suite,
+        fault_injection=args.fault_injection,
     )
     try:
         result = asyncio.run(_session(prompter, recorder, options, fresh=args.fresh))
@@ -104,16 +130,20 @@ async def _session(
 
 def _report(prompter: Prompter, recorder: Recorder, result: SessionResult, output_dir: Path) -> int:
     """Judge the observed connection, write the run directory, and return the exit status."""
-    findings = judge_session(
+    opening = judge_session(
         recorder.frames,
         recorder.noncompliance,
         recorder.tool_errors,
         connection=result.connection,
+        later_connections=result.later_connections,
         txt_name=result.txt_name,
     )
-    for finding in findings:
+    prompter.instruct("\nOpening exchange")
+    for finding in opening:
         prompter.report_check(finding)
-    ignored = sorted({f.connection for f in recorder.frames} - {result.connection})
+    findings = [*opening, *result.findings]
+    judged = {result.connection, *result.later_connections}
+    ignored = sorted({f.connection for f in recorder.frames} - judged)
     if ignored:
         prompter.instruct(
             f"Not judged: {len(ignored)} other connection(s), from clients other than the "
@@ -135,6 +165,13 @@ def _report(prompter: Prompter, recorder: Recorder, result: SessionResult, outpu
     prompter.instruct(f"\nReport written to {directory}")
     summary = report["summary"]
     return EXIT_FINDINGS if summary["fail"] or summary["tool_error"] else EXIT_CLEAN
+
+
+def _suites(text: str) -> frozenset[Suite]:
+    try:
+        return parse_suites(text)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(str(err)) from None
 
 
 if __name__ == "__main__":

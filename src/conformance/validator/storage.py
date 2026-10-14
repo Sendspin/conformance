@@ -26,11 +26,18 @@ class AdmitUnpairedStore(FileServerPairingStore):
 
     The person running the validator is the operator of whatever client they test, so
     the validator admits it through unpaired access without storing an approval.
+    Setting `admit_unpaired` to False withholds that approval, for a step in which the
+    validator must not activate playback.
     """
 
+    admit_unpaired = True
+
     async def trusted_unpaired(self, client_id: str) -> TrustedUnpairedClient | None:
-        """Return an approval for `client_id`."""
-        return await super().trusted_unpaired(client_id) or TrustedUnpairedClient(client_id)
+        """Return an approval for `client_id`, unless `admit_unpaired` is False."""
+        stored = await super().trusted_unpaired(client_id)
+        if stored is not None or not self.admit_unpaired:
+            return stored
+        return TrustedUnpairedClient(client_id)
 
 
 def user_data_dir() -> Path:

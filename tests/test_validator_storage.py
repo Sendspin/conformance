@@ -28,6 +28,11 @@ class StorageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(await store.trusted_unpaired("any-client"))
         self.assertFalse(await store.list_trusted_unpaired())
 
+    async def test_unpaired_admission_can_be_withheld(self) -> None:
+        _, store = await load_state(self.directory, fresh=False)
+        store.admit_unpaired = False
+        self.assertIsNone(await store.trusted_unpaired("any-client"))
+
 
 if __name__ == "__main__":
     unittest.main()

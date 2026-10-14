@@ -1,23 +1,26 @@
 """
-Runs one validation session: get a client connected, and observe it.
+Runs one validation session: get a client connected, observe it, then run the suites.
 
-The validator is a strict aiosendspin server. It activates a client only through
-unpaired access and observes the connection's opening: the handshake, the hello
-exchange, activation, the initial client/state and time sync.
+The validator is a strict aiosendspin server. It observes the first connection's
+opening: the handshake, the hello exchange, activation, the initial client/state and
+time sync. The selected suites then drive the same client through further
+connections, unpaired and paired.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from aiohttp import ClientConnectionError, ClientResponseError
 
 from conformance._vendor.aiosendspin.models.types import ConnectionReason
-from conformance._vendor.aiosendspin.noise import Identity, ServerPairingStore
+from conformance._vendor.aiosendspin.noise import Identity
 from conformance._vendor.aiosendspin.server import (
+    ClientConnectedEvent,
+    ClientCredentialMismatchEvent,
     ClientDisconnectedEvent,
     SendspinEvent,
     SendspinServer,
@@ -25,8 +28,11 @@ from conformance._vendor.aiosendspin.server import (
 
 from .checks import ConnectionRecord
 from .discovery import DiscoveredClient, discover_clients
+from .findings import Finding
 from .prompter import Prompter, Reply
-from .recorder import Recorder
+from .recorder import EventKind, Recorder
+from .storage import AdmitUnpairedStore
+from .suites import Link, Suite, SuiteOptions, SuiteRunner
 
 SERVER_NAME = "Sendspin Validator"
 # How long to browse for clients before listing them.
@@ -54,12 +60,16 @@ class SessionOptions:
     How to run a session.
 
     `port` is listened on in client-initiated mode. `connect_url` skips mDNS and dials
-    that client. `connect_timeout_s` bounds the wait for a client to connect.
+    that client. `connect_timeout_s` bounds the wait for a client to connect, and for
+    it to reconnect during a suite. `suites` run after the opening exchange;
+    `fault_injection` allows their steps that send what no client may accept.
     """
 
     port: int
     connect_url: str | None
     connect_timeout_s: float
+    suites: frozenset[Suite] = frozenset()
+    fault_injection: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,25 +77,30 @@ class SessionResult:
     """
     What a session observed.
 
-    `connection` is the number of the observed connection; frames on any other belong
-    to other clients and are not judged. `txt_name` is the discovered client's TXT
-    `name`, when it was discovered over mDNS.
+    `connection` is the number of the observed connection, and `later_connections`
+    those the suites opened to the same client; frames on any other belong to other
+    clients and are not judged. `txt_name` is the discovered client's TXT `name`, when
+    it was discovered over mDNS. `url` is the client's, in server-initiated mode.
+    `findings` are the suites' verdicts.
     """
 
     mode: ConnectionMode
     connection: int
     txt_name: str | None
+    url: str | None = None
+    later_connections: tuple[int, ...] = ()
+    findings: tuple[Finding, ...] = ()
 
 
 async def run_session(
     prompter: Prompter,
     recorder: Recorder,
     identity: Identity,
-    pairing_store: ServerPairingStore,
+    pairing_store: AdmitUnpairedStore,
     options: SessionOptions,
 ) -> SessionResult | None:
     """
-    Get one client connected, observe its opening exchange, then close.
+    Get one client connected, observe its opening exchange, run the suites, then close.
 
     Returns None when no client connected. Raises PortUnavailableError when the
     validator cannot listen on `options.port`.
@@ -99,13 +114,53 @@ async def run_session(
         frame_observer=recorder.observe_frame,
         noncompliance_observer=recorder.observe_noncompliance,
     )
+    server.add_event_listener(_ConnectionEvents(recorder).on_event)
     try:
         result = await _connect(server, prompter, recorder, options)
-        if result is not None:
-            await _Observation(server, prompter, recorder, result.connection).run()
-        return result
+        if result is None:
+            return None
+        await _Observation(server, prompter, recorder, result.connection).run()
+        if not options.suites:
+            return result
+        return await _run_suites(server, prompter, recorder, pairing_store, options, result)
     finally:
         await server.close()
+
+
+async def _run_suites(
+    server: SendspinServer,
+    prompter: Prompter,
+    recorder: Recorder,
+    pairing_store: AdmitUnpairedStore,
+    options: SessionOptions,
+    result: SessionResult,
+) -> SessionResult:
+    """Run the selected suites on the observed client, if it completed its opening."""
+    opening = ConnectionRecord.of(result.connection, recorder.frames, recorder.noncompliance)
+    init = next(iter(opening.inbound("client/init", phase="cleartext")), None)
+    client_id = (init.payload or {}).get("client_id") if init is not None else None
+    if not isinstance(client_id, str) or not any(
+        e.client_id == client_id for e in recorder.events
+    ):
+        prompter.instruct("The suites need a client that completes the opening; none ran.")
+        return result
+    link = Link(
+        server,
+        prompter,
+        recorder,
+        client_id=client_id,
+        url=result.url,
+        timeout_s=options.connect_timeout_s,
+    )
+    suite_options = SuiteOptions(suites=options.suites, fault_injection=options.fault_injection)
+    findings = await SuiteRunner(
+        server, prompter, recorder, pairing_store, link, suite_options
+    ).run()
+    return replace(
+        result,
+        later_connections=tuple(link.connections_since(result.connection)),
+        findings=tuple(findings),
+    )
 
 
 async def _connect(
@@ -152,6 +207,7 @@ async def _connect(
         mode=ConnectionMode.SERVER_INITIATED,
         connection=recorder.frames[0].connection,
         txt_name=target.name if target is not None else None,
+        url=url,
     )
 
 
@@ -220,6 +276,47 @@ async def _choose(prompter: Prompter, question: str, choices: list[str]) -> int 
             return None
 
 
+class _ConnectionEvents:
+    """
+    Records the connection events aiosendspin reports and no frame shows.
+
+    For each client it keeps the connection attached last, which a credential
+    mismatch or a disconnect refers to.
+    """
+
+    def __init__(self, recorder: Recorder) -> None:
+        self._recorder = recorder
+        self._attached: dict[str, int] = {}
+
+    def on_event(self, server: SendspinServer, event: SendspinEvent) -> None:
+        """Record which PSK keyed an attached connection, a credential mismatch, or a close."""
+        match event:
+            case ClientConnectedEvent(client_id=client_id):
+                client = server.get_client(client_id)
+                connection = client.connection if client is not None else None
+                if (
+                    connection is None
+                    or connection.connection_number is None
+                    or connection.psk_category is None
+                ):
+                    return
+                self._attached[client_id] = connection.connection_number
+                self._recorder.observe_event(
+                    connection.connection_number,
+                    client_id,
+                    EventKind.KEYED,
+                    psk_category=connection.psk_category.value,
+                )
+            case ClientCredentialMismatchEvent(client_id=client_id) if client_id in self._attached:
+                self._recorder.observe_event(
+                    self._attached[client_id], client_id, EventKind.CREDENTIAL_MISMATCH
+                )
+            case ClientDisconnectedEvent(client_id=client_id) if client_id in self._attached:
+                self._recorder.observe_event(
+                    self._attached.pop(client_id), client_id, EventKind.CLOSED
+                )
+
+
 class _Observation:
     """Watches one connection through its opening exchange."""
 
@@ -246,9 +343,8 @@ class _Observation:
         access = (hello.payload or {}).get("unpaired_access")
         if isinstance(access, dict) and access.get("enabled") is False:
             self._prompter.instruct(
-                "Your app has unpaired access disabled, so the validator cannot activate "
-                "playback without pairing. Pairing support arrives in a later version of "
-                "sendspin-validate; only the connection checks run this time."
+                "Your app has unpaired access disabled, so the validator activates no roles "
+                "until it is paired."
             )
         if not await self._until(lambda record: bool(record.outbound("server/activate"))):
             return
