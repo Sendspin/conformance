@@ -268,7 +268,7 @@ python scripts/setup_workspace.py --clone
 . .venv/bin/activate
 ```
 
-`uv.lock` is committed, and CI installs with `uv sync --locked`, which fails when the lock no longer matches `pyproject.toml`. Run `uv lock` after editing dependencies and commit the result. Run `uv lock --upgrade` to refresh every pin.
+`uv.lock` is committed. CI and `scripts/setup_workspace.py` install with `uv sync --locked`, which fails when the lock no longer matches `pyproject.toml`. Run `uv lock` after editing dependencies and commit the result. Run `uv lock --upgrade` to refresh every pin.
 
 Build adapters:
 
