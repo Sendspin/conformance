@@ -941,20 +941,25 @@ def _repository_versions_section(
         implementation_key = str(repository.get("key") or "")
         title_markup = _repository_link(display_name, str(repo_url) if repo_url else None)
         subtitle_parts: list[str] = []
-        client_code_url = repository.get("client_code_url")
         if implementation_key in filtered_implementations:
             subtitle_parts.append(
                 f"<a class='text-xs font-semibold uppercase tracking-[0.16em] text-retro-burnt hover:text-retro-bark' "
                 f"href='{html.escape(_implementation_href(implementation_key), quote=True)}'>Filtered results</a>"
             )
-        if client_code_url:
-            client_code_markup = (
-                f"<a class='text-xs font-semibold uppercase tracking-[0.16em] text-retro-burnt hover:text-retro-bark' "
-                f"href='{html.escape(str(client_code_url), quote=True)}' target='_blank' rel='noreferrer'>Client code</a>"
+        adapter_code_links = [
+            f"<a class='text-xs font-semibold uppercase tracking-[0.16em] text-retro-burnt hover:text-retro-bark' "
+            f"href='{html.escape(str(code_url), quote=True)}' target='_blank' rel='noreferrer'>{label}</a>"
+            for label, code_url in (
+                ("Client code", repository.get("client_code_url")),
+                ("Server code", repository.get("server_code_url")),
             )
-        else:
-            client_code_markup = ""
-        client_code_row = f"<div class='mt-2'>{client_code_markup}</div>" if client_code_markup else ""
+            if code_url
+        ]
+        adapter_code_row = (
+            f"<div class='mt-2 flex flex-wrap items-center gap-3'>{''.join(adapter_code_links)}</div>"
+            if adapter_code_links
+            else ""
+        )
 
         rows.append(
             "<div class='py-4 sm:py-5'>"
@@ -962,7 +967,7 @@ def _repository_versions_section(
             "<div class='min-w-0'>"
             f"<div class='text-sm font-semibold'>{title_markup}</div>"
             f"<div class='mt-2 flex flex-wrap items-center gap-2'>{''.join(subtitle_parts)}</div>"
-            f"{client_code_row}"
+            f"{adapter_code_row}"
             "</div>"
             "<div class='min-w-0'>"
             "<p class='eyebrow'>Commit</p>"

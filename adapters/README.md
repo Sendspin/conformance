@@ -15,6 +15,7 @@ Current checked-in adapters:
 - `adapters/sendspin-js/client.mjs`: real Node.js client adapter for client-initiated PCM plus the server-initiated PCM, metadata, and controller scenarios, driving the public `SendspinCore` SDK over an adapter-owned WebSocket
 - `adapters/sendspin-cpp/client/`: real C++ client adapter source for the server-initiated metadata, artwork, and controller scenarios, built on the public `SendspinClient` API only. sendspin-cpp exposes no public hook for transported audio chunks, so the player scenarios report the negotiated stream and then fail with that reason instead of an audio hash
 - `adapters/sendspin-rs/client/`: real Rust client adapter source for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios
+- `adapters/sendspin-server-cpp/server/`: real C++ server adapter source for the client- and server-initiated PCM, 24-bit PCM, protocol-baseline, audio-chunk-framing and `client-initiated-state-format-pcm` scenarios, built on the public `SendspinServer` API only. All of its evidence comes from the library's message trace (`ServerConfig::trace` with `trace_writes`), which reports each message's plaintext, inbound after decryption and outbound immediately before encryption, and each completed write
 - `src/conformance/adapters/placeholder.py`: fail-fast placeholder for unsupported roles
 
 Current placeholders in the matrix are modeled in `src/conformance/implementations.py` and fail immediately with a summary explaining why the role is unavailable for a scenario.
@@ -92,6 +93,13 @@ The wait a server owes a newly activated role, for the `client/state` carrying t
 role's object, is not judged: the trace records `available`, not which role objects each
 `client/state` carried.
 
+The sendspin-server-cpp server adapter, like the `aiosendspin` one, opens its stream only
+once the client has reported `available: true`, because the library's timeline starts when
+its input opens and a player that becomes available later joins at the playhead. Its
+`stream/start` gate therefore follows a wait the adapter made. It records `sending` at the
+library's trace entry for the `stream/start` and `sent` at the next write completion the
+trace reports on that connection, which covers every message traced before it.
+
 ## Time exchange
 
 Every server adapter MUST report a `time_exchange` field in its summary: each
@@ -164,6 +172,11 @@ The sendspin-go server adapter answers `client/time` in its own code, so its
 `time_exchange` records a reply the adapter wrote, not one the sendspin-go library sent.
 It records that reply as the value it handed to the library's send queue, which has no
 hook on the write, and records no `other-sent` entries.
+
+The sendspin-server-cpp server adapter places each `server/time` and `other-sent` entry at
+the library's trace entry for that message, taken immediately before encryption, which is
+also where `server_transmitted` is stamped, and keeps it only once a later write
+completion on the connection shows it was written.
 
 ## Metadata scenario summary fields
 
@@ -292,6 +305,9 @@ cannot identify, and the case fails as a harness gap. Where the frame and the au
 are seen on different hooks, pair them by something both carry and report `null` when
 it does not match; the `aiosendspin` adapters use the chunk timestamp, which the SDK
 hands over with the audio and which the frame carries in bytes 1-8.
+The sendspin-server-cpp adapter reports the count the library itself gives with each
+traced audio chunk (`TracedMessage::audio_bytes`), counted from the audio frames it
+packed into that chunk rather than from the message's size.
 
 The server's `audio` block adds:
 

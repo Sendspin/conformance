@@ -76,6 +76,14 @@ def _conformance_client_repo_path(key: str) -> str | None:
     }.get(key)
 
 
+def _conformance_server_repo_path(key: str) -> str | None:
+    return {
+        "aiosendspin": "src/conformance/adapters/aiosendspin_server.py",
+        "sendspin-go": "adapters/sendspin-go/server/main.go",
+        "sendspin-server-cpp": "adapters/sendspin-server-cpp/server/main.cpp",
+    }.get(key)
+
+
 def _head_details(repo: Path) -> tuple[str | None, str | None, str | None, str | None]:
     raw = _run_git(repo, "log", "-1", "--format=%H%x00%h%x00%s%x00%cs")
     if raw is None:
@@ -259,6 +267,13 @@ def collect_repository_versions(
         )
         if client_code_url is not None:
             entry["client_code_url"] = client_code_url
+        server_code_url = _blob_url(
+            conformance_remote_url,
+            conformance_commit_sha,
+            _conformance_server_repo_path(implementation_name),
+        )
+        if server_code_url is not None:
+            entry["server_code_url"] = server_code_url
         repositories.append(entry)
     return repositories
 

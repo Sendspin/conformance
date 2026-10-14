@@ -199,6 +199,7 @@ def _swift_adapter_command(
 def _cmake_adapter_command(
     adapter_dir: str,
     *,
+    binary_name: str,
     build_result: dict[str, Any] | None = None,
     **kwargs: str,
 ) -> LaunchSpec | None:
@@ -214,7 +215,7 @@ def _cmake_adapter_command(
     if cmake is None:
         return None
     build_dir = repo_root() / adapter_dir / "build"
-    binary = build_dir / "conformance-sendspin-cpp-client"
+    binary = build_dir / binary_name
     if not binary.exists():
         return None
     return LaunchSpec(
@@ -313,9 +314,10 @@ def _build_role_command(
         )
     if role_spec.adapter_kind == "cmake":
         assert role_spec.entrypoint is not None
-        ensure_repo_checkout("sendspin-cpp")
+        ensure_repo_checkout(spec.repo_dirname)
         return _cmake_adapter_command(
             role_spec.entrypoint,
+            binary_name=f"conformance-{role_spec.build_adapter}",
             build_result=build_result,
             summary=str(summary),
             ready=str(ready),
