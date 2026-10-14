@@ -1,12 +1,25 @@
 name: publish
 
+# Only harness and site changes run the matrix. The client validator ships in
+# the same package and source tree but never drives the matrix, so it and its
+# vendored aiosendspin are excluded; its checks run in ci.yml instead.
 on:
   push:
     branches:
       - main
+    paths: &matrix-paths
+      - "src/conformance/**"
+      - "!src/conformance/validator/**"
+      - "!src/conformance/_vendor/**"
+      - "adapters/**"
+      - "scripts/**"
+      - "!scripts/vendor_aiosendspin.py"
+      - "pyproject.toml"
+      - ".github/workflows/publish.yml"
   pull_request:
     branches:
       - main
+    paths: *matrix-paths
   workflow_dispatch:
   schedule:
     - cron: "0 2 * * *"
