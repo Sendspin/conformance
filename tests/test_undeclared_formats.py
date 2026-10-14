@@ -1,8 +1,7 @@
 """Coverage for the spec MUST that a negotiated format be one the client declared.
 
-Reproducing a violation end to end (for example a server negotiating 24-bit
-FLAC to a client that offered only 16-bit) needs real implementations and their
-toolchains, so the rule is exercised here against synthetic summaries shaped
+A pairing that violates it needs two real adapters and their toolchains to
+reproduce, so the rule is exercised here against synthetic summaries shaped
 like the ones the adapters really write.
 """
 
@@ -24,11 +23,27 @@ PCM_24 = {"codec": "pcm", "sample_rate": 8000, "bit_depth": 24, "channels": 1}
 ENCODED_SHA = "b" * 64
 
 
+# Every server summary carries one, and a case whose summary lacks it never passes.
+GROUP_UPDATE = {
+    "type": "group/update",
+    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+}
+
+
+# What a server that held stream/start until the client reported available records.
+AVAILABILITY_TRACE = [
+    {"type": "client/state", "available": True},
+    {"type": "stream/start", "phase": "sending", "roles": ["player"]},
+    {"type": "stream/start", "phase": "sent", "roles": ["player"]},
+]
+
+
 def _server_summary(
     *,
     declared: list[Any] | None,
     stream: dict[str, Any] | None,
     include_player_support: bool = True,
+    received_preference: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a server summary that passes encoded-bytes verification on its own."""
     payload: dict[str, Any] = {"name": "synthetic-client"}
@@ -38,9 +53,13 @@ def _server_summary(
         "status": "ok",
         "implementation": "synthetic-server",
         "role": "server",
+        "group_updates": [GROUP_UPDATE],
+        "time_exchange": [],
+        "availability_trace": AVAILABILITY_TRACE,
         "peer_hello": {"type": "client/hello", "payload": payload},
         "stream": stream,
         "audio": {"sent_audio_chunk_count": 4, "sent_encoded_sha256": ENCODED_SHA},
+        "format_preference": {"received": received_preference},
     }
 
 
@@ -213,24 +232,26 @@ class CompareSummariesTest(unittest.TestCase):
         self.assertIn("zero FLAC audio chunks sent", reason)
 
     def test_renegotiation_passes_when_both_formats_were_declared(self) -> None:
-        scenario = require_scenario("client-initiated-request-format-pcm")
+        scenario = require_scenario("client-initiated-state-format-pcm")
         matches, reason = _compare_summaries(
             scenario,
-            _server_summary(declared=[PCM_24, PCM_16], stream=PCM_16),
-            _renegotiation_client_summary(initial=PCM_16, final=PCM_24),
+            _server_summary(
+                declared=[PCM_24, PCM_16], stream=PCM_16, received_preference=PCM_16
+            ),
+            _renegotiation_client_summary(initial=PCM_24, final=PCM_16),
         )
         self.assertTrue(matches, reason)
 
     def test_renegotiation_fails_when_only_one_format_was_declared(self) -> None:
-        scenario = require_scenario("client-initiated-request-format-pcm")
+        scenario = require_scenario("client-initiated-state-format-pcm")
         matches, reason = _compare_summaries(
             scenario,
-            _server_summary(declared=[PCM_16], stream=PCM_16),
-            _renegotiation_client_summary(initial=PCM_16, final=PCM_24),
+            _server_summary(declared=[PCM_16], stream=PCM_16, received_preference=PCM_16),
+            _renegotiation_client_summary(initial=PCM_24, final=PCM_16),
         )
         self.assertFalse(matches)
         self.assertIn("24-bit", reason)
-        self.assertIn("client.renegotiation.final_format", reason)
+        self.assertIn("client.renegotiation.initial_format", reason)
 
 
 if __name__ == "__main__":

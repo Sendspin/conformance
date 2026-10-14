@@ -7,11 +7,20 @@ import asyncio
 import base64
 import logging
 import sys
+import time
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from conformance.adapters._aiosendspin_protocol_evidence import (
+    ChunkPayloadSizes,
+    ProtocolEvidenceCollector,
+    ReceivedBinaryFrameRecorder,
+    record_activation_evidence_client,
+    record_handshake_evidence_client,
+    record_player_stream_evidence,
+)
 from conformance.flac import StreamingFlacDecoder
 from conformance.io import write_json
 from conformance.pcm import FloatPcmHasher, sha256_hex
@@ -78,20 +87,13 @@ def _supported_formats(preferred_codec: str, *, scenario_id: str = "") -> list[A
     if codec is None:
         raise ValueError(f"Unsupported preferred codec: {preferred_codec}")
     if preferred_codec == "opus":
-        return [
-            SupportedAudioFormat(
-                codec=codec,
-                channels=1,
-                sample_rate=48_000,
-                bit_depth=16,
-            ),
-            SupportedAudioFormat(
-                codec=codec,
-                channels=2,
-                sample_rate=48_000,
-                bit_depth=16,
-            ),
-        ]
+        # The registry marks this client `supports_opus=False`, so the runner
+        # fail-fasts the opus case before the adapter is launched.
+        raise ValueError(
+            "aiosendspin decodes PCM and FLAC only and rejects a supported_formats "
+            "list naming any other codec, so it cannot list opus ahead of the pcm "
+            "or flac entry roles/player/v1.md requires"
+        )
     if scenario_id == "server-initiated-pcm-24bit":
         # Match the fixture's native rate/channels so the SDK does not resample
         # during the round trip; only the bit depth changes, which preserves
@@ -102,6 +104,27 @@ def _supported_formats(preferred_codec: str, *, scenario_id: str = "") -> list[A
                 channels=1,
                 sample_rate=8_000,
                 bit_depth=24,
+            ),
+        ]
+    # The format-preference scenarios list exactly two entries at the fixture's
+    # native rate and channels: the server starts on the first, and the client
+    # then prefers the second through client/state.
+    if scenario_id == "client-initiated-state-format-pcm":
+        return [
+            SupportedAudioFormat(
+                codec=AudioCodec.PCM, channels=1, sample_rate=8_000, bit_depth=24
+            ),
+            SupportedAudioFormat(
+                codec=AudioCodec.PCM, channels=1, sample_rate=8_000, bit_depth=16
+            ),
+        ]
+    if scenario_id == "client-initiated-state-format-flac":
+        return [
+            SupportedAudioFormat(
+                codec=AudioCodec.PCM, channels=1, sample_rate=8_000, bit_depth=16
+            ),
+            SupportedAudioFormat(
+                codec=AudioCodec.FLAC, channels=1, sample_rate=8_000, bit_depth=16
             ),
         ]
     return [
@@ -159,6 +182,21 @@ def _normalize_metadata_state(metadata: Any) -> dict[str, Any] | None:
     }
 
 
+def _metadata_timestamp_us(metadata: Any) -> int | None:
+    """Return the `timestamp` a `server/state` metadata object carries, or None if it has none.
+
+    Read as a required attribute, like the other mandatory fields the sibling
+    normalizers take directly: the runner reads a None here as a server that
+    omitted the timestamp, so an SDK that renamed the field should raise rather
+    than report every server as non-conformant.
+    """
+    timestamp = metadata.timestamp
+    # bool is an int subclass, and the wire value reaches here unvalidated.
+    if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+        return None
+    return timestamp
+
+
 def _normalize_controller_state(controller: Any) -> dict[str, Any] | None:
     if controller is None:
         return None
@@ -176,7 +214,7 @@ async def _run(args: argparse.Namespace) -> int:
     _add_repo_to_syspath("aiosendspin")
 
     from aiosendspin.client import ClientListener, SendspinClient
-    from aiosendspin.models.artwork import ArtworkChannel, ClientHelloArtworkSupport
+    from aiosendspin.models.artwork import ArtworkChannel
     from aiosendspin.models.player import ClientHelloPlayerSupport
     from aiosendspin.models.types import (
         MediaCommand,
@@ -185,8 +223,8 @@ async def _run(args: argparse.Namespace) -> int:
         ArtworkSource,
     )
     from aiosendspin.models.types import PlayerCommand
-    from aiosendspin.noise.keys import Identity
-    from aiosendspin.noise.trust_store import InMemoryClientPairingStore
+
+    from conformance.adapters._aiosendspin_pairing import make_client_identity_and_store
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
@@ -201,11 +239,13 @@ async def _run(args: argparse.Namespace) -> int:
     }
     received_hasher = FloatPcmHasher()
     encoded_accumulator = bytearray()
+    received_payload_sizes = ChunkPayloadSizes()
     current_decoder: StreamingFlacDecoder | None = None
 
     metadata_state: dict[str, Any] = {
         "received": None,
         "update_count": 0,
+        "first_object_state": None,
     }
     controller_state: dict[str, Any] = {
         "received_state": None,
@@ -219,6 +259,17 @@ async def _run(args: argparse.Namespace) -> int:
         "byte_count": 0,
     }
     artwork_hasher = sha256()
+    audio_chunk_timestamps_us: list[int] = []
+    format_preference_scenario = args.scenario_id in {
+        "client-initiated-state-format-pcm",
+        "client-initiated-state-format-flac",
+    }
+    renegotiation_state: dict[str, Any] = {
+        "stream_start_count": 0,
+        "requested": None,
+        "initial_format": None,
+        "final_format": None,
+    }
 
     def flush_decoder() -> None:
         nonlocal current_decoder
@@ -274,8 +325,12 @@ async def _run(args: argparse.Namespace) -> int:
         else:
             current_decoder = None
 
-    def on_audio_chunk(timestamp_us: int, payload: bytes, audio_format: Any) -> None:
-        del timestamp_us
+    def on_audio_chunk(
+        timestamp_us: int, payload: bytes, audio_format: Any, _send_ahead: int
+    ) -> None:
+        audio_chunk_timestamps_us.append(timestamp_us)
+        if received_frames is not None:
+            received_payload_sizes.record(timestamp_us, payload)
         audio_state["chunk_count"] += 1
         encoded_accumulator.extend(payload)
         codec = audio_format.codec.value
@@ -295,6 +350,37 @@ async def _run(args: argparse.Namespace) -> int:
     def on_stream_end(_roles: list[str] | None) -> None:
         flush_decoder()
 
+    def on_format_preference_chunk(
+        _timestamp_us: int, _payload: bytes, audio_format: Any, _send_ahead: int
+    ) -> None:
+        # The SDK does not notify stream-start listeners when a stream/start
+        # changes the format of an active stream; the change shows only in the
+        # format attached to the chunks that follow it.
+        stream_format = {
+            "codec": audio_format.codec.value,
+            "sample_rate": audio_format.pcm_format.sample_rate,
+            "channels": audio_format.pcm_format.channels,
+            "bit_depth": audio_format.pcm_format.bit_depth,
+        }
+        current = renegotiation_state["final_format"] or renegotiation_state["initial_format"]
+        if stream_format == current:
+            return
+        renegotiation_state["stream_start_count"] += 1
+        if current is not None:
+            renegotiation_state["final_format"] = stream_format
+            return
+        # The first format is the server's own pick from the priority list;
+        # only now does the client state a different preference.
+        renegotiation_state["initial_format"] = stream_format
+        preferred = player_support.supported_formats[1]
+        renegotiation_state["requested"] = {
+            "codec": preferred.codec.value,
+            "sample_rate": preferred.sample_rate,
+            "channels": preferred.channels,
+            "bit_depth": preferred.bit_depth,
+        }
+        asyncio.create_task(client.set_preferred_format(preferred))
+
     def on_artwork_chunk(channel: int, data: bytes) -> None:
         artwork_state["channel"] = channel
         artwork_state["received_count"] += 1
@@ -303,8 +389,9 @@ async def _run(args: argparse.Namespace) -> int:
         artwork_state["received_sha256"] = artwork_hasher.copy().hexdigest()
 
     scenario_roles: list[Any]
-    artwork_support: Any | None = None
+    artwork_channels: list[Any] | None = None
     player_support: Any | None = None
+    state_supported_commands: list[Any] | None = None
 
     if args.scenario_id in {
         "client-initiated-pcm",
@@ -312,14 +399,24 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
+        "server-initiated-legacy-unencrypted",
+        "server-initiated-protocol-baseline-v1",
+        "server-initiated-audio-chunk-framing",
+        "client-initiated-state-format-pcm",
+        "client-initiated-state-format-flac",
     }:
-        player_support = ClientHelloPlayerSupport(
-            supported_formats=_supported_formats(
-                args.preferred_codec, scenario_id=args.scenario_id
-            ),
-            buffer_capacity=2_000_000,
-            supported_commands=[PlayerCommand.VOLUME, PlayerCommand.MUTE],
-        )
+        try:
+            player_support = ClientHelloPlayerSupport(
+                supported_formats=_supported_formats(
+                    args.preferred_codec, scenario_id=args.scenario_id
+                ),
+                buffer_capacity=2_000_000,
+            )
+        except ValueError as err:
+            write_json(ready_path, {"status": "error"})
+            write_json(summary_path, {"status": "error", "reason": str(err)})
+            return 1
+        state_supported_commands = [PlayerCommand.VOLUME, PlayerCommand.MUTE]
         scenario_roles = [Roles.PLAYER]
     elif args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}:
         scenario_roles = [Roles.METADATA]
@@ -327,34 +424,43 @@ async def _run(args: argparse.Namespace) -> int:
         scenario_roles = [Roles.CONTROLLER]
     elif args.scenario_id in {"client-initiated-artwork", "server-initiated-artwork"}:
         scenario_roles = [Roles.ARTWORK]
-        artwork_support = ClientHelloArtworkSupport(
-            channels=[
-                ArtworkChannel(
-                    source=ArtworkSource.ALBUM,
-                    format=PictureFormat(args.artwork_format.lower()),
-                    media_width=args.artwork_width,
-                    media_height=args.artwork_height,
-                )
-            ]
-        )
+        artwork_channels = [
+            ArtworkChannel(
+                source=ArtworkSource.ALBUM,
+                format=PictureFormat(args.artwork_format.lower()),
+                width=args.artwork_width,
+                height=args.artwork_height,
+            )
+        ]
     else:
+        write_json(ready_path, {"status": "error"})
         write_json(
             summary_path,
             {
                 "status": "error",
-                "reason": f"Unsupported scenario for aiosendspin client adapter: {args.scenario_id}",
+                "reason": (
+                    "Harness gap, not a protocol result: the aiosendspin client adapter "
+                    f"has no CLI surface for scenario {args.scenario_id}"
+                ),
             },
         )
         return 1
 
+    identity, pairing_store = await make_client_identity_and_store(
+        server_id=args.server_id,
+        client_id=args.client_id,
+    )
     client = SendspinClient(
-        identity=Identity.generate(),
+        identity=identity,
         client_name=args.client_name,
         roles=scenario_roles,
-        pairing_store=InMemoryClientPairingStore(),
+        pairing_store=pairing_store,
         player_support=player_support,
-        artwork_support=artwork_support,
+        artwork_channels=artwork_channels,
+        state_supported_commands=state_supported_commands,
     )
+    # Lets a server that holds no record for this client activate it unpaired.
+    await client.set_unpaired_access(enabled=True)
 
     client.add_stream_start_listener(on_stream_start)
     client.add_artwork_listener(on_artwork_chunk)
@@ -365,14 +471,59 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
+        "server-initiated-legacy-unencrypted",
+        "server-initiated-protocol-baseline-v1",
+        "server-initiated-audio-chunk-framing",
     }:
         client.add_audio_chunk_listener(on_audio_chunk)
         client.add_stream_end_listener(on_stream_end)
+
+        # The SDK applies set_output_delay itself but only dispatches volume and
+        # mute to a listener, so the commands advertised in client/state are
+        # honoured only if the adapter applies them and reports the new state.
+        reported = {"volume": client.initial_volume, "muted": client.initial_muted}
+
+        async def report_player_state() -> None:
+            await client.send_player_state(
+                available=True,
+                volume=reported["volume"],
+                muted=reported["muted"],
+            )
+
+        def on_server_command(payload: Any) -> None:
+            player = getattr(payload, "player", None)
+            if player is None:
+                return
+            if player.command == PlayerCommand.VOLUME and player.volume is not None:
+                reported["volume"] = player.volume
+            elif player.command == PlayerCommand.MUTE and player.mute is not None:
+                reported["muted"] = player.mute
+            else:
+                return
+            asyncio.create_task(report_player_state())
+
+        client.add_server_command_listener(on_server_command)
+
+    if format_preference_scenario:
+        client.add_audio_chunk_listener(on_format_preference_chunk)
 
     if args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}:
         def on_metadata(payload: Any) -> None:
             metadata_state["update_count"] += 1
             metadata_state["received"] = _normalize_metadata_state(payload.metadata)
+            # The role activates before the scenario sets a track, and the
+            # state the SDK sends for it then takes one of two shapes the
+            # harness has to handle, since either aiosendspin revision may be
+            # the one cloned. A timestamp-only metadata object has a timestamp,
+            # so it is recorded here and is the state the matrix judges. An
+            # explicit null object has none, and the requirement applies only to
+            # an object that has one, so it is passed over and the judged state
+            # becomes the next one that really carries metadata.
+            if payload.metadata is not None and metadata_state["first_object_state"] is None:
+                metadata_state["first_object_state"] = {
+                    "update_index": metadata_state["update_count"],
+                    "timestamp_us": _metadata_timestamp_us(payload.metadata),
+                }
 
         client.add_metadata_listener(on_metadata)
 
@@ -396,8 +547,25 @@ async def _run(args: argparse.Namespace) -> int:
 
     client.add_disconnect_listener(record_disconnect)
 
+    # Installed before the client connects, so no frame can arrive ahead of it.
+    received_frames = (
+        ReceivedBinaryFrameRecorder()
+        if args.scenario_id == "server-initiated-audio-chunk-framing"
+        else None
+    )
+    handshake_timestamps: list[float] = []
+    captured_connection: list[Any] = [None]
+
     async def handle_connection(ws: Any) -> None:
-        await client.attach_websocket(ws)
+        handshake_timestamps.append(time.time())
+        connect_task = asyncio.create_task(client.attach_websocket(ws))
+        while not connect_task.done() and captured_connection[0] is None:
+            if client._admitted_connection is not None:  # noqa: SLF001
+                captured_connection[0] = client._admitted_connection  # noqa: SLF001
+                handshake_timestamps.append(time.time())
+                break
+            await asyncio.sleep(0)
+        await connect_task
         await disconnect_event.wait()
 
     try:
@@ -415,7 +583,9 @@ async def _run(args: argparse.Namespace) -> int:
                 args.server_name,
                 args.timeout_seconds,
             )
+            handshake_timestamps.append(time.time())
             await client.connect(target_url)
+            handshake_timestamps.append(time.time())
             await asyncio.wait_for(disconnect_event.wait(), timeout=args.timeout_seconds)
         else:
             listener = ClientListener(
@@ -484,6 +654,7 @@ async def _run(args: argparse.Namespace) -> int:
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
+        "server-initiated-legacy-unencrypted",
     }:
         summary["stream"] = audio_state["stream"]
         summary["audio"] = {
@@ -492,10 +663,71 @@ async def _run(args: argparse.Namespace) -> int:
             "received_pcm_sha256": received_hasher.hexdigest(),
             "received_sample_count": received_hasher.sample_count,
         }
+    elif received_frames is not None:
+        frames = received_frames.frames()
+        summary["stream"] = audio_state["stream"]
+        summary["audio"] = {
+            "audio_chunk_count": audio_state["chunk_count"],
+            "received_encoded_byte_count": len(encoded_accumulator),
+            # Chunks that reached the listener without a frame being recorded
+            # came over a transport the recorder does not watch.
+            "received_chunk_frames": (
+                received_payload_sizes.paired(frames)
+                if frames or not audio_state["chunk_count"]
+                else None
+            ),
+        }
+    elif format_preference_scenario:
+        summary["stream"] = audio_state["stream"]
+        summary["renegotiation"] = renegotiation_state
+    elif args.scenario_id == "server-initiated-protocol-baseline-v1":
+        collector = ProtocolEvidenceCollector()
+        connection = captured_connection[0]
+        assert len(handshake_timestamps) == 2, "handshake start/end timestamps were not captured"
+        if connection is not None:
+            record_handshake_evidence_client(
+                collector,
+                connection,
+                start_ts=handshake_timestamps[0],
+                end_ts=handshake_timestamps[1],
+            )
+        record_activation_evidence_client(collector, client)
+        advertised_formats = [
+            {
+                "codec": fmt.codec.value,
+                "sample_rate": fmt.sample_rate,
+                "channels": fmt.channels,
+                "bit_depth": fmt.bit_depth,
+            }
+            for fmt in (player_support.supported_formats if player_support is not None else [])
+        ]
+        negotiated_format = None
+        if audio_state["stream"] is not None:
+            negotiated_format = {
+                "codec": audio_state["stream"]["codec"],
+                "sample_rate": audio_state["stream"]["sample_rate"],
+                "channels": audio_state["stream"]["channels"],
+                "bit_depth": audio_state["stream"]["bit_depth"],
+            }
+        record_player_stream_evidence(
+            collector,
+            advertised_formats=advertised_formats,
+            negotiated_format=negotiated_format,
+            chunk_count=audio_state["chunk_count"],
+            chunk_timestamps_us=audio_chunk_timestamps_us,
+        )
+        summary["stream"] = audio_state["stream"]
+        summary["audio"] = {
+            "audio_chunk_count": audio_state["chunk_count"],
+            "received_pcm_sha256": received_hasher.hexdigest(),
+            "received_sample_count": received_hasher.sample_count,
+        }
+        summary["protocol"] = collector.to_summary_fragment()
     elif args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}:
         summary["metadata"] = {
             "update_count": metadata_state["update_count"],
             "received": metadata_state["received"],
+            "first_object_state": metadata_state["first_object_state"],
         }
     elif args.scenario_id in {"client-initiated-controller", "server-initiated-controller"}:
         summary["controller"] = {

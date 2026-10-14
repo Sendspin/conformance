@@ -7,12 +7,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SENDSPIN_CPP_REPO "${CMAKE_CURRENT_SOURCE_DIR}/../../../repos/sendspin-cpp"
     CACHE PATH "Path to sendspin-cpp repository checkout")
 
+# The plaintext message trace (SendspinClientConfig::message_trace) is the adapter's evidence
+set(SENDSPIN_ENABLE_MESSAGE_TRACE ON)
+
 # sendspin-cpp host build brings in IXWebSocket and ArduinoJson via FetchContent
 add_subdirectory(${SENDSPIN_CPP_REPO} sendspin-cpp EXCLUDE_FROM_ALL)
 
 find_package(OpenSSL REQUIRED)
 
-add_executable(conformance-sendspin-cpp-client main.cpp)
+add_executable(conformance-sendspin-cpp-client main.cpp trace_evidence.cpp)
 target_link_libraries(conformance-sendspin-cpp-client PRIVATE sendspin)
-target_include_directories(conformance-sendspin-cpp-client PRIVATE ${SENDSPIN_CPP_REPO}/src)
 target_link_libraries(conformance-sendspin-cpp-client PRIVATE OpenSSL::Crypto)

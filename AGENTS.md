@@ -33,7 +33,16 @@ Every implementation is modeled as exactly two CLIs:
 - `server`
 - `client`
 
-Client-side unsupported roles still need a CLI surface that the harness can invoke. Those cases should fail fast, emit a summary, and exit non-zero. Server-side unsupported scenarios are filtered out before case creation, so the runner does not create dead server rows in the matrix.
+An implementation whose role is not `supported` at all gets no cases in that role: the runner skips it before case creation and the report draws no row (server) or column (client) for it, so a server-only or client-only implementation adds no dead cells to the matrix. Both the runner and the site take the client list from `implementations_with_role()` and the server list from `implementations_for_scenario()`.
+
+The filters differ per side. Server rows are also dropped per scenario, wherever `RoleSpec.unsupported_reason()` returns a reason. Client columns are not: a client that implements the role but cannot run one scenario still gets a case, which fails fast through the placeholder adapter and reads as "Unsupported" in that column.
+
+When the harness judges a case unsupported — the role is not `supported`, or
+`RoleSpec.unsupported_reason()` returns a reason for the scenario — it stamps
+`unsupported: true` on the result row. The report labels and counts a failed cell
+as unsupported from that field alone, never from the wording of a `reason`, so an
+adapter cannot relabel its own failure. `status` stays `failed`. A row published
+before the field existed carries none and reads as a plain failure.
 
 Adapters do not need to rely on the implementation library owning discovery itself.
 External mDNS advertisement/browsing or the harness registry handoff are acceptable,
@@ -87,6 +96,12 @@ Cross-run metadata such as build logs and repository revisions also live under
 so a merged multi-host run regenerates it rather than merging it. It carries a
 `schema_version`; downstream consumers should check it.
 
+`repositories.json` leads with a `spec` entry recording the revision of the
+Sendspin spec the run was audited against, followed by one entry per
+implementation the run covered. Every entry carries `revision_label`, a
+`git describe` label that is a tag when the checkout sits on one. A merged
+multi-host run keeps one entry per host, so `spec` is not unique there.
+
 Do not reintroduce SPA-style routing or inline all case details onto scenario pages.
 
 ### Report behavior
@@ -113,9 +128,31 @@ Important fields to preserve where available:
 - `initiator_role`
 - `preferred_codec`
 - `peer_hello`
+- `activation` (server summaries)
+- `availability_trace` (server summaries)
+- `time_exchange` (server summaries)
+- `group_updates` (server summaries)
 - audio hash fields
 
 `peer_hello` should contain the full hello message received from the other party whenever capture is possible.
+
+`activation` should contain the first `server/activate` the server sent, as it went on the wire and in the same `{type, payload}` shape as `peer_hello`. It is `null` only when the server sent none, and is never reconstructed from adapter arguments or SDK state.
+
+`null` fails the case: `activation_violation` in `src/conformance/protocol.py` judges this field on every case, whatever the scenario.
+
+`group_updates` should contain every `group/update` the server sent after that first `server/activate`, in order, each as it went on the wire and in the same `{type, payload}` shape. It is an empty list only when none followed, and is never reconstructed from adapter arguments or SDK state.
+
+`group_update_violation` in `src/conformance/protocol.py` judges this field on every case too. An empty list fails the case, and so does any recorded `group/update` whose `playback_state` is not `playing` or `stopped`, or whose `group_id` or `group_name` is missing or not a string. Unlike `activation`, a summary without the field also fails the case, as a harness gap. The difference is deliberate, so do not align the two. Every server adapter in the tree records `group_updates`, so a summary without it comes from a broken adapter, never from an implementation that predates the field, and failing closed keeps an adapter that cannot observe the messages from reading as a server that sent them. How soon the first message followed is not judged, because the spec says "promptly" and gives no bound, so one sent at any point in the case satisfies it.
+
+Every recorded `group/update` is judged for its fields. The same spec sentence also requires one "whenever any field listed below changes", and nothing in the matrix asserts that a change produced one.
+
+`availability_trace` should contain each `client/state` the server received and each `stream/start` it sent, in the order the adapter observed them, as `adapters/README.md` specifies. It is `null` only when the adapter cannot observe that ordering, and is never reconstructed from what the implementation is expected to do.
+
+`null` or a missing field fails the case as a harness gap: `stream_start_gate_violation` in `src/conformance/protocol.py` judges this field on every scenario that opens a player or artwork stream.
+
+`time_exchange` should contain each `client/time` the server received and each `server/time` it sent, in the order the adapter observed them, each as it went on the wire and in the same `{type, payload}` shape, with an `other-sent` entry where the server began sending any other text message, as `adapters/README.md` specifies. It is an empty list when the client sent no `client/time`, `null` only when the adapter cannot observe the messages, and is never reconstructed from adapter arguments or SDK state.
+
+`time_exchange_violation` in `src/conformance/protocol.py` judges this field on every case. `null` or a missing field fails the case as a harness gap, and an empty list gives it nothing to judge. It does not judge the timestamp values, how late `server_transmitted` was stamped, or whether the client's time filter converged, and `adapters/README.md` gives the reason for each.
 
 ### Audio fixture
 
@@ -132,6 +169,13 @@ GitHub Actions should still publish artifacts and GitHub Pages even when the con
 
 Build/setup failures are different: those can still be real workflow failures.
 
+Two workflows run on pull requests and pushes to `main`:
+
+- `publish.yml` builds every implementation, runs the full matrix on macOS and publishes Pages. Only changes that can alter the matrix or the site start it: `src/conformance/**`, `adapters/**`, `scripts/**`, `pyproject.toml`, `uv.lock` and the workflow itself. The client validator (`src/conformance/validator/**`), its vendored aiosendspin (`src/conformance/_vendor/**`) and `scripts/vendor_aiosendspin.py` are excluded, because the matrix never runs them. Changes to `tests/`, docs or other workflows do not start it either. The nightly schedule and manual dispatch always run it.
+- `ci.yml` runs `scripts/vendor_aiosendspin.py --check` and `tests/` on Linux whenever `src/`, `tests/`, `scripts/`, `patches/`, `pyproject.toml`, `uv.lock` or the workflow itself changes. Checks that need no implementation clones or macOS toolchains belong here.
+
+A new path the matrix depends on must be added to `publish.yml`'s path filters, or changes to it will merge without a matrix run.
+
 The published workflow currently runs on `macos-latest` and publishes one matrix without host-specific sections in the UI. Internal environment metadata may still exist in raw artifacts for build-log lookup or local merged runs, but the public report should read as one authoritative matrix.
 
 ### Regression detection
@@ -142,6 +186,34 @@ After building the report, CI compares local results against the live published 
 - **Pushes to main / scheduled / manual**: regressions are logged and a Discord notification text is uploaded as an artifact (`discord-regression-notice`), but the workflow does not fail so that Pages still publishes.
 
 If the baseline is unreachable (first publish, network error), the check is skipped silently.
+
+Changing what a scenario does — tightening its assertions, or altering the
+stimulus it drives the pair with — turns its cells red by design, which is not a
+regression. Each `ScenarioSpec` carries a `scenario_revision`, stamped onto every
+result row, and a cell is exempt from comparison when its baseline row carries a
+different revision. Exempt cells are always printed, with their reason.
+
+A baseline published before the field existed carries no revision on any row, so
+every cell is exempt for that one release. That exemption retires itself: once
+*any* baseline row carries a revision, a row missing one is read as a broken
+contract rather than an old publish, and the cell keeps its protection. A local
+result row missing a revision fails the check outright — it is written by the
+harness in the same checkout, so its absence is a bug, not a migration. The
+blanket is re-armable: replacing the published baseline with one built from a
+checkout that predates the field exempts every cell again for that release. It
+announces itself — the whole matrix prints the migration reason — and closing it
+costs more than the risk.
+
+Bumping `scenario_revision` on the one scenario that changed is the deliberate
+act that resets its baseline; every other scenario in the same run
+keeps full protection. A verdict applied to every case, such as
+`activation_violation`, `group_update_violation` or
+`time_exchange_violation`, changes the assertions of every scenario and so
+bumps them all, which exempts the whole matrix for that one release. A
+verdict applied to some scenarios, such as
+`stream_start_gate_violation`, bumps only those. Do not add a
+waiver file, allowlist or PR-label escape hatch — the baseline is live and
+remote, so any such list goes stale on the next merge.
 
 ## Repository map
 
@@ -154,19 +226,23 @@ If the baseline is unreachable (first publish, network error), the check is skip
 - `src/conformance/build.py`: adapter build checks
 - `src/conformance/repository_versions.py`: git revision metadata written into `results/data/repositories.json`
 - `src/conformance/declared_formats.py`: joins client format declarations to the formats the matrix negotiated, written into `results/data/declared-formats.json`
+- `src/conformance/chunk_framing.py`: judges the player audio chunk header and chunk durations from the frames a case transported
 - `src/conformance/merge.py`: merges host-specific raw result directories, including build and repository metadata
 - `src/conformance/site.py`: static site generation
 - `src/conformance/flac.py` and `src/conformance/pcm.py`: canonical decode/hash helpers
+- `src/conformance/_vendor/`: aiosendspin bundled for the client validator under its own import name, generated by `scripts/vendor_aiosendspin.py` from upstream plus `patches/aiosendspin/`. Never edit it by hand. The harness and its adapters keep loading `aiosendspin` from `repos/`
 
 ### Adapters
 
 - `src/conformance/adapters/aiosendspin_server.py`: real Python server adapter
 - `src/conformance/adapters/aiosendspin_client.py`: real Python client adapter
 - `adapters/sendspin-dotnet/client/`: real `.NET` client adapter source
-- `adapters/sendspin-go/`: real Go client/server adapter source
+- `adapters/sendspin-go/`: Go client adapter source, kept but not currently built or tested
 - `adapters/SendspinKit/client/`: real Swift client adapter source with an adapter-owned inbound WebSocket listener for server-initiated scenarios
 - `adapters/sendspin-rs/client/`: real Rust client adapter source
 - `adapters/sendspin-js/client.mjs`: real Node.js client adapter source that drives the public `SendspinCore` SDK over an adapter-owned WebSocket
+- `adapters/sendspin-cpp/client/`: real C++ client adapter source, built against `repos/sendspin-cpp` with CMake, whose audio and protocol evidence comes from the library's message trace
+- `adapters/sendspin-server-cpp/server/`: real C++ server adapter source, built against `repos/sendspin-server-cpp` with CMake, whose evidence comes from the library's message trace
 - `src/conformance/adapters/placeholder.py`: generic fail-fast adapter
 
 ### Scripts
@@ -175,10 +251,12 @@ If the baseline is unreachable (first publish, network error), the check is skip
 - `scripts/setup_workspace.py`: create local venv and install Python deps
 - `scripts/run_all.py`: build + run + report orchestration
 - `scripts/merge_results.py`: merge multiple host result sets into one report
+- `scripts/vendor_aiosendspin.py`: rebuild `src/conformance/_vendor/` at an upstream ref, or `--check` it against the recorded commit
 
 ### CI
 
 - `.github/workflows/publish.yml`: macOS build + run + Pages publishing
+- `.github/workflows/ci.yml`: Linux unit tests, and `scripts/vendor_aiosendspin.py --check` against the committed `src/conformance/_vendor/`
 - `scripts/detect_regressions.py`: compares local results against the published baseline to detect regressions
 
 ## Standard commands
@@ -189,6 +267,8 @@ Bootstrap locally:
 python scripts/setup_workspace.py --clone
 . .venv/bin/activate
 ```
+
+`uv.lock` is committed. CI and `scripts/setup_workspace.py` install with `uv sync --locked`, which fails when the lock no longer matches `pyproject.toml`. Run `uv lock` after editing dependencies and commit the result. Run `uv lock --upgrade` to refresh every pin.
 
 Build adapters:
 
@@ -261,8 +341,8 @@ If a scenario requires new behavior that does not fit the existing generic contr
 ## How to add or upgrade an implementation adapter
 
 1. Add or update the implementation entry in `src/conformance/implementations.py`.
-2. Expose both `server` and `client` roles.
-3. If a role is unsupported, wire it to a fail-fast adapter and give a precise `reason`.
+2. Declare both `server` and `client` roles.
+3. If a role is unsupported, set `supported=False`, wire it to the placeholder adapter and give a precise `reason`. The matrix then has no row or column for that role.
 4. Keep adapter summaries aligned with the common summary contract.
 5. Update `adapters/README.md` if the adapter contract changes.
 6. Verify both build-time and run-time behavior.
@@ -290,7 +370,8 @@ Typical minimum:
 
 `tests/` holds stdlib `unittest` coverage for harness rules that the matrix
 cannot reach on a machine without every toolchain installed. It needs no test
-dependency beyond the package itself and is not wired into CI.
+dependency beyond the package itself and runs in `ci.yml`. A test that needs an
+implementation clone or a macOS toolchain skips itself when that is missing.
 
 If you changed CI, read `.github/workflows/publish.yml` afterward and confirm:
 

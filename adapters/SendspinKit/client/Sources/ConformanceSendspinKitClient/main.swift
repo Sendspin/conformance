@@ -119,6 +119,18 @@ struct CliOptions {
 
     var isPlayerScenario: Bool {
         scenarioID.contains("pcm") || scenarioID.contains("flac") || scenarioID.contains("opus")
+            || scenarioID == "server-initiated-protocol-baseline-v1"
+            || scenarioID == "server-initiated-legacy-unencrypted"
+            || isChunkFramingScenario
+    }
+
+    var isChunkFramingScenario: Bool {
+        scenarioID == "server-initiated-audio-chunk-framing"
+    }
+
+    var isFormatPreferenceScenario: Bool {
+        scenarioID == "client-initiated-state-format-pcm"
+            || scenarioID == "client-initiated-state-format-flac"
     }
 
     /// Codecs whose conformance check compares the raw encoded chunk bytes the
@@ -320,8 +332,16 @@ actor ConformanceCollector {
     // Audio (player scenarios)
     var pcmHasher = FloatPcmHasher()
     var encodedHasher = RawHasher()
+    var encodedByteCount: Int = 0
     var audioChunkCount: Int = 0
     var streamFormat: AudioFormatSpec?
+    var initialStreamFormat: AudioFormatSpec?
+    var streamStartCount = 0
+    var requestedFormat: AudioFormatSpec?
+
+    func recordPreferenceRequest(_ format: AudioFormatSpec) {
+        requestedFormat = format
+    }
     var codecHeaderBase64: String?
     /// PCM chunks received before the stream format was known, awaiting a bit
     /// depth so they can be hashed in arrival order.
@@ -342,11 +362,27 @@ actor ConformanceCollector {
 
     // Server hello
     var peerHello: ServerInfo?
+    var protocolEvents: [[String: Any]] = []
+    var activatedRoles: Set<VersionedRole> = []
+    var activationObserved = false
+    var earlyStream = false
+    var chunkTimestamps: [Int64] = []
+
+    private func recordProtocolEvent(_ event: String, fields: [String: Any] = [:]) {
+        protocolEvents.append(fields.merging([
+            "event": event, "timestamp": Date().timeIntervalSince1970,
+        ]) { _, value in value })
+    }
 
     /// Terminal status reported in the summary. Stays "ok" for a clean run;
-    /// set to "timeout" when the run is cut short so the harness sees a failure
-    /// with a clear reason instead of a missing summary.
+    /// set to "timeout" when the run is cut short, or "error" when it fails,
+    /// so the harness sees a failure with a clear reason instead of a missing
+    /// summary.
     var runStatus: String = "ok"
+
+    /// Why the run failed, reported as the summary's `reason`. Nil for a run
+    /// that did not fail.
+    var failureReason: String?
 
     init(options: CliOptions) {
         self.options = options
@@ -356,10 +392,20 @@ actor ConformanceCollector {
         runStatus = status
     }
 
-    func recordAudioChunk(data: Data) {
+    func recordFailure(_ reason: String) {
+        runStatus = "error"
+        failureReason = reason
+    }
+
+    func recordAudioChunk(data: Data, serverTimestamp: Int64) {
+        if audioChunkCount == 0 {
+            recordProtocolEvent("first_audio_chunk", fields: ["server_timestamp_us": serverTimestamp])
+        }
+        chunkTimestamps.append(serverTimestamp)
         audioChunkCount += 1
         // Raw encoded bytes (FLAC/Opus verification) need no format to hash.
         encodedHasher.update(data)
+        encodedByteCount += data.count
         // Canonical float32 hashing needs the bit depth.
         // "none" is a harness-level concept for non-audio scenarios that still
         // stream raw PCM — there is no AudioCodec.none in the SDK.
@@ -373,6 +419,13 @@ actor ConformanceCollector {
     }
 
     func recordStreamFormat(_ format: AudioFormatSpec, codecHeader: Data?) {
+        earlyStream = earlyStream || !activationObserved
+        recordProtocolEvent("stream_start_observed", fields: [
+            "codec": format.codec.rawValue, "sample_rate": format.sampleRate,
+            "channels": format.channels, "bit_depth": format.bitDepth,
+        ])
+        if initialStreamFormat == nil { initialStreamFormat = format }
+        streamStartCount += 1
         streamFormat = format
         if let header = codecHeader {
             codecHeaderBase64 = header.base64EncodedString()
@@ -404,7 +457,23 @@ actor ConformanceCollector {
     }
 
     func recordPeerHello(_ info: ServerInfo) {
-        peerHello = info
+        if peerHello == nil {
+            recordProtocolEvent("handshake_completed", fields: ["server_id": info.serverId,
+                "evidence_source": "Public serverConnected follows SDK handshake completion"])
+        }
+        if peerHello == nil || !info.name.isEmpty { peerHello = info }
+        if !info.activeRoles.isEmpty {
+            activationObserved = true
+            activatedRoles = info.activeRoles
+            recordProtocolEvent("server_activate_accepted", fields: [
+                "active_roles": info.activeRoles.map(\.identifier).sorted(),
+            ])
+            recordProtocolEvent("initial_client_state_gate_satisfied", fields: [
+                "evidence_source": "SDK activation sends initial client/state before admitting role data",
+            ])
+        } else {
+            recordProtocolEvent("handshake_completed", fields: ["server_id": info.serverId])
+        }
     }
 
     /// Serialize the summary to JSON Data inside the actor, avoiding Sendable issues
@@ -426,6 +495,9 @@ actor ConformanceCollector {
             "client_name": options.clientName,
             "client_id": options.clientID,
         ]
+        if let failureReason {
+            summary["reason"] = failureReason
+        }
 
         if let hello = peerHello {
             summary["peer_hello"] = [
@@ -433,20 +505,51 @@ actor ConformanceCollector {
                 "payload": [
                     "server_id": hello.serverId,
                     "name": hello.name,
-                    "version": hello.version,
-                    "connection_reason": hello.connectionReason.rawValue,
                 ] as [String: Any],
             ] as [String: Any]
             summary["server"] = [
                 "server_id": hello.serverId,
                 "name": hello.name,
-                "version": hello.version,
-                "connection_reason": hello.connectionReason.rawValue,
             ] as [String: Any]
         } else {
             summary["peer_hello"] = nil
         }
 
+        if options.scenarioID == "server-initiated-protocol-baseline-v1" {
+            func assertion(_ passed: Bool, _ detail: String) -> [String: Any] {
+                ["status": passed ? "passed" : "failed", "detail": detail, "events": protocolEvents]
+            }
+            let handshakeObserved = protocolEvents.contains { ($0["event"] as? String) == "handshake_completed" }
+            let formatAdvertised = streamFormat.map {
+                $0.codec == .pcm && $0.channels == 1 && $0.sampleRate == 8000 && $0.bitDepth == 16
+            } ?? false
+            let timestampsValid = !chunkTimestamps.isEmpty && zip(chunkTimestamps, chunkTimestamps.dropFirst()).allSatisfy { $0 <= $1 }
+            summary["protocol"] = [
+                "spec_revision": "8c9577ea8719ad082d051ec13cc73ef15ed68948",
+                "assertions": [
+                    "CORE-001": assertion(handshakeObserved && activationObserved, "Public hello then activation observed; SDK handshake driver enforces frame ordering and types"),
+                    "CORE-002": assertion(activationObserved && !earlyStream, "No player stream observed before activation; SDK gates application messages"),
+                    "CORE-003": assertion(activationObserved && activatedRoles.isSubset(of: options.requiredRoles), "Activated roles match advertised roles with configured support objects"),
+                    "CORE-004": assertion(activationObserved && audioChunkCount > 0, "SDK sends initial client/state during activation before admitting role binary data; no public outbound-state trace is available"),
+                    "PLAYER-001": assertion(formatAdvertised && timestampsValid, "Selected advertised PCM format and observed monotonically timestamped audio chunks"),
+                ],
+            ] as [String: Any]
+        }
+
+        if options.isFormatPreferenceScenario {
+            func fields(_ format: AudioFormatSpec?) -> Any {
+                guard let format else { return NSNull() }
+                return ["codec": format.codec.rawValue, "channels": format.channels,
+                        "sample_rate": format.sampleRate, "bit_depth": format.bitDepth] as [String: Any]
+            }
+            summary["renegotiation"] = [
+                "request_message_type": "client/state",
+                "requested": fields(requestedFormat),
+                "initial_format": fields(initialStreamFormat),
+                "final_format": fields(streamFormat),
+                "stream_start_count": streamStartCount,
+            ] as [String: Any]
+        }
         if options.isPlayerScenario {
             var streamDict: [String: Any] = [:]
             if let fmt = streamFormat {
@@ -466,6 +569,12 @@ actor ConformanceCollector {
                 audioDict["received_encoded_sha256"] = encodedHasher.hexdigest()
             } else {
                 audioDict["received_pcm_sha256"] = pcmHasher.hexdigest()
+            }
+            if options.isChunkFramingScenario {
+                audioDict["received_encoded_byte_count"] = encodedByteCount
+                // SendspinKit parses the header off each frame before the chunk
+                // reaches `audioChunks`, so the adapter never holds a raw frame.
+                audioDict["received_chunk_frames"] = NSNull()
             }
             summary["audio"] = audioDict
         }
@@ -498,7 +607,7 @@ actor ConformanceCollector {
             var controllerDict: [String: Any] = [:]
             if let state = receivedControllerState {
                 controllerDict["received_state"] = [
-                    "supported_commands": Array(state.supportedCommands.map(\.rawValue)),
+                    "supported_commands": state.supportedCommands.map(\.rawValue).sorted(),
                     "volume": state.volume,
                     "muted": state.muted,
                     "repeat": state.repeatMode?.rawValue as Any? ?? NSNull(),
@@ -534,7 +643,7 @@ actor ConformanceWebSocketTransport: SendspinTransport {
     /// `nonisolated` so the receive callback yields frames directly in arrival
     /// order — a per-frame `Task` hop would let independent tasks reorder frames.
     private nonisolated let frameContinuation: AsyncStream<TransportFrame>.Continuation
-    private let encoder = JSONEncoder()
+    private(set) var closeReason: TransportCloseReason?
 
     private let frames: AsyncStream<TransportFrame>
 
@@ -589,12 +698,12 @@ actor ConformanceWebSocketTransport: SendspinTransport {
         return frame
     }
 
-    func send(_ message: some Codable & Sendable) async throws {
+    func sendRawText(_ text: String) async throws {
         guard let connection, connection.state == .ready else {
             throw AdapterError("Transport not connected")
         }
 
-        let data = try encoder.encode(message)
+        let data = Data(text.utf8)
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(
             identifier: "wsText",
@@ -645,6 +754,7 @@ actor ConformanceWebSocketTransport: SendspinTransport {
     }
 
     func disconnect() async {
+        if closeReason == nil { closeReason = .cancelled }
         // Finish the buffer first so a pending nextFrame() unblocks promptly, then cancel.
         frameContinuation.finish()
         connection?.cancel()
@@ -690,11 +800,13 @@ actor ConformanceWebSocketTransport: SendspinTransport {
     /// Records a WebSocket close so the expected post-close receive error is suppressed.
     private func handleClose() {
         closeReceived = true
+        closeReason = .peerClosed(code: nil)
     }
 
     /// Finishes the frame buffer when the receive loop ends. Logs an unexpected error,
     /// but stays quiet for the expected error that follows a clean close.
     private func handleReceiveError(_ error: NWError) {
+        if closeReason == nil { closeReason = .failed(description: String(describing: error)) }
         if !closeReceived {
             fputs("[ADAPTER] Transport receive error: \(error)\n", stderr)
         }
@@ -810,17 +922,47 @@ func acceptInboundConnection(
 @main
 struct ConformanceSendspinKitClient {
     static func main() async {
+        let options: CliOptions
         do {
-            try await run()
+            options = try CliOptions.parse(Array(CommandLine.arguments.dropFirst()))
+        } catch {
+            // Without --summary there is nowhere to report to.
+            fputs("FATAL: \(error)\n", stderr)
+            Foundation.exit(1)
+        }
+        let collector = ConformanceCollector(options: options)
+        do {
+            try await run(options: options, collector: collector)
         } catch {
             fputs("FATAL: \(error)\n", stderr)
+            let reason = error is AdapterError ? "\(error)" : String(reflecting: error)
+            await collector.recordFailure("SendspinKit client adapter failed: \(reason)")
+            do {
+                try await writeSummary(options: options, collector: collector)
+            } catch {
+                fputs("FATAL: could not write summary: \(error)\n", stderr)
+            }
             Foundation.exit(1)
         }
     }
 
-    static func run() async throws {
-        let options = try CliOptions.parse(Array(CommandLine.arguments.dropFirst()))
-        let collector = ConformanceCollector(options: options)
+    static func writeSummary(options: CliOptions, collector: ConformanceCollector) async throws {
+        let summaryData = try await collector.buildSummaryJSON()
+        let summaryURL = URL(fileURLWithPath: options.summaryPath)
+        try FileManager.default.createDirectory(
+            at: summaryURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try summaryData.write(to: summaryURL)
+
+        // Also print to stdout for debugging
+        FileHandle.standardOutput.write(summaryData)
+        FileHandle.standardOutput.write(Data([0x0A]))
+
+        fputs("[ADAPTER] Summary written to \(options.summaryPath)\n", stderr)
+    }
+
+    static func run(options: CliOptions, collector: ConformanceCollector) async throws {
 
         // Build the client with the right roles for this scenario
         let roles = options.requiredRoles
@@ -828,24 +970,32 @@ struct ConformanceSendspinKitClient {
         var artworkConfig: ArtworkConfiguration?
 
         if options.isPlayerScenario {
-            // Declare formats that cover the conformance fixture (8kHz/1ch/16bit)
-            // and common production formats. The server picks the closest match,
-            // so listing the fixture format first avoids unnecessary resampling.
+            // Hash comparisons require the fixture format without resampling;
+            // preference order alone does not constrain the server's selection.
             let codec: AudioCodec
             switch options.preferredCodec {
             case "flac": codec = .flac
             case "opus": codec = .opus
             default: codec = .pcm
             }
-            let formats = try [
+            var formats = try [
                 // Fixture native format — must match so hashes align
                 AudioFormatSpec(codec: codec, channels: 1, sampleRate: 8000, bitDepth: 16),
-                AudioFormatSpec(codec: codec, channels: 2, sampleRate: 8000, bitDepth: 16),
-                AudioFormatSpec(codec: codec, channels: 1, sampleRate: 44100, bitDepth: 16),
-                AudioFormatSpec(codec: codec, channels: 2, sampleRate: 44100, bitDepth: 16),
-                AudioFormatSpec(codec: codec, channels: 1, sampleRate: 48000, bitDepth: 16),
-                AudioFormatSpec(codec: codec, channels: 2, sampleRate: 48000, bitDepth: 16),
             ]
+            if codec == .opus {
+                // Players must offer a lossless fallback; Opus stays first so this scenario exercises Opus.
+                formats.append(try AudioFormatSpec(codec: .pcm, channels: 1, sampleRate: 8000, bitDepth: 16))
+            }
+            if options.scenarioID == "server-initiated-pcm-24bit" {
+                formats = try [AudioFormatSpec(codec: .pcm, channels: 1, sampleRate: 8000, bitDepth: 24)]
+            } else if options.isFormatPreferenceScenario {
+                let initialDepth = options.scenarioID == "client-initiated-state-format-pcm" ? 24 : 16
+                let targetCodec: AudioCodec = options.scenarioID == "client-initiated-state-format-flac" ? .flac : .pcm
+                formats = try [
+                    AudioFormatSpec(codec: .pcm, channels: 1, sampleRate: 8000, bitDepth: initialDepth),
+                    AudioFormatSpec(codec: targetCodec, channels: 1, sampleRate: 8000, bitDepth: 16),
+                ]
+            }
             playerConfig = try PlayerConfiguration(
                 bufferCapacity: 48000 * 2 * 2 * 5, // ~5s at 48kHz stereo 16-bit
                 supportedFormats: formats,
@@ -860,22 +1010,27 @@ struct ConformanceSendspinKitClient {
                     ArtworkChannel(
                         source: .album,
                         format: ImageFormat(rawValue: options.artworkFormat) ?? .jpeg,
-                        mediaWidth: options.artworkWidth,
-                        mediaHeight: options.artworkHeight
+                        width: options.artworkWidth,
+                        height: options.artworkHeight
                     ),
                 ]
             )
         }
 
+        let device = SendspinDevice.ephemeral()
         let client = try await SendspinClient(
-            clientId: options.clientID,
+            device: device,
             name: options.clientName,
             roles: roles,
             playerConfig: playerConfig,
-            artworkConfig: artworkConfig
+            artworkConfig: artworkConfig,
+            access: .allowUnpaired
         )
 
-        // Connect based on initiator role
+        // Register before connecting so handshake and activation events are buffered.
+        let controlEvents = await client.events()
+
+        @Sendable func establishConnection() async throws {
         if options.isClientInitiated {
             // Write ready file (no URL — we're the initiator)
             try writeJSON(to: options.readyPath, payload: [
@@ -927,6 +1082,7 @@ struct ConformanceSendspinKitClient {
             }
             try await client.acceptConnection(transport)
         }
+        }
 
         // Consume events until the scenario signals completion. The timeout is
         // enforced by racing consumption against a sleep (below), so a
@@ -935,18 +1091,50 @@ struct ConformanceSendspinKitClient {
         // cancelling the consuming tasks unblocks the `for await` loops promptly.
         @Sendable func consumeControlEvents() async throws -> Bool {
             var done = false
-            for await event in await client.events() {
+            var preferenceSent = false
+            var observedFormat: AudioFormatSpec?
+            for await event in controlEvents {
                 switch event {
                 case let .serverConnected(info):
                     fputs("[ADAPTER] Connected to server: \(info.name)\n", stderr)
                     await collector.recordPeerHello(info)
 
+                case let .outputFormatStatusChanged(status):
+                    guard options.isFormatPreferenceScenario else { continue }
+                    let format: AudioFormatSpec
+                    switch status.state {
+                    case let .activeNative(value), let .activeFallback(value): format = value
+                    default: continue
+                    }
+                    guard observedFormat != format else { continue }
+                    observedFormat = format
+                    await collector.recordStreamFormat(format, codecHeader: await client.currentCodecHeader)
+                    if !preferenceSent {
+                        preferenceSent = true
+                        let codec: AudioCodec = options.scenarioID == "client-initiated-state-format-flac" ? .flac : .pcm
+                        let requested = try AudioFormatSpec(codec: codec, channels: 1, sampleRate: 8000, bitDepth: 16)
+                        try await client.setPlayerFormatPreference(requested)
+                        await collector.recordPreferenceRequest(requested)
+                    }
+
                 case let .streamStarted(format):
+                    if options.isFormatPreferenceScenario, observedFormat == format { continue }
+                    observedFormat = format
                     fputs("[ADAPTER] Stream started: \(format.codec.rawValue) \(format.sampleRate)Hz \(format.channels)ch \(format.bitDepth)bit\n", stderr)
                     let codecHeader = await client.currentCodecHeader
                     await collector.recordStreamFormat(format, codecHeader: codecHeader)
+                    if options.isFormatPreferenceScenario, !preferenceSent {
+                        preferenceSent = true
+                        let targetCodec: AudioCodec = options.scenarioID == "client-initiated-state-format-flac" ? .flac : .pcm
+                        let requested = try AudioFormatSpec(codec: targetCodec, channels: 1, sampleRate: 8000, bitDepth: 16)
+                        try await client.setPlayerFormatPreference(requested)
+                        await collector.recordPreferenceRequest(requested)
+                        fputs("[ADAPTER] Published client/state format preference: \(targetCodec.rawValue) 16bit\n", stderr)
+                    }
 
                 case let .streamFormatChanged(format):
+                    if options.isFormatPreferenceScenario, observedFormat == format { continue }
+                    observedFormat = format
                     fputs("[ADAPTER] Stream format changed: \(format.codec.rawValue) \(format.sampleRate)Hz\n", stderr)
                     let codecHeader = await client.currentCodecHeader
                     await collector.recordStreamFormat(format, codecHeader: codecHeader)
@@ -1016,7 +1204,7 @@ struct ConformanceSendspinKitClient {
                 // The collector buffers chunks that arrive before stream/start
                 // is processed (clock sync can delay it) and hashes them once
                 // the format — and thus the bit depth — is known.
-                await collector.recordAudioChunk(data: chunk.data)
+                await collector.recordAudioChunk(data: chunk.data, serverTimestamp: chunk.serverTimestamp)
             }
             return false
         }
@@ -1037,6 +1225,11 @@ struct ConformanceSendspinKitClient {
                 group.addTask { await consumeAudioChunks() }
                 group.addTask { await consumeArtwork() }
                 group.addTask {
+                    try await establishConnection()
+                    try await Task.sleep(for: .seconds(options.timeoutSeconds + 1))
+                    return false
+                }
+                group.addTask {
                     try await Task.sleep(for: .seconds(options.timeoutSeconds))
                     throw TimeoutSignal()
                 }
@@ -1054,20 +1247,7 @@ struct ConformanceSendspinKitClient {
         }
         await client.disconnect(reason: .shutdown)
 
-        // Write summary
-        let summaryData = try await collector.buildSummaryJSON()
-        let summaryURL = URL(fileURLWithPath: options.summaryPath)
-        try FileManager.default.createDirectory(
-            at: summaryURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try summaryData.write(to: summaryURL)
-
-        // Also print to stdout for debugging
-        FileHandle.standardOutput.write(summaryData)
-        FileHandle.standardOutput.write(Data([0x0A]))
-
-        fputs("[ADAPTER] Summary written to \(options.summaryPath)\n", stderr)
+        try await writeSummary(options: options, collector: collector)
 
         // Exit immediately — NWListener/NWConnection teardown during process exit
         // can trigger SIGTRAP if continuations or state handlers fire after the

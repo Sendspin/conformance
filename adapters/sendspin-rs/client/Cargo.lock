@@ -886,6 +886,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "opus-rs"
+version = "0.1.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1cc978697f3ada0ad98b323b9d85e85c6b08d478830148636c19b6d5f2ac9b85"
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1084,7 +1090,7 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "sendspin"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "cpal",
  "crossbeam",
@@ -1092,6 +1098,7 @@ dependencies = [
  "futures-util",
  "libc",
  "log",
+ "opus-rs",
  "parking_lot",
  "serde",
  "serde_json",

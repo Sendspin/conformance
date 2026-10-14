@@ -20,12 +20,12 @@
       }
     },
     {
-      "identity" : "swift-opus",
+      "identity" : "swift-sodium",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/alta/swift-opus.git",
+      "location" : "https://github.com/jedisct1/swift-sodium.git",
       "state" : {
-        "revision" : "5f0164b8915fb9001265c54413aa0f0efbd3df06",
-        "version" : "0.0.2"
+        "revision" : "4f9164a0a2c9a6a7ff53a2833d54a5c79c957342",
+        "version" : "0.9.1"
       }
     }
   ],

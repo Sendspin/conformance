@@ -12,7 +12,13 @@ func SupportsScenario(scenarioID string) bool {
 func IsPlayerScenario(scenarioID string) bool {
 	return scenarioID == "client-initiated-pcm" ||
 		scenarioID == "server-initiated-pcm" ||
-		scenarioID == "server-initiated-flac"
+		scenarioID == "server-initiated-flac" ||
+		scenarioID == "server-initiated-legacy-unencrypted" ||
+		IsChunkFramingScenario(scenarioID)
+}
+
+func IsChunkFramingScenario(scenarioID string) bool {
+	return scenarioID == "server-initiated-audio-chunk-framing"
 }
 
 func IsMetadataScenario(scenarioID string) bool {
@@ -51,33 +57,4 @@ func BuildReadyPayload(scenarioID string, initiatorRole string, url string) map[
 		payload["url"] = url
 	}
 	return payload
-}
-
-func ActiveRoles(scenarioID string, supported []string) []string {
-	families := map[string]bool{}
-	switch {
-	case IsPlayerScenario(scenarioID):
-		families["player"] = true
-		families["metadata"] = true
-	case IsMetadataScenario(scenarioID):
-		families["metadata"] = true
-	case IsControllerScenario(scenarioID):
-		families["controller"] = true
-	case IsArtworkScenario(scenarioID):
-		families["artwork"] = true
-	}
-
-	roles := make([]string, 0, len(supported))
-	seen := map[string]bool{}
-	for _, role := range supported {
-		family := role
-		if index := strings.Index(role, "@"); index > 0 {
-			family = role[:index]
-		}
-		if families[family] && !seen[family] {
-			roles = append(roles, role)
-			seen[family] = true
-		}
-	}
-	return roles
 }

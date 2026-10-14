@@ -13,7 +13,12 @@ from urllib.parse import quote
 
 from .declared_formats import collect_declared_formats, declared_formats_for_implementation
 from .environment import build_log_filename
-from .implementations import IMPLEMENTATIONS, implementation_names, implementations_for_scenario
+from .implementations import (
+    IMPLEMENTATIONS,
+    implementation_names,
+    implementations_for_scenario,
+    implementations_with_role,
+)
 from .io import read_json, write_json
 from .repository_versions import collect_repository_versions
 from .scenarios import get_scenario, ordered_scenarios
@@ -510,6 +515,12 @@ CLAIM_PILL_UNVERIFIED = "status-pill border-dashed border-retro-line/60 bg-trans
 
 DECLARED_FORMAT_COLUMNS = ("Declared format", "Claim status", "Declared in", "Exercised by")
 
+# Shown for every recorded server/activate, present in the payload or not.
+ACTIVATION_PAYLOAD_FIELDS = ("activities", "active_roles")
+
+# Shown for each recorded group/update, present in the payload or not.
+GROUP_UPDATE_PAYLOAD_FIELDS = ("playback_state", "group_id", "group_name")
+
 GITHUB_REPO_URL = "https://github.com/balloob-travel/conformance"
 SENDSPIN_AUDIO_URL = "https://sendspin-audio.com/"
 SCENARIOS_REPO_PATH = "src/conformance/scenarios.py"
@@ -879,6 +890,32 @@ def _repository_link(label: str, href: str | None, *, mono: bool = False) -> str
     )
 
 
+def _spec_revision_chip(repositories: list[dict[str, Any]]) -> str:
+    """
+    Render a chip naming the spec revision the report was audited against.
+
+    A merged report carries one spec entry per host, so the chip renders only
+    when every host that recorded a revision agrees on it; the repositories
+    table shows the disagreement the chip cannot summarise.
+    """
+    labelled = [
+        repository
+        for repository in repositories
+        if str(repository.get("key") or "") == "spec"
+        and repository.get("available")
+        and isinstance(repository.get("revision_label"), str)
+        and repository.get("revision_label")
+    ]
+    if not labelled or len({entry["revision_label"] for entry in labelled}) > 1:
+        return ""
+
+    label = labelled[0]["revision_label"]
+    commit_url = labelled[0].get("commit_url")
+    if isinstance(commit_url, str) and commit_url:
+        return _external_chip(f"Spec {label}", commit_url)
+    return f"<span class='chip'>{_escape(f'Spec {label}')}</span>"
+
+
 def _repository_versions_section(
     repositories: list[dict[str, Any]],
     *,
@@ -904,20 +941,25 @@ def _repository_versions_section(
         implementation_key = str(repository.get("key") or "")
         title_markup = _repository_link(display_name, str(repo_url) if repo_url else None)
         subtitle_parts: list[str] = []
-        client_code_url = repository.get("client_code_url")
         if implementation_key in filtered_implementations:
             subtitle_parts.append(
                 f"<a class='text-xs font-semibold uppercase tracking-[0.16em] text-retro-burnt hover:text-retro-bark' "
                 f"href='{html.escape(_implementation_href(implementation_key), quote=True)}'>Filtered results</a>"
             )
-        if client_code_url:
-            client_code_markup = (
-                f"<a class='text-xs font-semibold uppercase tracking-[0.16em] text-retro-burnt hover:text-retro-bark' "
-                f"href='{html.escape(str(client_code_url), quote=True)}' target='_blank' rel='noreferrer'>Client code</a>"
+        adapter_code_links = [
+            f"<a class='text-xs font-semibold uppercase tracking-[0.16em] text-retro-burnt hover:text-retro-bark' "
+            f"href='{html.escape(str(code_url), quote=True)}' target='_blank' rel='noreferrer'>{label}</a>"
+            for label, code_url in (
+                ("Client code", repository.get("client_code_url")),
+                ("Server code", repository.get("server_code_url")),
             )
-        else:
-            client_code_markup = ""
-        client_code_row = f"<div class='mt-2'>{client_code_markup}</div>" if client_code_markup else ""
+            if code_url
+        ]
+        adapter_code_row = (
+            f"<div class='mt-2 flex flex-wrap items-center gap-3'>{''.join(adapter_code_links)}</div>"
+            if adapter_code_links
+            else ""
+        )
 
         rows.append(
             "<div class='py-4 sm:py-5'>"
@@ -925,7 +967,7 @@ def _repository_versions_section(
             "<div class='min-w-0'>"
             f"<div class='text-sm font-semibold'>{title_markup}</div>"
             f"<div class='mt-2 flex flex-wrap items-center gap-2'>{''.join(subtitle_parts)}</div>"
-            f"{client_code_row}"
+            f"{adapter_code_row}"
             "</div>"
             "<div class='min-w-0'>"
             "<p class='eyebrow'>Commit</p>"
@@ -947,12 +989,9 @@ def _repository_versions_section(
     return (
         "<section class='surface p-5 sm:p-6'>"
         "<div class='max-w-3xl'>"
-        "<p class='eyebrow'>Repository versions</p>"
-        "<h2 class='mt-2 text-2xl sm:text-3xl'>Checked-out revisions</h2>"
+        "<h2 class='text-2xl sm:text-3xl'>Repository versions</h2>"
         "<p class='mt-3 text-sm leading-6 subtle-copy sm:text-base'>"
-        "These are the exact checked-out commits used for this report. Each row links to the selected "
-        "GitHub commit, shows the latest change included in that checkout, and notes how far the checkout "
-        "sits ahead of the latest tagged release."
+        "Commits tested in this run, with changes since the latest tagged release."
         "</p>"
         "</div>"
         "<div class='mt-5 divide-y' style='border-color: rgb(var(--retro-line) / 0.28)'>"
@@ -963,20 +1002,15 @@ def _repository_versions_section(
 
 
 def _display_status(result: dict[str, Any]) -> str:
-    status = str(result["status"])
-    if status != "failed":
-        return status
+    """
+    Return the status a result is labelled and counted under.
 
-    reason = str(result.get("reason") or "").lower()
-    unsupported_markers = (
-        "does not support",
-        "currently a client library",
-        "does not yet expose",
-        "not a server implementation",
-        "only supports client-initiated",
-        "only supports server-initiated",
-    )
-    if any(marker in reason for marker in unsupported_markers):
+    A failed case reads "unsupported" only when the harness recorded that
+    judgement on the row. A row published before the field existed carries none
+    and keeps its recorded status.
+    """
+    status = str(result["status"])
+    if status == "failed" and result.get("unsupported") is True:
         return "unsupported"
     return status
 
@@ -1046,22 +1080,21 @@ def _summary_cards(
     total_label: str,
     total_value: int,
 ) -> str:
-    items = [("Total", total_value, total_label), ("Passed", counts.get("passed", 0), "passing")]
+    items = [(total_label, total_value), ("Passed", counts.get("passed", 0))]
     if counts.get("unsupported", 0):
-        items.append(("Unsupported", counts["unsupported"], "not supported"))
+        items.append(("Unsupported", counts["unsupported"]))
     if counts.get("failed", 0) or not counts.get("unsupported", 0):
-        items.append(("Failed", counts.get("failed", 0), "failing"))
+        items.append(("Failed", counts.get("failed", 0)))
     if counts.get("skipped", 0):
-        items.append(("Skipped", counts["skipped"], "skipped"))
+        items.append(("Skipped", counts["skipped"]))
     cards = "".join(
         (
             "<div class='detail-card'>"
             f"<p class='eyebrow'>{_escape(label)}</p>"
             f"<p class='mt-2 text-2xl font-semibold'>{_escape(value)}</p>"
-            f"<p class='mt-1 text-sm muted-copy'>{_escape(subtitle)}</p>"
             "</div>"
         )
-        for label, value, subtitle in items
+        for label, value in items
     )
     return f"<div class='grid gap-3 sm:grid-cols-2 xl:grid-cols-5'>{cards}</div>"
 
@@ -1117,12 +1150,13 @@ def _page_header(
         else ""
     )
     meta_markup = f"<div class='mt-5'>{meta}</div>" if meta else ""
+    kicker_markup = f"<p class='eyebrow'>{_escape(kicker)}</p>" if kicker else ""
     return (
         f"<section class='page-header page-header-{html.escape(accent, quote=True)}'>"
         f"{breadcrumb}"
         "<div class='mt-4 flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between'>"
         "<div class='min-w-0 max-w-4xl'>"
-        f"<p class='eyebrow'>{_escape(kicker)}</p>"
+        f"{kicker_markup}"
         f"<h1 class='mt-2 text-3xl leading-tight sm:text-4xl'>{_escape(title)}</h1>"
         f"<p class='mt-3 max-w-3xl text-sm leading-6 subtle-copy sm:text-base'>{_escape(description)}</p>"
         f"{meta_markup}"
@@ -1257,22 +1291,23 @@ def _render_matrix(
         for client_impl in client_implementations
     )
 
-    return (
-        "<section class='list-shell overflow-hidden'>"
+    caption_markup = (
         "<div class='border-b px-4 py-4' "
         "style='border-color: rgb(var(--retro-line) / 0.42)'>"
-        "<div>"
-        "<p class='eyebrow'>Matrix</p>"
-        f"<p class='mt-1 text-sm subtle-copy'>{html.escape(caption)}</p>"
+        f"<p class='text-sm subtle-copy'>{html.escape(caption)}</p>"
         "</div>"
-        "</div>"
+        if caption
+        else ""
+    )
+    return (
+        "<section class='list-shell overflow-hidden'>"
+        f"{caption_markup}"
         "<div class='overflow-x-auto'>"
         "<table class='min-w-[980px] w-full border-separate border-spacing-0 text-sm'>"
         "<thead>"
         "<tr>"
         "<th scope='col' class='sticky left-0 z-20 min-w-[190px] border-b px-4 py-4 text-left' "
         "style='border-color: rgb(var(--retro-line) / 0.36); background-color: rgb(var(--retro-shell))'>"
-        "<p class='eyebrow'>Axis</p>"
         "<p class='mt-1 text-sm font-semibold text-retro-bark'>Server \\ Client</p>"
         "</th>"
         f"{headers}"
@@ -1287,12 +1322,12 @@ def _render_matrix(
 
 def _matrix_axes(results: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     if not results:
-        return implementation_names(), implementation_names()
+        return implementation_names(), implementations_with_role("client")
 
     scenario_id = str(results[0]["scenario_id"])
     scenario = get_scenario(scenario_id)
     known_names = implementation_names()
-    client_impls = list(known_names)
+    client_impls = implementations_with_role("client", names=known_names)
     client_impls.extend(
         sorted(
             {
@@ -1476,20 +1511,18 @@ def _render_index_page(results: list[dict[str, Any]], *, data_dir: Path) -> str:
     overview_header = _page_header(
         accent="overview",
         breadcrumb=_breadcrumb([("Overview", None)]),
-        kicker="Overview",
-        title="Sendspin conformance overview",
+        kicker="",
+        title="Sendspin conformance",
         description=(
-            "Sendspin is a local-network protocol for discovering peers and exchanging synchronized "
-            "audio plus companion data such as metadata, artwork, and controller messages between "
-            "servers and clients. This report tests how different Sendspin implementations interoperate "
-            "with one another, with each matrix showing which server "
-            "and client pairings pass the current conformance scenarios."
+            "Compatibility test results for Sendspin servers and clients. "
+            "Select a result to view logs and test details."
         ),
         actions=(
+            f"{_spec_revision_chip(repositories)}"
             f"{_external_chip('Conformance source', GITHUB_REPO_URL)}"
             f"{_external_chip('Sendspin-audio.com', SENDSPIN_AUDIO_URL)}"
         ),
-        meta=_summary_cards(counts=counts, total_label="all scenarios", total_value=len(results)),
+        meta=_summary_cards(counts=counts, total_label="Total cases", total_value=len(results)),
     )
     sections: list[str] = []
     for scenario_id, scenario_results in scenario_groups:
@@ -1509,7 +1542,7 @@ def _render_index_page(results: list[dict[str, Any]], *, data_dir: Path) -> str:
             "</div>"
             "</div>"
             "<div class='mt-5 space-y-4'>"
-            f"{_render_matrix(scenario_results, caption='Select a server and client pairing to inspect.', href_builder=_case_href)}"
+            f"{_render_matrix(scenario_results, caption='', href_builder=_case_href)}"
             "</div>"
             "</section>"
         )
@@ -1784,7 +1817,7 @@ def _render_implementation_page(
         "<div class='app-shell'>"
         "<div class='mx-auto max-w-[1540px] px-4 py-4 sm:px-6 lg:px-8 lg:py-6'>"
         "<main class='space-y-6'>"
-        f"{_page_header(accent='overview', breadcrumb=_breadcrumb([('Overview', '../index.html'), (label, None)]), kicker='Implementation', title=f'{label} filtered overview', description=f'This view narrows the conformance overview to cases where {label} participates as either the server or the client.', actions=actions, meta=_summary_cards(counts=counts, total_label='matching cases', total_value=len(filtered_results)))}"
+        f"{_page_header(accent='overview', breadcrumb=_breadcrumb([('Overview', '../index.html'), (label, None)]), kicker='Implementation', title=label, description=f'Test results for {label} as server or client.', actions=actions, meta=_summary_cards(counts=counts, total_label='Total cases', total_value=len(filtered_results)))}"
         f"{declared_formats_html}"
         f"{impl_sections_html}"
         "</main>"
@@ -1836,7 +1869,7 @@ def _render_scenario_page(
     )
     header_meta = _summary_cards(
         counts=counts,
-        total_label="pairings in this test",
+        total_label="Total pairings",
         total_value=len(results),
     )
     scenario_actions = _external_chip("View test source", _scenario_source_url(scenario_id))
@@ -1922,6 +1955,139 @@ def _render_scenario_page(
     )
 
 
+def _activation_value(value: Any) -> str:
+    if value == []:
+        return "<span class='text-sm subtle-copy'>empty list</span>"
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        tags = "".join(
+            "<span class='rounded-md border border-retro-line/60 px-2 py-1 font-mono text-[13px]'>"
+            f"{_escape(item)}</span>"
+            for item in value
+        )
+        return f"<span class='flex flex-wrap justify-end gap-1.5'>{tags}</span>"
+    return f"<span class='font-mono text-[13px]'>{_escape(json.dumps(value))}</span>"
+
+
+def _recorded_message_rows(
+    message: Any, message_type: str, payload_fields: tuple[str, ...]
+) -> str:
+    is_expected = isinstance(message, dict) and message.get("type") == message_type
+    payload = message.get("payload") if is_expected else None
+    if not isinstance(payload, dict):
+        # Not that message, so it is shown whole rather than dropped or passed
+        # off as one.
+        fields = [("Recorded value", _activation_value(message))]
+    else:
+        fields = [
+            (
+                name,
+                _activation_value(payload[name])
+                if name in payload
+                else "<span class='text-sm subtle-copy'>not in the message</span>",
+            )
+            for name in payload_fields
+        ]
+        fields += [
+            (name, _activation_value(payload[name]))
+            for name in sorted(payload)
+            if name not in payload_fields
+        ]
+    return "".join(
+        "<div class='keyval-row'>"
+        f"<span class='font-mono text-[13px] muted-copy'>{_escape(name)}</span>"
+        f"{value}"
+        "</div>"
+        for name, value in fields
+    )
+
+
+def _render_activation_section(server_summary: Any, *, label: str) -> str:
+    """
+    Render the initial ``server/activate`` recorded in a server summary.
+
+    Returns an empty string when the summary has no ``activation`` field, so a
+    server that reported nothing is not shown as having sent no activation.
+    """
+    if not isinstance(server_summary, dict) or "activation" not in server_summary:
+        return ""
+    activation = server_summary["activation"]
+    message_type = "<span class='font-mono text-[13px]'>server/activate</span>"
+    if activation is None:
+        content = (
+            "<div class='surface-inset px-4 py-3 text-sm'>"
+            f"<p class='font-semibold'>No {message_type} observed</p>"
+            f"<p class='mt-2 subtle-copy'>The {_escape(label)} server sent no {message_type} on "
+            "this connection, according to its adapter.</p>"
+            "</div>"
+        )
+    else:
+        rows = _recorded_message_rows(activation, "server/activate", ACTIVATION_PAYLOAD_FIELDS)
+        content = f"<div class='keyval'>{rows}</div>"
+    return (
+        "<section class='surface p-5 sm:p-6'>"
+        "<p class='eyebrow'>Server activation</p>"
+        f"<h2 class='mt-2 text-2xl'>Initial {message_type}</h2>"
+        "<p class='mt-3 max-w-3xl text-sm leading-6 subtle-copy'>"
+        f"What the {_escape(label)} server's own adapter recorded for its first {message_type} "
+        "on this connection, reported as sent. The case fails when none was sent, when its "
+        "activities are not unique values from playback and pairing, or when it omits "
+        "active_roles. Nothing else in it is checked against the specification: which "
+        "activities and roles the matched PSK allows is not judged. A recording that cannot "
+        "be read as that message is shown whole and not judged either."
+        "</p>"
+        f"<div class='mt-5'>{content}</div>"
+        "</section>"
+    )
+
+
+def _render_group_update_section(server_summary: Any, *, label: str) -> str:
+    """
+    Render the ``group/update`` messages after activation recorded in a server summary.
+
+    Returns an empty string when the summary has no ``group_updates`` list, so
+    a server that reported nothing is not shown as having sent none.
+    """
+    group_updates = server_summary.get("group_updates") if isinstance(server_summary, dict) else None
+    if not isinstance(group_updates, list):
+        return ""
+    message_type = "<span class='font-mono text-[13px]'>group/update</span>"
+    activate_type = "<span class='font-mono text-[13px]'>server/activate</span>"
+    if not group_updates:
+        content = (
+            "<div class='surface-inset px-4 py-3 text-sm'>"
+            f"<p class='font-semibold'>No {message_type} observed after a {activate_type}</p>"
+            f"<p class='mt-2 subtle-copy'>The {_escape(label)} server sent no {message_type} "
+            f"after a first {activate_type} on this connection, according to its adapter. One "
+            f"sent on a connection that never carried a {activate_type} is not recorded here.</p>"
+            "</div>"
+        )
+    else:
+        content = "".join(
+            f"<p class='mt-4 text-sm muted-copy'>{index} of {len(group_updates)}</p>"
+            "<div class='keyval mt-2'>"
+            f"{_recorded_message_rows(group_update, 'group/update', GROUP_UPDATE_PAYLOAD_FIELDS)}"
+            "</div>"
+            for index, group_update in enumerate(group_updates, start=1)
+        )
+    return (
+        "<section class='surface p-5 sm:p-6'>"
+        "<p class='eyebrow'>Server group state</p>"
+        f"<h2 class='mt-2 text-2xl'>Every {message_type} after activation</h2>"
+        "<p class='mt-3 max-w-3xl text-sm leading-6 subtle-copy'>"
+        f"What the {_escape(label)} server's own adapter recorded for each {message_type} it "
+        f"sent after its first {activate_type} on this connection, in order and reported as "
+        "sent. The case fails when none followed, or when in any of them playback_state is "
+        "not playing or stopped, or group_id or group_name is missing or not a string. How "
+        "soon the first followed is not judged, because the specification says promptly and "
+        "gives no bound, so one sent at any point in the case counts. Whether a change to a "
+        "field produced a further message is not judged either. A recording of anything "
+        "other than that message is shown whole and fails the case as a harness gap."
+        "</p>"
+        f"<div class='mt-5'>{content}</div>"
+        "</section>"
+    )
+
+
 def _render_case_page(
     result: dict[str, Any],
     *,
@@ -1938,6 +2104,8 @@ def _render_case_page(
     status = _display_status(result)
     server_label = _implementation_label(server_impl)
     client_label = _implementation_label(client_impl)
+    server_summary_path = case_dir / "server-summary.json"
+    server_summary = read_json(server_summary_path) if server_summary_path.exists() else None
 
     summary_tab = f"{case_name}--summary"
     server_tab = f"{case_name}--server"
@@ -1992,7 +2160,7 @@ def _render_case_page(
         "<div class='mx-auto max-w-[1320px] px-4 py-4 sm:px-6 lg:px-8 lg:py-6'>"
         "<div class='grid gap-6 xl:grid-cols-[300px_minmax(0,1fr)]'>"
         "<aside class='sidebar-rail sidebar-rail-xl'>"
-        f"{_sidebar_nav(('Back to test', '../' + _scenario_href(scenario_id), 'Return to the pairing list for this test.'), ('Back to overview', '../index.html', 'Return to the matrix-first overview.'))}"
+        f"{_sidebar_nav(('Back to test', '../' + _scenario_href(scenario_id), 'All pairings for this test.'), ('Back to overview', '../index.html', 'All test results.'))}"
         "<section class='surface p-5'>"
         "<p class='eyebrow'>Run facts</p>"
         "<div class='keyval mt-4'>"
@@ -2018,6 +2186,8 @@ def _render_case_page(
         "</aside>"
         "<main class='space-y-6'>"
         f"{_page_header(accent='case', breadcrumb=breadcrumb, kicker='Case', title=f'{server_label} -> {client_label}', description=_scenario_description(scenario_id), meta=header_meta)}"
+        f"{_render_activation_section(server_summary, label=server_label)}"
+        f"{_render_group_update_section(server_summary, label=server_label)}"
         "<section class='surface p-4 sm:p-5' data-tabset>"
         "<div>"
         "<p class='eyebrow'>Inspection</p>"

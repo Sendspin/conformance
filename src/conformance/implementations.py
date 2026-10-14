@@ -5,7 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from .models import ImplementationSpec, RoleName, RoleSpec, ScenarioSpec
-from .paths import candidate_repo_paths, first_existing_path, repo_root
+from .paths import (
+    RepoOverrideError,
+    candidate_repo_paths,
+    first_existing_path,
+    repo_override_path,
+    repo_root,
+)
 
 
 IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
@@ -36,7 +42,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_flac=True,
             supports_opus=True,
             supports_discovery=True,
-            supports_request_format=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
     ),
@@ -54,6 +60,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_client_initiated=True,
             supports_flac=True,
             supports_discovery=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
@@ -77,6 +84,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_client_initiated=True,
             supports_flac=True,
             supports_opus=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
@@ -98,6 +106,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             entrypoint="adapters/sendspin-js/client.mjs",
             supports_server_initiated=True,
             supports_client_initiated=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller"),
         ),
         server=RoleSpec(
@@ -120,7 +129,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_server_initiated=True,
             supports_client_initiated=True,
             supports_flac=True,
-            supports_request_format=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
@@ -144,13 +153,43 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supports_client_initiated=True,
             supports_flac=True,
             supports_opus=True,
+            supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
             supported=False,
             adapter_kind="placeholder",
             entrypoint="conformance.adapters.placeholder",
-            reason="sendspin-cpp is currently a client library in this workspace.",
+            reason=(
+                "sendspin-cpp is a client library; its server counterpart is "
+                "sendspin-server-cpp."
+            ),
+        ),
+    ),
+    "sendspin-server-cpp": ImplementationSpec(
+        name="sendspin-server-cpp",
+        display_name="sendspin-server-cpp",
+        repo_dirname="sendspin-server-cpp",
+        remote_url="https://github.com/Sendspin/sendspin-server-cpp.git",
+        client=RoleSpec(
+            supported=False,
+            adapter_kind="placeholder",
+            entrypoint="conformance.adapters.placeholder",
+            reason=(
+                "sendspin-server-cpp is a server library; its client counterpart is "
+                "sendspin-cpp."
+            ),
+        ),
+        server=RoleSpec(
+            supported=True,
+            adapter_kind="cmake",
+            build_adapter="sendspin-server-cpp-server",
+            entrypoint="adapters/sendspin-server-cpp/server",
+            supports_server_initiated=True,
+            supports_client_initiated=True,
+            supports_flac=True,
+            supports_opus=True,
+            supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
     ),
     "sendspin-go": ImplementationSpec(
@@ -159,26 +198,20 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
         repo_dirname="sendspin-go",
         remote_url="https://github.com/Sendspin/sendspin-go.git",
         client=RoleSpec(
-            supported=True,
-            adapter_kind="go",
-            build_adapter="sendspin-go-client",
-            entrypoint="adapters/sendspin-go/client",
-            supports_server_initiated=True,
-            supports_client_initiated=True,
-            supports_flac=True,
-            supports_discovery=True,
-            supported_role_families=("player", "metadata", "controller", "artwork"),
+            supported=False,
+            adapter_kind="placeholder",
+            entrypoint="conformance.adapters.placeholder",
+            reason="The sendspin-go client is not currently tested.",
         ),
         server=RoleSpec(
-            supported=True,
-            adapter_kind="go",
-            build_adapter="sendspin-go-server",
-            entrypoint="adapters/sendspin-go/server",
-            supports_server_initiated=True,
-            supports_client_initiated=True,
-            supports_flac=True,
-            supports_discovery=True,
-            supported_role_families=("player", "metadata", "controller", "artwork"),
+            supported=False,
+            adapter_kind="placeholder",
+            entrypoint="conformance.adapters.placeholder",
+            reason=(
+                "sendspin-go's server library expects client/hello as the first "
+                "message and has no client/init or Noise handshake, so every case "
+                "would end at the first RC1 handshake step."
+            ),
         ),
     ),
 }
@@ -243,6 +276,21 @@ def role_supports_scenario(
     ) is None
 
 
+def implementations_with_role(
+    role: RoleName,
+    *,
+    names: list[str] | None = None,
+) -> list[str]:
+    """Return implementations that implement a role at all, whatever the scenario."""
+    candidates = names if names is not None else implementation_names()
+    return [
+        implementation
+        for implementation in candidates
+        if (specification := IMPLEMENTATIONS.get(implementation)) is not None
+        and (specification.server if role == "server" else specification.client).supported
+    ]
+
+
 def implementations_for_scenario(
     *,
     role: RoleName,
@@ -260,6 +308,27 @@ def implementations_for_scenario(
             scenario=scenario,
         )
     ]
+
+
+def validate_repo_overrides() -> None:
+    """
+    Check every CONFORMANCE_REPO_* override for a known repository.
+
+    Raises one RepoOverrideError naming each override that is not an absolute
+    path to something that exists.
+    """
+    dirnames = [spec.repo_dirname for spec in IMPLEMENTATIONS.values()]
+    dirnames.extend(dirname for dirname, _ in SUPPORTING_REPOS.values())
+    problems: list[str] = []
+    for dirname in dirnames:
+        try:
+            repo_override_path(dirname)
+        except RepoOverrideError as err:
+            problems.append(str(err))
+    if problems:
+        raise RepoOverrideError(
+            "Repository override does not resolve to a checkout: " + "; ".join(problems)
+        )
 
 
 def resolve_repo_path(dirname: str) -> Path | None:

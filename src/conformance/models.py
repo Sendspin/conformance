@@ -17,7 +17,9 @@ VerificationMode = Literal[
     "metadata",
     "controller",
     "artwork",
-    "format-renegotiation",
+    "format-preference",
+    "protocol",
+    "audio-chunk-framing",
 ]
 
 # The fields that together identify one audio format on the wire. Anything
@@ -39,7 +41,7 @@ class RoleSpec:
     supports_flac: bool = False
     supports_opus: bool = False
     supports_discovery: bool = False
-    supports_request_format: bool = False
+    supports_legacy_unencrypted: bool = False
     supported_role_families: tuple[RoleFamily, ...] = ()
     reason: str | None = None
 
@@ -74,7 +76,7 @@ class RoleSpec:
             self.supports_initiator(scenario.initiator_role)
             and self.supports_codec(scenario.preferred_codec)
             and self.supports_role_families(scenario.required_role_families)
-            and (self.supports_request_format or not scenario.requires_request_format)
+            and (self.supports_legacy_unencrypted or not scenario.requires_legacy_unencrypted)
         ):
             return None
 
@@ -101,10 +103,10 @@ class RoleSpec:
                 f"{missing_display} required by {scenario.id}."
             )
 
-        if scenario.requires_request_format and not self.supports_request_format:
+        if scenario.requires_legacy_unencrypted and not self.supports_legacy_unencrypted:
             return (
-                f"{implementation} {role} adapter does not support the "
-                f"stream/request-format renegotiation required by {scenario.id}."
+                f"{implementation} {role} adapter does not support the legacy unencrypted "
+                f"transition mode required by {scenario.id}."
             )
 
         return (
@@ -136,8 +138,21 @@ class ScenarioSpec:
     preferred_codec: str
     required_role_families: tuple[RoleFamily, ...]
     verification_mode: VerificationMode
-    requires_request_format: bool = False
+    # Bumped whenever this scenario's stimulus or assertions change, which makes
+    # every published result for it incomparable to the ones a new run produces.
+    # `scripts/detect_regressions.py` exempts a cell whose baseline carries a
+    # different revision, so a deliberate tightening does not read as breakage.
+    scenario_revision: int
+    requires_legacy_unencrypted: bool = False
+    # The case also checks that the client listed `preferred_codec` first with a
+    # pcm or flac entry after it, and that the server picked the first entry.
+    verifies_format_priority: bool = False
+    # The case also checks that the stream the pair negotiated carried this bit
+    # depth. It is a verdict on a case that ran, never a reason to keep an
+    # implementation out of the scenario.
+    verifies_stream_bit_depth: int | None = None
     extra_cli_args: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    protocol_assertions: tuple[str, ...] = field(default_factory=tuple)
 
     def cli_args(self) -> dict[str, str]:
         """Return scenario-wide CLI arguments passed to both roles."""
@@ -160,6 +175,10 @@ class CaseResult:
     client_impl: str
     status: CaseStatus
     reason: str
+    scenario_revision: int
     case_dir: str
     server_exit_code: int | None = None
     client_exit_code: int | None = None
+    # Set by the harness when it judged, before launching anything, that an
+    # implementation cannot run the scenario. Never derived from adapter output.
+    unsupported: bool = False

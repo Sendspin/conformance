@@ -7,12 +7,23 @@ import asyncio
 import base64
 import logging
 import sys
+import time
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw
 
+from conformance.adapters._aiosendspin_protocol_evidence import (
+    ChunkPayloadSizes,
+    ControlMessageRecorder,
+    ProtocolEvidenceCollector,
+    SentBinaryFrameRecorder,
+    SentMetadataStateRecorder,
+    record_activation_evidence_server,
+    record_handshake_evidence_server,
+    record_player_stream_evidence,
+)
 from conformance.flac import (
     decode_fixture,
     flac_encoder_frame_samples,
@@ -20,6 +31,11 @@ from conformance.flac import (
 )
 from conformance.io import write_json
 from conformance.registry import lookup_endpoint, register_endpoint
+
+# The runner kills the server process once it has run for --timeout-seconds, so
+# a wait that should fail the case with its own reason has to give up early
+# enough to write the summary and shut the server down first.
+_ERROR_REPORTING_MARGIN_SECONDS = 10.0
 
 
 def _add_repo_to_syspath(dirname: str) -> None:
@@ -45,9 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8927)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--server-id", default="conformance-server")
+    parser.add_argument("--client-id", default="conformance-client-id")
     parser.add_argument("--server-name", default="Sendspin Conformance Server")
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument("--enable-mdns", action="store_true")
+    parser.add_argument("--allow-unencrypted", default="false")
     parser.add_argument("--clip-seconds", type=float, default=5.0)
     parser.add_argument("--metadata-title", default="Almost Silent")
     parser.add_argument("--metadata-artist", default="Sendspin Conformance")
@@ -122,6 +140,17 @@ async def _wait_for_incoming_client(
             return target, "registry_advertised"
         await asyncio.sleep(0.1)
     raise TimeoutError(f"Timed out waiting for client {client_name!r}")
+
+
+async def _wait_for_client_available(client: Any, *, timeout_s: float) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while not client.available:
+        if loop.time() >= deadline:
+            raise TimeoutError(
+                f"Timed out waiting for client {client.name!r} to report available"
+            )
+        await asyncio.sleep(0.1)
 
 
 def _expand_pcm_16_to_32(pcm_16_bytes: bytes) -> bytes:
@@ -206,8 +235,6 @@ def _picture_format(raw: str) -> Any:
         return PictureFormat.JPEG
     if normalized == "png":
         return PictureFormat.PNG
-    if normalized == "bmp":
-        return PictureFormat.BMP
     raise ValueError(f"Unsupported artwork format: {raw}")
 
 
@@ -235,8 +262,6 @@ def _encode_artwork(image: Image.Image, width: int, height: int, art_format: Any
             letterboxed.save(buf, format="JPEG", quality=85)
         elif art_format == PictureFormat.PNG:
             letterboxed.save(buf, format="PNG", compress_level=6)
-        elif art_format == PictureFormat.BMP:
-            letterboxed.save(buf, format="BMP")
         else:
             raise NotImplementedError(f"Unsupported artwork format: {art_format}")
         buf.seek(0)
@@ -296,6 +321,10 @@ def _base_summary(
     server_id: str,
     discovery_method: str,
     client: Any,
+    activation: dict[str, Any] | None,
+    group_updates: list[dict[str, Any]],
+    availability_trace: list[dict[str, Any]] | None,
+    time_exchange: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     return {
         "status": "ok",
@@ -311,6 +340,10 @@ def _base_summary(
             "type": "client/hello",
             "payload": client.info.to_dict(),
         },
+        "activation": activation,
+        "group_updates": group_updates,
+        "availability_trace": availability_trace,
+        "time_exchange": time_exchange,
         "client": _client_snapshot(client),
     }
 
@@ -350,6 +383,15 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
     sent_audio_hasher = sha256()
     sent_audio_chunk_count = 0
     sent_audio_byte_count = 0
+    chunk_framing_scenario = args.scenario_id == "server-initiated-audio-chunk-framing"
+    sent_payload_sizes = ChunkPayloadSizes()
+    # The legacy unencrypted transport is not the one the recorder watches.
+    frames_observable = client.connection is not None and client.connection.is_encrypted
+    # The SDK keeps the header without send_ahead for a client whose client/hello
+    # it reads as older than that field. The property is marked for removal, and
+    # an SDK without it has no such fallback to report.
+    legacy_header = getattr(client.connection, "uses_pre_spec_177_wire", False)
+    sent_frames = SentBinaryFrameRecorder() if chunk_framing_scenario else None
 
     def capture_stream_start(message: Any) -> None:
         nonlocal stream_state, sent_codec_header_sha256
@@ -391,10 +433,16 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
         buffer_end_time_us: int | None = None,
         buffer_byte_count: int | None = None,
         duration_us: int | None = None,
+        player_audio_header: bool = False,
+        epoch_exempt: bool = False,
     ) -> None:
         nonlocal sent_audio_chunk_count, sent_audio_byte_count
         if message_type == BinaryMessageType.AUDIO_CHUNK.value:
-            payload = data[BINARY_HEADER_SIZE:]
+            payload = data if player_audio_header else data[BINARY_HEADER_SIZE:]
+            # A chunk handed over with its header attached has no payload this
+            # adapter saw apart from it, so its frame is left unpaired.
+            if chunk_framing_scenario and player_audio_header:
+                sent_payload_sizes.record(timestamp_us, payload)
             sent_audio_hasher.update(payload)
             sent_audio_chunk_count += 1
             sent_audio_byte_count += len(payload)
@@ -406,13 +454,48 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
             buffer_end_time_us=buffer_end_time_us,
             buffer_byte_count=buffer_byte_count,
             duration_us=duration_us,
+            player_audio_header=player_audio_header,
+            epoch_exempt=epoch_exempt,
         )
 
     client.send_message = send_message_wrapper  # type: ignore[method-assign]
     client.send_role_message = send_role_message_wrapper  # type: ignore[method-assign]
     client.send_binary = send_binary_wrapper  # type: ignore[method-assign]
 
+    format_preference_scenario = args.scenario_id in {
+        "client-initiated-state-format-pcm",
+        "client-initiated-state-format-flac",
+    }
+    received_format_preference: dict[str, Any] | None = None
+    player_role = next(iter(client.roles_by_family("player")), None)
+    original_on_client_state = None if player_role is None else player_role.on_client_state
+
+    def on_client_state_wrapper(payload: Any) -> None:
+        nonlocal received_format_preference
+        preferred = None if payload.player is None else payload.player.format
+        if preferred is not None:
+            received_format_preference = {
+                "codec": preferred.codec.value,
+                "sample_rate": preferred.sample_rate,
+                "channels": preferred.channels,
+                "bit_depth": preferred.bit_depth,
+            }
+        original_on_client_state(payload)
+
+    # Only client/state reaches this hook, so a preference recorded here was
+    # carried by the `format` field and not by any other message.
+    if format_preference_scenario and player_role is not None:
+        player_role.on_client_state = on_client_state_wrapper  # type: ignore[method-assign]
+
     try:
+        # The SDK holds stream/start while the client reports unavailable and then
+        # joins it at the playhead, skipping every chunk committed before it.
+        # Scenarios that commit the whole clip upfront would lose its head, so the
+        # stream starts only once the client reports available.
+        await _wait_for_client_available(
+            client,
+            timeout_s=args.timeout_seconds - _ERROR_REPORTING_MARGIN_SECONDS,
+        )
         stream = client.group.start_stream()
         audio_format = AudioFormat(
             sample_rate=fixture.sample_rate,
@@ -421,13 +504,10 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
         )
         next_play_start_us = server.clock.now_us() + 250_000
         total_duration_us = 0
-        # Renegotiation scenarios need audio to keep flowing in real time so a
-        # mid-stream stream/request-format has later chunks to flush the new
+        # Format-preference scenarios need audio to keep flowing in real time so a
+        # mid-stream client/state format change has later chunks to flush the new
         # stream/start. Other scenarios commit upfront and settle once at the end.
-        pace_realtime = args.scenario_id in {
-            "client-initiated-request-format-pcm",
-            "client-initiated-request-format-flac",
-        }
+        pace_realtime = format_preference_scenario
         for chunk, duration_us in _iter_pcm_blocks(
             source_pcm_bytes,
             sample_rate=fixture.sample_rate,
@@ -449,8 +529,12 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
         client.send_message = original_send_message  # type: ignore[method-assign]
         client.send_role_message = original_send_role_message  # type: ignore[method-assign]
         client.send_binary = original_send_binary  # type: ignore[method-assign]
+        if format_preference_scenario and player_role is not None:
+            player_role.on_client_state = original_on_client_state  # type: ignore[method-assign]
+        if sent_frames is not None:
+            sent_frames.uninstall()
 
-    return {
+    summary: dict[str, Any] = {
         "stream": stream_state,
         "audio": {
             "fixture": str(fixture.path),
@@ -470,9 +554,177 @@ async def _run_audio_scenario(args: argparse.Namespace, *, server: Any, client: 
             "trimmed_source_frames": trimmed_source_frames,
         }
     }
+    if format_preference_scenario:
+        summary["format_preference"] = {"received": received_format_preference}
+    if sent_frames is not None:
+        summary["audio"]["sent_chunk_frames"] = (
+            sent_payload_sizes.paired(sent_frames.frames()) if frames_observable else None
+        )
+        # The SDK re-frames the blocks this adapter feeds it before sending them.
+        summary["audio"]["chunked_by"] = "implementation"
+        summary["audio"]["legacy_header_reason"] = (
+            "aiosendspin classified the client/hello as older than send_ahead "
+            "(unencrypted, a trust_level key, or player supported_commands in "
+            "client/hello) and kept the header without it for that client"
+            if legacy_header
+            else None
+        )
+    return summary
 
 
-async def _run_metadata_scenario(args: argparse.Namespace, *, client: Any) -> dict[str, Any]:
+async def _run_protocol_baseline_scenario(
+    args: argparse.Namespace,
+    *,
+    server: Any,
+    client: Any,
+    handshake_start_ts: float,
+    handshake_end_ts: float,
+) -> dict[str, Any]:
+    """Run the server-initiated-protocol-baseline-v1 scenario and populate
+    ``summary["protocol"]`` per the contract in :mod:`conformance.protocol`.
+
+    See :mod:`conformance.adapters._aiosendspin_protocol_evidence` for the
+    fidelity caveats of each assertion this records.
+    """
+    from aiosendspin.models.core import StreamStartMessage
+
+    collector = ProtocolEvidenceCollector()
+
+    connection = client.connection
+    if connection is None:
+        raise RuntimeError("Client has no active connection to capture handshake evidence from")
+    record_handshake_evidence_server(
+        collector,
+        connection,
+        start_ts=handshake_start_ts,
+        end_ts=handshake_end_ts,
+    )
+    record_activation_evidence_server(
+        collector,
+        client,
+        requested_roles=list(client.info.supported_roles),
+    )
+
+    advertised_formats: list[dict[str, Any]] = []
+    player_support = getattr(client.info, "player_support", None)
+    if player_support is not None:
+        advertised_formats = [
+            {
+                "codec": fmt.codec.value,
+                "sample_rate": fmt.sample_rate,
+                "channels": fmt.channels,
+                "bit_depth": fmt.bit_depth,
+            }
+            for fmt in player_support.supported_formats
+        ]
+
+    negotiated_format: dict[str, Any] | None = None
+    chunk_timestamps_us: list[int] = []
+
+    def capture_stream_start(message: Any) -> None:
+        nonlocal negotiated_format
+        if not isinstance(message, StreamStartMessage) or message.payload.player is None:
+            return
+        player = message.payload.player
+        negotiated_format = {
+            "codec": player.codec.value,
+            "sample_rate": player.sample_rate,
+            "channels": player.channels,
+            "bit_depth": player.bit_depth,
+        }
+
+    original_send_message = client.send_message
+    original_send_role_message = client.send_role_message
+    original_send_binary = client.send_binary
+
+    def send_message_wrapper(message: Any) -> None:
+        capture_stream_start(message)
+        original_send_message(message)
+
+    def send_role_message_wrapper(role: str, message: Any) -> None:
+        capture_stream_start(message)
+        original_send_role_message(role, message)
+
+    def send_binary_wrapper(
+        data: bytes,
+        *,
+        role_family: str,
+        timestamp_us: int,
+        message_type: int,
+        buffer_end_time_us: int | None = None,
+        buffer_byte_count: int | None = None,
+        duration_us: int | None = None,
+        player_audio_header: bool = False,
+        epoch_exempt: bool = False,
+    ) -> None:
+        from aiosendspin.models.types import BinaryMessageType
+
+        if message_type == BinaryMessageType.AUDIO_CHUNK.value:
+            chunk_timestamps_us.append(timestamp_us)
+        original_send_binary(
+            data,
+            role_family=role_family,
+            timestamp_us=timestamp_us,
+            message_type=message_type,
+            buffer_end_time_us=buffer_end_time_us,
+            buffer_byte_count=buffer_byte_count,
+            duration_us=duration_us,
+            player_audio_header=player_audio_header,
+            epoch_exempt=epoch_exempt,
+        )
+
+    client.send_message = send_message_wrapper  # type: ignore[method-assign]
+    client.send_role_message = send_role_message_wrapper  # type: ignore[method-assign]
+    client.send_binary = send_binary_wrapper  # type: ignore[method-assign]
+
+    fixture = decode_fixture(Path(args.fixture), max_duration_seconds=args.clip_seconds)
+    try:
+        stream = client.group.start_stream()
+        from aiosendspin.server.audio import AudioFormat
+
+        audio_format = AudioFormat(
+            sample_rate=fixture.sample_rate,
+            bit_depth=fixture.bit_depth,
+            channels=fixture.channels,
+        )
+        next_play_start_us = server.clock.now_us() + 250_000
+        total_duration_us = 0
+        for chunk, duration_us in _iter_pcm_blocks(
+            fixture.pcm_bytes,
+            sample_rate=fixture.sample_rate,
+            channels=fixture.channels,
+            bit_depth=fixture.bit_depth,
+        ):
+            stream.prepare_audio(chunk, audio_format)
+            play_start_us = await stream.commit_audio(play_start_us=next_play_start_us)
+            next_play_start_us = play_start_us + duration_us
+            total_duration_us += duration_us
+        await asyncio.sleep((total_duration_us / 1_000_000.0) + 0.75)
+        await client.group.stop()
+        await asyncio.sleep(0.5)
+        await _disconnect_client(client)
+    finally:
+        client.send_message = original_send_message  # type: ignore[method-assign]
+        client.send_role_message = original_send_role_message  # type: ignore[method-assign]
+        client.send_binary = original_send_binary  # type: ignore[method-assign]
+
+    record_player_stream_evidence(
+        collector,
+        advertised_formats=advertised_formats,
+        negotiated_format=negotiated_format,
+        chunk_count=len(chunk_timestamps_us),
+        chunk_timestamps_us=chunk_timestamps_us,
+    )
+
+    return {"protocol": collector.to_summary_fragment()}
+
+
+async def _run_metadata_scenario(
+    args: argparse.Namespace,
+    *,
+    sent_metadata_states: Any,
+    client: Any,
+) -> dict[str, Any]:
     from aiosendspin.server.roles.metadata import MetadataGroupRole
 
     metadata_group_role = client.group.group_role("metadata")
@@ -493,8 +745,46 @@ async def _run_metadata_scenario(args: argparse.Namespace, *, client: Any) -> di
         playback_speed=args.metadata_playback_speed,
     )
     await asyncio.sleep(0.5)
+    # The recorder has been watching the transport since before this client
+    # connected, so by now it holds the first metadata-carrying state that
+    # actually went out, whether the role sent it while activating or the update
+    # above produced it. Reading it after the settle rather than waiting on the
+    # send queue keeps this inside the case budget: a client that went away
+    # leaves it unset, and the matrix then judges nothing instead of hanging.
+    first_state_sent = sent_metadata_states.first_metadata_state()
     await _disconnect_client(client)
-    return {"metadata": {"expected": expected}}
+    return {
+        "metadata": {
+            "expected": expected,
+            "first_state_sent": first_state_sent,
+        }
+    }
+
+
+def _controller_state_from_message(message: Any) -> dict[str, Any] | None:
+    """
+    Return the controller state a `server/state` message carries, or None.
+
+    None covers every message that advertises no controller state: another
+    message type, and a `server/state` whose controller field is absent (an
+    `UndefinedField` sentinel rather than None) or explicitly null, as the
+    repeat/shuffle back-compat mirror emits alongside the controller push.
+    """
+    from aiosendspin.models.controller import ControllerStatePayload
+    from aiosendspin.models.core import ServerStateMessage
+
+    if not isinstance(message, ServerStateMessage):
+        return None
+    controller = message.payload.controller
+    if not isinstance(controller, ControllerStatePayload):
+        return None
+    return {
+        "supported_commands": sorted(command.value for command in controller.supported_commands),
+        "volume": controller.volume,
+        "muted": controller.muted,
+        "repeat": controller.repeat.value,
+        "shuffle": controller.shuffle,
+    }
 
 
 async def _run_controller_scenario(args: argparse.Namespace, *, client: Any) -> dict[str, Any]:
@@ -507,11 +797,26 @@ async def _run_controller_scenario(args: argparse.Namespace, *, client: Any) -> 
 
     expected_command = _controller_command_payload(args.controller_command)
     event_future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+    advertised_state: dict[str, Any] | None = None
 
     def on_group_event(_group: Any, event: Any) -> None:
         command = _controller_event_to_command(event)
         if command is not None and not event_future.done():
             event_future.set_result(command)
+
+    # Role state reaches the client through send_role_message; Role.send_message
+    # delegates to it. Capturing the message rather than reading the role back
+    # reports what was advertised instead of what this adapter assumed.
+    original_send_role_message = client.send_role_message
+
+    def send_role_message_wrapper(role: str, message: Any) -> None:
+        nonlocal advertised_state
+        state = _controller_state_from_message(message)
+        if state is not None:
+            advertised_state = state
+        original_send_role_message(role, message)
+
+    client.send_role_message = send_role_message_wrapper  # type: ignore[method-assign]
 
     unsubscribe = client.group.add_event_listener(on_group_event)
     try:
@@ -521,23 +826,21 @@ async def _run_controller_scenario(args: argparse.Namespace, *, client: Any) -> 
         controller_group_role.set_shuffle(_bool_from_cli(args.controller_shuffle))
         controller_group_role.set_supported_commands([MediaCommand(args.controller_command)])
         received_command = await asyncio.wait_for(event_future, timeout=args.timeout_seconds)
+        # Stay wrapped until the client is gone, so a command that mutates
+        # controller state leaves both sides reporting the same latest state.
+        await asyncio.sleep(0.2)
+        await _disconnect_client(client)
     finally:
         unsubscribe()
+        client.send_role_message = original_send_role_message  # type: ignore[method-assign]
 
-    await asyncio.sleep(0.2)
-    await _disconnect_client(client)
-    protocol_commands = {MediaCommand.VOLUME, MediaCommand.MUTE, MediaCommand.SWITCH}
-    app_commands = {MediaCommand(args.controller_command)}
-    all_commands = sorted((protocol_commands | app_commands), key=lambda c: c.value)
+    if advertised_state is None:
+        raise RuntimeError("Server never sent a controller state to advertise")
     return {
         "controller": {
             "expected_command": expected_command,
             "received_command": received_command,
-            "supported_commands": [command.value for command in all_commands],
-            "volume": controller_group_role.volume,
-            "muted": controller_group_role.muted,
-            "repeat": controller_group_role.repeat.value,
-            "shuffle": controller_group_role.shuffle,
+            **advertised_state,
         }
     }
 
@@ -578,6 +881,8 @@ async def _scenario_payload(
     *,
     server: Any,
     client: Any,
+    sent_metadata_states: Any,
+    handshake_timestamps: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     if args.scenario_id in {
         "client-initiated-pcm",
@@ -585,15 +890,31 @@ async def _scenario_payload(
         "server-initiated-pcm-24bit",
         "server-initiated-flac",
         "server-initiated-opus",
-        "client-initiated-request-format-pcm",
-        "client-initiated-request-format-flac",
+        "client-initiated-state-format-pcm",
+        "client-initiated-state-format-flac",
+        "server-initiated-legacy-unencrypted",
+        "server-initiated-audio-chunk-framing",
     }:
         # The server streams source PCM and the player role re-encodes to whatever
-        # format the client negotiates, including a mid-stream stream/request-format
-        # switch, so no renegotiation-specific server logic is required here.
+        # format the client negotiates, including a mid-stream client/state format
+        # change, so every player scenario shares one streaming path.
         return await _run_audio_scenario(args, server=server, client=client)
+    if args.scenario_id == "server-initiated-protocol-baseline-v1":
+        assert handshake_timestamps is not None
+        handshake_start_ts, handshake_end_ts = handshake_timestamps
+        return await _run_protocol_baseline_scenario(
+            args,
+            server=server,
+            client=client,
+            handshake_start_ts=handshake_start_ts,
+            handshake_end_ts=handshake_end_ts,
+        )
     if args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}:
-        return await _run_metadata_scenario(args, client=client)
+        return await _run_metadata_scenario(
+            args,
+            sent_metadata_states=sent_metadata_states,
+            client=client,
+        )
     if args.scenario_id in {"client-initiated-controller", "server-initiated-controller"}:
         return await _run_controller_scenario(args, client=client)
     if args.scenario_id in {"client-initiated-artwork", "server-initiated-artwork"}:
@@ -604,9 +925,9 @@ async def _scenario_payload(
 async def _run(args: argparse.Namespace) -> int:
     _add_repo_to_syspath("aiosendspin")
 
-    from aiosendspin.noise.keys import Identity
-    from aiosendspin.noise.trust_store import InMemoryServerPairingStore
     from aiosendspin.server.server import SendspinServer
+
+    from conformance.adapters._aiosendspin_pairing import make_server_identity_and_store
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
@@ -615,14 +936,28 @@ async def _run(args: argparse.Namespace) -> int:
     registry_path = Path(args.registry)
 
     loop = asyncio.get_running_loop()
+    identity, pairing_store = await make_server_identity_and_store(
+        server_id=args.server_id,
+        client_id=args.client_id,
+    )
     server = SendspinServer(
         loop,
-        identity=Identity.generate(),
+        identity=identity,
         server_name=args.server_name,
-        pairing_store=InMemoryServerPairingStore(),
-        allow_unencrypted=True,
+        pairing_store=pairing_store,
+        allow_unencrypted=_bool_from_cli(args.allow_unencrypted),
+        allow_noncompliant_clients=args.scenario_id != "server-initiated-protocol-baseline-v1",
     )
     server_id = server.id
+    control_messages = ControlMessageRecorder()
+    # Watches the transport from here, because the first metadata-carrying
+    # server/state can go out during connection bring-up, before the adapter
+    # holds the client.
+    sent_metadata_states = (
+        SentMetadataStateRecorder(server.clock)
+        if args.scenario_id in {"client-initiated-metadata", "server-initiated-metadata"}
+        else None
+    )
 
     try:
         await server.start_server(
@@ -651,22 +986,48 @@ async def _run(args: argparse.Namespace) -> int:
         )
 
         if args.initiator_role == "client":
+            handshake_start_ts = time.time()
             client, discovery_method = await _wait_for_incoming_client(
                 server,
                 client_name=args.client_name,
                 timeout_s=args.timeout_seconds,
             )
+            handshake_end_ts = time.time()
         else:
+            handshake_start_ts = time.time()
             client, discovery_method = await _wait_for_target_client(
                 server,
                 client_name=args.client_name,
                 registry_path=registry_path,
                 timeout_s=args.timeout_seconds,
             )
+            handshake_end_ts = time.time()
 
-        payload = await _scenario_payload(args, server=server, client=client)
+        # Every scenario ends by disconnecting the client, which detaches its connection.
+        connection = client.connection
+        if connection is None:
+            raise RuntimeError("Client has no active connection to read the server/activate from")
+
+        payload = await _scenario_payload(
+            args,
+            server=server,
+            client=client,
+            sent_metadata_states=sent_metadata_states,
+            handshake_timestamps=(handshake_start_ts, handshake_end_ts),
+        )
         summary = {
-            **_base_summary(args, server_id=server_id, discovery_method=discovery_method, client=client),
+            **_base_summary(
+                args,
+                server_id=server_id,
+                discovery_method=discovery_method,
+                client=client,
+                activation=control_messages.initial_activation(connection),
+                # Read once the scenario has run, so the server has had the whole
+                # case in which to send them.
+                group_updates=control_messages.group_updates(connection),
+                availability_trace=control_messages.availability_trace(connection),
+                time_exchange=control_messages.time_exchange(connection),
+            ),
             **payload,
         }
         write_json(summary_path, summary)

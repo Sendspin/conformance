@@ -1,12 +1,26 @@
 name: publish
 
+# Only harness and site changes run the matrix. The client validator ships in
+# the same package and source tree but never drives the matrix, so it and its
+# vendored aiosendspin are excluded; its checks run in ci.yml instead.
 on:
   push:
     branches:
       - main
+    paths: &matrix-paths
+      - "src/conformance/**"
+      - "!src/conformance/validator/**"
+      - "!src/conformance/_vendor/**"
+      - "adapters/**"
+      - "scripts/**"
+      - "!scripts/vendor_aiosendspin.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/publish.yml"
   pull_request:
     branches:
       - main
+    paths: *matrix-paths
   workflow_dispatch:
   schedule:
     - cron: "0 2 * * *"
@@ -20,6 +34,13 @@ jobs:
   publish-report:
     if: github.repository == 'sendspin/conformance'
     runs-on: macos-26
+    # A newer push to a pull request cancels the run it supersedes. Every other
+    # event gets a group of its own: deploy-pages fails on GitHub's side when its
+    # run has cancelled another through this group, so a run that deploys never
+    # shares it.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+      cancel-in-progress: true
     outputs:
       site_built: ${{ steps.check_site.outputs.site_built }}
       has_regressions: ${{ steps.regressions.outputs.has_regressions }}
@@ -46,12 +67,6 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: "1.24.1"
-          cache-dependency-path: "adapters/sendspin-go/go.sum"
-
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
@@ -61,7 +76,7 @@ jobs:
         run: swift --version
 
       - name: Install package
-        run: uv sync
+        run: uv sync --locked
 
       - name: Clone implementation repos
         run: |
@@ -74,8 +89,8 @@ jobs:
           uv run python scripts/run_all.py \
             --results-dir artifacts/results \
             --build-report-path artifacts/build-report.json \
-            --from "aiosendspin,sendspin-go" \
-            --to "aiosendspin,sendspin-cpp,sendspin-dotnet,sendspin-go,sendspin-js,sendspin-rs,SendspinKit"
+            --from "aiosendspin,sendspin-server-cpp" \
+            --to "aiosendspin,sendspin-cpp,sendspin-dotnet,sendspin-js,sendspin-rs,SendspinKit"
 
       - name: Record harness outcome
         if: always()
@@ -145,6 +160,11 @@ jobs:
     needs: publish-report
     if: github.repository == 'sendspin/conformance' && github.event_name != 'pull_request' && needs.publish-report.outputs.site_built == 'true'
     runs-on: ubuntu-latest
+    # An in-flight deployment is never cancelled. A pending one gives way to a
+    # newer deployment, because only the newest report matters.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -6,10 +6,14 @@ those declarations to the formats the matrix really negotiated, so an untested
 claim is visible as such instead of hiding behind a green case.
 
 The join is mostly observational: it reports what a client claimed and what the
-wire carried. The one verdict drawn from it is `undeclared_format_violation`,
-which asserts the spec MUST that a negotiated format be one the client listed.
-It still says nothing about whether a scenario got the format it set out to
-test, which is not recorded in machine-readable form anywhere yet.
+wire carried. Three verdicts are drawn from it. `undeclared_format_violation`
+asserts the spec MUST that a negotiated format be one the client listed, and
+applies to every case. `format_priority_violation` asserts that the server
+picked the first entry of a list offering it a choice, and applies only to a
+scenario built around that choice. `stream_bit_depth_violation` asserts that the
+negotiated stream carried the bit depth a scenario exists to test, and applies
+only to a scenario naming one. Whether any other scenario got the format it set
+out to test is not recorded in machine-readable form anywhere yet.
 """
 
 from __future__ import annotations
@@ -26,6 +30,9 @@ SCHEMA_VERSION = 1
 
 PLAYER_SUPPORT_KEY = "player@v1_support"
 
+# The codecs every server supports, one of which every player has to list.
+MANDATORY_CODECS = ("flac", "pcm")
+
 FormatKey = tuple[Any, ...]
 
 _NUMERIC_FIELDS = tuple(field for field in AUDIO_FORMAT_FIELDS if field != "codec")
@@ -35,8 +42,8 @@ def normalized_format(value: Any) -> dict[str, Any] | None:
     """Return the audio format an adapter summary object describes, or None.
 
     Codecs are casefolded because they reach the summaries from independent
-    producers: aiosendspin serializes an enum value, while the Go server copies
-    the raw wire envelope through untouched.
+    producers: aiosendspin serializes an enum value, while other adapters copy
+    the codec from the wire untouched.
     """
     if not isinstance(value, dict):
         return None
@@ -93,11 +100,12 @@ def undeclared_format_violation(
 ) -> str | None:
     """Return why the case's negotiated formats break the client's declaration, or None.
 
-    Both `stream/start` and `stream/request-format` carry the same spec MUST:
-    the format has to be one the client listed in its `supported_formats`. The
-    reason names every undeclared format, the summary field that observed it,
-    and what the client actually offered — the three things a reader of the red
-    cell needs to tell a server defect from a client misreport.
+    Both `stream/start` and the `client/state` player `format` carry the same
+    spec MUST: the format has to be one the client listed in its
+    `supported_formats`. The reason names every undeclared format, the summary
+    field that observed it, and what the client actually offered — the three
+    things a reader of the red cell needs to tell a server defect from a client
+    misreport.
 
     Formats match on `AUDIO_FORMAT_FIELDS`, except that `bit_depth` is dropped
     for `opus`, which the spec says to ignore for that codec in both
@@ -137,6 +145,137 @@ def undeclared_format_violation(
     )
     offered = ", ".join(format_label(audio_format) for audio_format in declared)
     return f"Negotiated format not declared by the client: {observed}; declared: {offered}"
+
+
+def format_priority_violation(
+    server_summary: dict[str, Any],
+    *,
+    preferred_codec: str,
+) -> str | None:
+    """Return why the case did not show the server honouring the client's priority, or None.
+
+    For a scenario whose client lists `preferred_codec` first with a pcm or flac
+    entry behind it. Two things are judged:
+
+    - The stimulus. The declared list has to lead with `preferred_codec` and
+      carry a pcm or flac entry, which the spec requires of every player. A list
+      of one has no priority for the server to honour, and a list without the
+      mandatory entry is a `client/hello` no conformant client sends.
+    - The selection. The spec says a server SHOULD pick the highest-priority
+      entry it can produce, and only servers that can produce `preferred_codec`
+      reach such a scenario, so a server that streamed one of the lower entries
+      did not honour the priority. The spec ranks a `format` the player prefers
+      in `client/state` above the list order; no client adapter sets one in a
+      scenario that applies this rule, so the list order is what decides.
+
+    Unlike `undeclared_format_violation`, a declaration this harness cannot read
+    is reported rather than skipped: the declared list is the stimulus here, so
+    without it the case has not been shown to test anything. A missing server
+    stream, or one in a codec the client never listed, is left to the checks
+    that already name those.
+    """
+    declared, unreadable = _declared_formats(server_summary)
+    if unreadable:
+        return (
+            "Client's supported_formats carries an entry that cannot be read as an audio "
+            "format, so the declared priority cannot be checked"
+        )
+    if not declared:
+        return (
+            "The server summary records no supported_formats from client/hello, so the "
+            "declared priority cannot be checked"
+        )
+
+    codec_label = preferred_codec.upper()
+    offered = ", ".join(format_label(audio_format) for audio_format in declared)
+    codecs = [audio_format["codec"] for audio_format in declared]
+    if codecs[0] != preferred_codec:
+        return (
+            f"Client did not list {codec_label} first, so the case cannot test its "
+            f"priority; declared: {offered}"
+        )
+    if not any(codec in MANDATORY_CODECS for codec in codecs):
+        return (
+            "Client listed no flac or pcm entry, which roles/player/v1.md requires of "
+            f"every player; declared: {offered}"
+        )
+
+    stream = normalized_format(server_summary.get("stream"))
+    if stream is not None and stream["codec"] != preferred_codec and stream["codec"] in codecs:
+        return (
+            f"Server selected {format_label(stream)} although the client listed "
+            f"{codec_label} first; a server that can produce {codec_label} is expected to "
+            "honour supported_formats priority (roles/player/v1.md, SHOULD); "
+            f"declared: {offered}"
+        )
+    return None
+
+
+def stream_bit_depth_violation(
+    server_summary: dict[str, Any],
+    client_summary: dict[str, Any],
+    *,
+    bit_depth: int,
+) -> str | None:
+    """Return why the case did not exercise a stream of `bit_depth`, or None.
+
+    For a scenario whose subject is one bit depth. The canonical PCM hash is
+    taken over float samples, so a stream of the same clip at another depth
+    still matches it; only the negotiated format shows which path the pair ran.
+
+    The spec requires no particular bit depth of a player, so a reason returned
+    here never describes a conformance defect in the client. It says the case
+    did not test what the scenario is for, and names the side whose evidence
+    shows why:
+
+    - The server's recorded stream is what was put on the wire, so it decides.
+      A server summary without a readable one is a harness gap rather than a
+      pass, because the server adapters belong to this harness.
+    - Where that stream has another depth and the client's `supported_formats`
+      offered none at `bit_depth`, the client adapter did not set up the
+      stimulus. That is a harness gap too: the adapter writes the declaration.
+      A declaration that is missing or holds an unreadable entry cannot show
+      that, so the reason then names neither side.
+    - Where the client did offer `bit_depth`, the server chose otherwise.
+    - A client that reports the stream it observed has to have observed the
+      same depth. A client summary without a readable stream is not judged.
+    """
+    stream = normalized_format(server_summary.get("stream"))
+    if stream is None:
+        return (
+            "Harness gap: the server adapter recorded no stream format, so the case "
+            f"cannot show that it tested {bit_depth}-bit audio"
+        )
+
+    declared, unreadable = _declared_formats(server_summary)
+    offered = ", ".join(format_label(audio_format) for audio_format in declared) or "none recorded"
+    if stream["bit_depth"] != bit_depth:
+        if not declared or unreadable:
+            return (
+                f"Harness gap: the stream was {format_label(stream)}, so the case cannot "
+                f"test {bit_depth}-bit audio, and the server summary records no readable "
+                "supported_formats from client/hello to show which side chose it; "
+                f"declared: {offered}"
+            )
+        if any(audio_format["bit_depth"] == bit_depth for audio_format in declared):
+            return (
+                f"Server streamed {format_label(stream)} although the client listed a "
+                f"{bit_depth}-bit format, so the case cannot test {bit_depth}-bit audio; "
+                f"declared: {offered}"
+            )
+        return (
+            f"Harness gap: the client adapter advertised no {bit_depth}-bit format and "
+            f"the stream was {format_label(stream)}, so the case cannot test "
+            f"{bit_depth}-bit audio; declared: {offered}"
+        )
+
+    observed = normalized_format(client_summary.get("stream"))
+    if observed is not None and observed["bit_depth"] != bit_depth:
+        return (
+            f"Client observed a {format_label(observed)} stream although the server "
+            f"sent {format_label(stream)}; declared: {offered}"
+        )
+    return None
 
 
 def _declared_formats(
@@ -192,7 +331,7 @@ def _negotiated_formats(
 ) -> list[dict[str, Any]]:
     """Return every audio format the case negotiated, tagged with its source.
 
-    The server records the format it emitted in `stream/start`. Renegotiation
+    The server records the format it emitted in `stream/start`. Format-preference
     scenarios emit two and only the client keeps both, so both sides are read
     and each observation names the summary field it came from.
     """

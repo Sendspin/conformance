@@ -16,6 +16,21 @@ async def wait_for_file(path: Path, timeout_s: float) -> None:
     raise TimeoutError(f"Timed out waiting for file: {path}")
 
 
+async def wait_for_exit(
+    process: asyncio.subprocess.Process,
+    *,
+    role: str,
+    timeout_s: float,
+) -> None:
+    """Wait until an adapter process exits, raising a TimeoutError that names the role."""
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout_s)
+    except TimeoutError:
+        raise TimeoutError(
+            f"Timed out after {timeout_s:g}s waiting for the {role} adapter to exit"
+        ) from None
+
+
 async def collect_process(
     cmd: list[str],
     *,

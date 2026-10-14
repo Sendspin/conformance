@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
-from .implementations import IMPLEMENTATIONS, resolve_repo_path
+from .implementations import IMPLEMENTATIONS, SUPPORTING_REPOS, resolve_repo_path
 from .io import write_json
 from .paths import repo_root
 
@@ -72,7 +72,13 @@ def _conformance_client_repo_path(key: str) -> str | None:
         "sendspin-js": "adapters/sendspin-js/client.mjs",
         "sendspin-rs": "adapters/sendspin-rs/client/src/main.rs",
         "sendspin-cpp": "adapters/sendspin-cpp/client/main.cpp",
-        "sendspin-go": "adapters/sendspin-go/client/main.go",
+    }.get(key)
+
+
+def _conformance_server_repo_path(key: str) -> str | None:
+    return {
+        "aiosendspin": "src/conformance/adapters/aiosendspin_server.py",
+        "sendspin-server-cpp": "adapters/sendspin-server-cpp/server/main.cpp",
     }.get(key)
 
 
@@ -82,6 +88,18 @@ def _head_details(repo: Path) -> tuple[str | None, str | None, str | None, str |
         return None, None, None, None
     commit_sha, short_sha, subject, committed_at = raw.split("\x00", 3)
     return commit_sha, short_sha, subject, committed_at
+
+
+def _revision_label(repo: Path) -> str | None:
+    """
+    Return a human-readable label for the checked-out revision.
+
+    The tag when HEAD sits on one (`1.0.0-rc1`), the nearest tag plus a distance
+    when it does not (`1.0.0-rc1-5-gabc1234`), otherwise the short sha. A
+    checkout with uncommitted changes gains a `-dirty` suffix, so the label is
+    not always a resolvable ref.
+    """
+    return _run_git(repo, "describe", "--tags", "--always", "--dirty")
 
 
 def _latest_tag(repo: Path) -> str | None:
@@ -161,6 +179,7 @@ def _repository_entry(
         _run_git(repo_path, "remote", "get-url", "origin") or remote_url,
     )
     commit_sha, short_sha, subject, committed_at = _head_details(repo_path)
+    revision_label = _revision_label(repo_path)
     latest_tag = _latest_tag(repo_path)
     commits_ahead = None if latest_tag is None else _ahead_of_tag(repo_path, latest_tag)
     repo_url, commit_url = _commit_urls(origin_url, commit_sha)
@@ -174,6 +193,7 @@ def _repository_entry(
             "commit_subject": subject,
             "committed_at": committed_at,
             "commit_url": commit_url,
+            "revision_label": revision_label,
             "latest_release_tag": latest_tag,
             "commits_ahead_of_release": commits_ahead,
             "release_url": (
@@ -198,8 +218,14 @@ def collect_repository_versions(
     *,
     environment_id: str | None = None,
     environment_name: str | None = None,
+    resolve_repo: Callable[[str], Path | None] = resolve_repo_path,
 ) -> list[dict[str, Any]]:
-    """Collect revision metadata for the repos represented in one report."""
+    """
+    Collect revision metadata for the spec and the implementations a report covers.
+
+    `resolve_repo` maps a repository directory name to its checkout, or to None
+    when there is none; an entry without a checkout is reported as unavailable.
+    """
     environments = _environment_entries(
         environment_id=environment_id,
         environment_name=environment_name,
@@ -210,7 +236,15 @@ def collect_repository_versions(
         or "https://github.com/Sendspin/conformance.git"
     )
     conformance_commit_sha, _, _, _ = _head_details(conformance_repo)
+    spec_dirname, spec_remote_url = SUPPORTING_REPOS["spec"]
     repositories: list[dict[str, Any]] = [
+        _repository_entry(
+            key="spec",
+            display_name="Sendspin spec",
+            repo_path=resolve_repo(spec_dirname),
+            remote_url=spec_remote_url,
+            environments=environments,
+        )
     ]
     for implementation_name in _used_implementation_names(results):
         specification = IMPLEMENTATIONS.get(implementation_name)
@@ -219,7 +253,7 @@ def collect_repository_versions(
         entry = _repository_entry(
             key=implementation_name,
             display_name=specification.display_name,
-            repo_path=resolve_repo_path(specification.repo_dirname),
+            repo_path=resolve_repo(specification.repo_dirname),
             remote_url=specification.remote_url,
             environments=environments,
         )
@@ -231,6 +265,13 @@ def collect_repository_versions(
         )
         if client_code_url is not None:
             entry["client_code_url"] = client_code_url
+        server_code_url = _blob_url(
+            conformance_remote_url,
+            conformance_commit_sha,
+            _conformance_server_repo_path(implementation_name),
+        )
+        if server_code_url is not None:
+            entry["server_code_url"] = server_code_url
         repositories.append(entry)
     return repositories
 

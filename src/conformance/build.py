@@ -16,7 +16,7 @@ from .environment import build_log_filename, resolve_environment
 from .implementations import ensure_repo_checkout, resolve_repo_path
 from .io import write_json
 from .paths import repo_root
-from .toolchains import find_cargo, find_cmake, find_dotnet, find_go, find_swift
+from .toolchains import find_cargo, find_cmake, find_dotnet, find_swift
 
 
 BuildResult = dict[str, Any]
@@ -274,80 +274,51 @@ def _swift_build_result() -> BuildResult:
     )
 
 
-def _cmake_build_result() -> BuildResult:
+def _cmake_build_result(
+    *,
+    adapter: str,
+    adapter_dir: str,
+    repo_dirname: str,
+) -> BuildResult:
     cmake = find_cmake()
     if cmake is None:
         return {
-            "adapter": "sendspin-cpp-client",
+            "adapter": adapter,
             "status": "failed",
             "detail": "cmake executable is not available",
         }
 
     try:
-        ensure_repo_checkout("sendspin-cpp")
+        ensure_repo_checkout(repo_dirname)
     except FileNotFoundError as err:
         return {
-            "adapter": "sendspin-cpp-client",
+            "adapter": adapter,
             "status": "failed",
             "detail": str(err),
         }
 
-    adapter_root = repo_root() / "adapters" / "sendspin-cpp" / "client"
+    adapter_root = repo_root() / adapter_dir
     build_dir = adapter_root / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
     suffix = ".exe" if os.name == "nt" else ""
-    binary_path = build_dir / f"conformance-sendspin-cpp-client{suffix}"
+    binary_path = build_dir / f"conformance-{adapter}{suffix}"
 
     configure = _run_command(
         [cmake, "-S", str(adapter_root), "-B", str(build_dir), "-DCMAKE_BUILD_TYPE=Release"],
     )
     if configure.returncode != 0:
-        return _built_result(adapter="sendspin-cpp-client", completed=configure)
+        return _built_result(adapter=adapter, completed=configure)
 
     completed = _run_command(
-        [cmake, "--build", str(build_dir), "--config", "Release"],
-    )
-    runtime_command_prefix = None
-    if completed.returncode == 0 and binary_path.exists():
-        runtime_command_prefix = [str(binary_path)]
-    return _built_result(
-        adapter="sendspin-cpp-client",
-        completed=completed,
-        runtime_command_prefix=runtime_command_prefix,
-    )
-
-
-def _go_build_result(
-    *,
-    adapter: str,
-    package: str,
-    output_name: str,
-) -> BuildResult:
-    go = find_go()
-    if go is None:
-        return {
-            "adapter": adapter,
-            "status": "failed",
-            "detail": "go executable is not available",
-        }
-
-    try:
-        ensure_repo_checkout("sendspin-go")
-    except FileNotFoundError as err:
-        return {
-            "adapter": adapter,
-            "status": "failed",
-            "detail": str(err),
-        }
-
-    adapter_root = repo_root() / "adapters" / "sendspin-go"
-    bin_dir = adapter_root / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    suffix = ".exe" if os.name == "nt" else ""
-    binary_path = bin_dir / f"{output_name}{suffix}"
-    completed = _run_command(
-        [go, "build", "-o", str(binary_path), f"./{package}"],
-        cwd=adapter_root,
+        [
+            cmake,
+            "--build",
+            str(build_dir),
+            "--config",
+            "Release",
+            "--parallel",
+            str(os.cpu_count() or 1),
+        ],
     )
     runtime_command_prefix = None
     if completed.returncode == 0 and binary_path.exists():
@@ -370,21 +341,20 @@ def _build_plan() -> BuildPlan:
         ("sendspin-dotnet-client", _dotnet_build_result),
         ("sendspin-rs-client", _cargo_build_result),
         ("SendspinKit-client", _swift_build_result),
-        ("sendspin-cpp-client", _cmake_build_result),
         (
-            "sendspin-go-client",
-            lambda: _go_build_result(
-                adapter="sendspin-go-client",
-                package="client",
-                output_name="sendspin-go-client",
+            "sendspin-cpp-client",
+            lambda: _cmake_build_result(
+                adapter="sendspin-cpp-client",
+                adapter_dir="adapters/sendspin-cpp/client",
+                repo_dirname="sendspin-cpp",
             ),
         ),
         (
-            "sendspin-go-server",
-            lambda: _go_build_result(
-                adapter="sendspin-go-server",
-                package="server",
-                output_name="sendspin-go-server",
+            "sendspin-server-cpp-server",
+            lambda: _cmake_build_result(
+                adapter="sendspin-server-cpp-server",
+                adapter_dir="adapters/sendspin-server-cpp/server",
+                repo_dirname="sendspin-server-cpp",
             ),
         ),
         ("sendspin-js-adapters", _node_build_result),

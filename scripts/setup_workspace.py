@@ -13,8 +13,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from conformance.implementations import resolve_repo_path
-from conformance.paths import repo_root
+from conformance.implementations import resolve_repo_path, validate_repo_overrides
+from conformance.paths import RepoOverrideError, repo_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,12 +25,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    try:
+        validate_repo_overrides()
+    except RepoOverrideError as err:
+        raise SystemExit(str(err)) from err
     root = repo_root()
 
     if args.clone:
         subprocess.run([sys.executable, str(root / "scripts" / "setup_repositories.py")], check=True)
 
-    subprocess.run(["uv", "sync"], cwd=str(root), check=True)
+    subprocess.run(["uv", "sync", "--locked"], cwd=str(root), check=True)
 
     aiosendspin_repo = resolve_repo_path("aiosendspin")
     if aiosendspin_repo is not None:

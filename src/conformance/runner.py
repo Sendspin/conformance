@@ -6,48 +6,56 @@ import asyncio
 import base64
 import hashlib
 import os
+import re
 import shutil
 import sys
-from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .declared_formats import undeclared_format_violation
+from .chunk_framing import chunk_framing_verdict
+from .declared_formats import (
+    format_priority_violation,
+    stream_bit_depth_violation,
+    undeclared_format_violation,
+)
 from .environment import resolve_environment
-from .flac import decode_fixture
 from .fixtures import fixture_path
 from .implementations import (
     IMPLEMENTATIONS,
     ensure_repo_checkout,
     implementations_for_scenario,
+    implementations_with_role,
     parse_implementation_filter,
     resolve_repo_path,
 )
 from .io import read_json, write_json
 from .models import AUDIO_FORMAT_FIELDS, CaseResult, RoleName, ScenarioSpec
 from .paths import repo_root
-from .process import close_process_log, collect_process, wait_for_file
+from .process import close_process_log, collect_process, wait_for_exit, wait_for_file
+from .protocol import (
+    activation_violation,
+    group_update_violation,
+    protocol_evidence_failure,
+    stream_start_gate_violation,
+    time_exchange_violation,
+)
 from .scenarios import ordered_scenarios, require_scenario
 from .toolchains import find_cargo, find_cmake, find_dotnet, find_go, find_swift
 
 SERVER_PORT_BASE = 18927
 CLIENT_PORT_BASE = 19927
 
+# Codecs whose decoded output is sample-identical to what was encoded, so a
+# decoded stream can be hash-compared with its source.
+_LOSSLESS_CODECS = frozenset({"flac"})
 
-def _case_resource_keys(
-    *,
-    scenario_id: str,
-    server_impl: str,
-    client_impl: str,
-) -> tuple[str, ...]:
-    """Return shared resources that make a case incompatible with parallel peers."""
-    keys: list[str] = []
-    if client_impl == "sendspin-go":
-        # The Go adapter is stable under the matrix, but local parallel runs can stall before
-        # the paired server writes its ready file. Serialize Go client cases to match CI.
-        keys.append("sendspin-go-client-runtime")
-    return tuple(keys)
+# The roles a stream/start opens a stream for. A scenario exercising neither has
+# the server send none, so the available gate on stream/start is not judged there.
+_STREAMED_ROLE_FAMILIES = frozenset({"player", "artwork"})
+
+# "error" as a word of its own, so a dependency named quick-error or thiserror is not one.
+_BUILD_ERROR_LINE = re.compile(r"(?<![\w-])error(?![\w-])", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -175,6 +183,7 @@ def _swift_adapter_command(
 def _cmake_adapter_command(
     adapter_dir: str,
     *,
+    binary_name: str,
     build_result: dict[str, Any] | None = None,
     **kwargs: str,
 ) -> LaunchSpec | None:
@@ -190,7 +199,7 @@ def _cmake_adapter_command(
     if cmake is None:
         return None
     build_dir = repo_root() / adapter_dir / "build"
-    binary = build_dir / "conformance-sendspin-cpp-client"
+    binary = build_dir / binary_name
     if not binary.exists():
         return None
     return LaunchSpec(
@@ -289,9 +298,10 @@ def _build_role_command(
         )
     if role_spec.adapter_kind == "cmake":
         assert role_spec.entrypoint is not None
-        ensure_repo_checkout("sendspin-cpp")
+        ensure_repo_checkout(spec.repo_dirname)
         return _cmake_adapter_command(
             role_spec.entrypoint,
+            binary_name=f"conformance-{role_spec.build_adapter}",
             build_result=build_result,
             summary=str(summary),
             ready=str(ready),
@@ -406,10 +416,16 @@ class CaseContext:
             return {
                 **common,
                 "client_name": self.client_name,
+                "client_id": self.client_id,
                 "fixture": str(fixture_path()),
                 "server_id": self.server_id,
                 "server_name": self.server_name,
                 "port": str(self.server_port),
+                **(
+                    {"allow_unencrypted": "true"}
+                    if self.scenario.requires_legacy_unencrypted
+                    else {}
+                ),
             }
         args = {
             **common,
@@ -452,6 +468,7 @@ def _case_result(
         client_impl=context.client_impl,
         status=status,
         reason=reason,
+        scenario_revision=context.scenario.scenario_revision,
         case_dir=str(context.case_dir),
         server_exit_code=server_exit_code,
         client_exit_code=client_exit_code,
@@ -491,6 +508,40 @@ def _missing_summary_reason(
     return f"Missing summary output for {role_text}"
 
 
+def _written_summaries(context: CaseContext) -> dict[RoleName, dict[str, Any]]:
+    """Return the summaries the adapters left on disk, server first."""
+    summaries: dict[RoleName, dict[str, Any]] = {}
+    for role in ("server", "client"):
+        try:
+            payload = read_json(context.summary_path(role))
+        except (OSError, ValueError):
+            # Absent, or truncated by an adapter killed mid-write.
+            continue
+        if isinstance(payload, dict):
+            summaries[role] = payload
+    return summaries
+
+
+def _adapter_reported_failures(summaries: dict[RoleName, dict[str, Any]]) -> str | None:
+    """Return the reasons the adapters gave for their non-ok summaries, or None."""
+    reported = [
+        f"{role.capitalize()} adapter reported: {summary['reason']}"
+        for role, summary in summaries.items()
+        if summary.get("status") != "ok" and summary.get("reason")
+    ]
+    return "; ".join(reported) or None
+
+
+def _incomplete_case_reason(context: CaseContext, observed: str) -> str:
+    """Explain a case that ended without a usable summary from both adapters.
+
+    An adapter that already reported why it failed leads, because what the
+    harness observed is usually only the consequence of it.
+    """
+    reported = _adapter_reported_failures(_written_summaries(context))
+    return f"{reported}; {observed}" if reported else observed
+
+
 def _build_result_index(
     build_results: list[dict[str, Any]] | None,
 ) -> dict[str, dict[str, Any]]:
@@ -519,7 +570,13 @@ def _build_failure_reason(build_result: dict[str, Any]) -> str:
     adapter = str(build_result.get("adapter") or "adapter")
     status = str(build_result.get("status") or "failed")
     detail = str(build_result.get("detail") or "").strip()
-    headline = detail.splitlines()[0].strip() if detail else "no detail available"
+    lines = [line.strip() for line in detail.splitlines() if line.strip()]
+    # The detail is the tail of the build log, so its first line is often a
+    # dependency being compiled or a line cut mid-word; lead with a diagnostic.
+    headline = next(
+        (line for line in lines if _BUILD_ERROR_LINE.search(line)),
+        lines[0] if lines else "no detail available",
+    )
     return f"{adapter} build {status}: {headline}"
 
 
@@ -532,39 +589,39 @@ def _compare_audio_summaries(
     if client_summary.get("status") != "ok":
         return False, f"Client summary status is {client_summary.get('status')!r}"
 
-    source_hash = server_summary["audio"]["source_pcm_sha256"]
-    received_hash = client_summary["audio"]["received_pcm_sha256"]
-    if not client_summary["audio"]["audio_chunk_count"]:
+    server_audio = server_summary.get("audio")
+    if not isinstance(server_audio, dict):
+        return False, "Server summary is missing an 'audio' section"
+    client_audio = client_summary.get("audio")
+    if not isinstance(client_audio, dict):
+        return False, "Client summary is missing an 'audio' section"
+
+    source_hash = server_audio["source_pcm_sha256"]
+    received_hash = client_audio["received_pcm_sha256"]
+    if not client_audio["audio_chunk_count"]:
         return False, "Client summary shows zero audio chunks"
     if source_hash == received_hash:
         return True, "PCM hashes match exactly"
 
-    audio = server_summary["audio"]
-    received_sample_count = int(client_summary["audio"]["received_sample_count"])
-    fixture = decode_fixture(
-        Path(audio["fixture"]),
-        max_duration_seconds=float(audio.get("clip_seconds") or 5.0),
-    )
-    # Slice and hash in the fixture's own depth, not the negotiated wire depth. The
-    # canonical hash is over float samples, which carry the same value at any depth, so
-    # the comparison holds; using the wire depth against a fixture decoded at another
-    # would take the wrong number of bytes per sample.
-    bytes_per_sample = fixture.bit_depth // 8
-    prefix_pcm = fixture.pcm_bytes[: received_sample_count * bytes_per_sample]
-    from .pcm import FloatPcmHasher
-
-    prefix_hasher = FloatPcmHasher()
-    prefix_hasher.update_from_pcm_bytes(prefix_pcm, bit_depth=fixture.bit_depth)
-    prefix_hash = prefix_hasher.hexdigest()
-    if prefix_hash == received_hash:
-        missing_samples = fixture.frame_count * audio["channels"] - received_sample_count
-        return True, f"PCM prefix matches; trailing samples omitted={missing_samples}"
-
     return (
         False,
-        "PCM hash mismatch: "
+        f"PCM hash mismatch: {_sample_count_detail(server_audio, client_audio)}"
         f"server={source_hash} client={received_hash}",
     )
+
+
+def _sample_count_detail(server_audio: dict[str, Any], client_audio: dict[str, Any]) -> str:
+    """Return how the sent and received sample counts relate, or "" when unreported."""
+    frame_count = server_audio.get("frame_count")
+    channels = server_audio.get("channels")
+    received = client_audio.get("received_sample_count")
+    if not all(type(value) is int for value in (frame_count, channels, received)):
+        return ""
+    sent = frame_count * channels
+    if received == sent:
+        return f"sample counts equal ({sent}), content differs; "
+    direction = "fewer" if received < sent else "more"
+    return f"client received {received} of {sent} samples ({abs(sent - received)} {direction}); "
 
 
 def _stream_codec(summary: dict[str, Any]) -> str | None:
@@ -650,9 +707,198 @@ def _compare_encoded_audio_summaries(
             f"{codec_label} codec header mismatch: "
             f"server={server_header_hash} client={client_header_hash}",
         )
-    if server_header_hash and client_header_hash:
-        return True, f"{codec_label} header and chunk bytes match exactly"
-    return True, f"{codec_label} chunk bytes match exactly"
+    transported = (
+        "header and chunk bytes" if server_header_hash and client_header_hash else "chunk bytes"
+    )
+
+    violation, unjudged = _decoded_audio_verdict(
+        server_summary,
+        client_summary,
+        expected_codec=expected_codec,
+    )
+    if violation is not None:
+        return False, violation
+    if unjudged is not None:
+        return True, (
+            f"{codec_label} {transported} match exactly; "
+            f"decoded audio not judged against the source clip: {unjudged}"
+        )
+    return True, (
+        f"{codec_label} {transported} match exactly and the decoded audio matches the source clip"
+    )
+
+
+def _decoded_audio_verdict(
+    server_summary: dict[str, Any],
+    client_summary: dict[str, Any],
+    *,
+    expected_codec: str,
+) -> tuple[str | None, str | None]:
+    """
+    Judge the audio the client decoded against the source clip, as (violation, unjudged).
+
+    `violation` is why the decoded audio is not the source clip. `unjudged` is
+    why the rule could not be applied to this case. Both are None when the rule
+    ran and held, and at most one is set.
+
+    Matching sent bytes against received bytes proves only that the transport
+    delivered what the server sent. A server that sends part of the clip still
+    satisfies it, because the client really did receive everything that went
+    out. Comparing what the client decoded with the clip the server started
+    from is what catches the missing audio.
+
+    The rule is judged only where a hash equality can hold and the evidence to
+    test it exists:
+
+    - A lossy codec never decodes back to its source, so it is not judged.
+    - A client adapter that does not decode the stream reports no PCM hash, or
+      a hash over zero samples, and is not judged. A client whose decoder
+      produced nothing from a stream it was meant to decode is indistinguishable
+      from that and is not judged either.
+    - A stream negotiated at another sample rate or channel count than the
+      source was resampled or remixed on the way, so it is not judged. Bit depth
+      is deliberately left out: the hash is taken over canonical float samples,
+      which a widening such as 16-bit to 24-bit leaves unchanged.
+
+    Once a client has reported decoded audio, a server summary without a source
+    hash is a violation rather than missing evidence, because the server
+    adapters belong to this harness and always know the clip they were given.
+    """
+    codec_label = expected_codec.upper()
+    if expected_codec not in _LOSSLESS_CODECS:
+        return None, f"{codec_label} is lossy, so its decoded audio cannot equal the source"
+
+    server_audio = server_summary.get("audio", {})
+    client_audio = client_summary.get("audio", {})
+    received_hash = client_audio.get("received_pcm_sha256")
+    if (
+        not isinstance(received_hash, str)
+        or not received_hash
+        or client_audio.get("received_sample_count") == 0
+    ):
+        return None, "the client reported no decoded audio"
+
+    source_hash = server_audio.get("source_pcm_sha256")
+    if not isinstance(source_hash, str) or not source_hash:
+        return "Server summary is missing the source PCM hash", None
+
+    stream = server_summary.get("stream") or {}
+    converted = [
+        f"{field} {server_audio.get(field)} -> {stream.get(field)}"
+        for field in ("sample_rate", "channels")
+        if stream.get(field) != server_audio.get(field)
+    ]
+    if converted:
+        return None, (
+            "the stream was not negotiated at the source clip's format "
+            f"({', '.join(converted)})"
+        )
+
+    if received_hash == source_hash:
+        return None, None
+    return (
+        f"{codec_label} decoded audio does not match the source clip: "
+        f"{_sample_count_detail(server_audio, client_audio)}"
+        f"source={source_hash} client={received_hash}"
+    ), None
+
+
+def _microseconds(value: Any) -> int | None:
+    """Return a microsecond summary field as an int, or None when it is unusable."""
+    # bool is an int subclass, and a summary field can hold any JSON value.
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _first_metadata_state_verdict(
+    server_summary: dict[str, Any],
+    client_summary: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """Judge the first metadata-carrying `server/state`, as (evaluated, violation).
+
+    `violation` is why the state breaks the spec, or None when it does not.
+    `evaluated` reports whether both halves of the evidence were present to
+    judge at all, so a caller can distinguish a rule that held from one that
+    never ran.
+
+    The first `server/state` sent for a role on a connection MUST carry a past
+    or present `timestamp` if the role object has one, so the client is brought
+    up to date before any scheduled update follows. A future timestamp is a
+    scheduled update, which leaves a freshly connected client holding state it
+    must not display yet and nothing to show in the meantime.
+
+    Both numbers are read in the server's own clock domain: the stamp the
+    client received verbatim, against a clock reading the server adapter took
+    once that same state had been stamped. So the comparison is exact and needs
+    neither clock synchronization nor a tolerance. Judging it from the client's
+    time filter instead is not an option, because that filter needs two samples
+    to converge and the first metadata state arrives before the second lands.
+
+    The bound is read once the frame carrying that state is on the wire, not
+    when the send was queued. A reading taken before transmission would call a
+    timestamp future when it was already past by the time it went out, and so
+    blame a conformant server; a later reading can only be more permissive.
+
+    Both sides describe the first metadata-carrying state independently, so the
+    two are required to name the same timestamp before the bound is applied. If
+    they differ, the client was looking at a state the server did not record and
+    there is no bound that belongs to it, so nothing is judged.
+
+    None means there is nothing to report, which deliberately covers both no
+    violation and no evidence this harness could read, as
+    `declared_formats.undeclared_format_violation` does: an adapter that does
+    not record its side yet is not thereby non-conformant. Only `aiosendspin`
+    records both sides today. A client that reports the observation without a
+    `timestamp_us` key is read the same way, so an adapter can publish which
+    observation was first without being taken to claim anything about its
+    timestamp.
+
+    A `timestamp_us` of None is a violation rather than missing evidence,
+    because the adapter reports having seen the object and found no timestamp on
+    it. That branch is unreachable through `aiosendspin`, whose model makes
+    `timestamp` required and so drops an object without one while parsing; such
+    a case fails its zero-update check first.
+
+    The spec puts this requirement on any role object carrying a `timestamp`,
+    which is `color` as well as `metadata`. There is no `color` scenario in the
+    matrix, so this reads the metadata summary directly rather than generalizing
+    over roles for a single caller.
+    """
+    first_state = client_summary.get("metadata", {}).get("first_object_state")
+    if not isinstance(first_state, dict):
+        return False, None
+    if "timestamp_us" not in first_state:
+        return False, None
+
+    if first_state["timestamp_us"] is None:
+        return True, (
+            "The first server/state carrying a metadata object had no timestamp; "
+            "the spec requires one so the client is current before any scheduled update"
+        )
+
+    stamped_us = _microseconds(first_state["timestamp_us"])
+    if stamped_us is None:
+        return False, None
+
+    sent = server_summary.get("metadata", {}).get("first_state_sent")
+    if not isinstance(sent, dict):
+        return False, None
+    sent_us = _microseconds(sent.get("timestamp_us"))
+    bound_us = _microseconds(sent.get("bound_us"))
+    if sent_us is None or bound_us is None:
+        return False, None
+    if stamped_us != sent_us:
+        return False, None
+
+    if stamped_us > bound_us:
+        return True, (
+            "The first server/state carrying a metadata object was scheduled "
+            f"{(stamped_us - bound_us) / 1_000:.1f} ms ahead of the server clock "
+            f"(timestamp={stamped_us}, server clock once sent={bound_us}); "
+            "the spec requires a past or present timestamp"
+        )
+    return True, None
 
 
 def _compare_metadata_summaries(
@@ -669,9 +915,16 @@ def _compare_metadata_summaries(
     update_count = int(client_summary.get("metadata", {}).get("update_count") or 0)
     if update_count <= 0:
         return False, "Client summary shows zero metadata updates"
-    if expected == received:
-        return True, "Metadata snapshot matches"
-    return False, f"Metadata mismatch: server={expected!r} client={received!r}"
+    if expected != received:
+        return False, f"Metadata mismatch: server={expected!r} client={received!r}"
+    checked, violation = _first_metadata_state_verdict(server_summary, client_summary)
+    if violation is not None:
+        return False, violation
+    if checked:
+        return True, (
+            "Metadata snapshot matches and the first state carried a past or present timestamp"
+        )
+    return True, "Metadata snapshot matches"
 
 
 def _compare_controller_summaries(
@@ -698,12 +951,13 @@ def _compare_controller_summaries(
             f"expected={expected!r} server={received!r} client={sent!r}",
         )
 
-    # repeat/shuffle are controller-role state; the client must observe and report
-    # them. They are mandatory here (and must never appear in the metadata scenario).
+    # volume/muted/repeat/shuffle are controller-role state; the client must observe
+    # and report them, and RC1 makes all four mandatory. repeat/shuffle must never
+    # appear in the metadata scenario.
     received_state = client_summary.get("controller", {}).get("received_state")
     if not isinstance(received_state, dict):
         return False, "Client summary shows no controller state"
-    for field in ("repeat", "shuffle"):
+    for field in ("volume", "muted", "repeat", "shuffle"):
         if field not in received_state:
             return False, f"Client controller state is missing {field}"
         expected_value = server_controller.get(field)
@@ -715,8 +969,55 @@ def _compare_controller_summaries(
                 f"server={expected_value!r} client={received_value!r}",
             )
 
+    ok, reason = _compare_controller_supported_commands(server_controller, received_state)
+    if not ok:
+        return False, reason
+
+    # RC1: a command MUST be one of the values listed in supported_commands from the
+    # latest controller state the client received. received_state is the client's
+    # final state, so this holds only while a scenario advertises one stable set;
+    # a scenario that mutates the set mid-session needs a send-time snapshot instead.
     command_name = expected.get("command") if isinstance(expected, dict) else None
+    if command_name not in received_state["supported_commands"]:
+        return (
+            False,
+            f"Controller command {command_name!r} is absent from the "
+            "supported_commands the client observed",
+        )
     return True, f"Controller command matched ({command_name})"
+
+
+def _compare_controller_supported_commands(
+    server_controller: dict[str, Any],
+    received_state: dict[str, Any],
+) -> tuple[bool, str]:
+    """
+    Require the client to have observed exactly the command set the server advertised.
+
+    RC1 makes `supported_commands` a free subset of the command vocabulary, so the
+    only thing to assert is that both ends agree on it; which commands a server
+    chooses to offer is its own business.
+    """
+    advertised = server_controller.get("supported_commands")
+    if not isinstance(advertised, list):
+        return False, "Server summary shows no advertised supported_commands"
+    if "supported_commands" not in received_state:
+        return False, "Client controller state is missing supported_commands"
+    observed = received_state.get("supported_commands")
+    if not isinstance(observed, list):
+        return False, "Client controller state reports no supported_commands list"
+
+    unobserved = sorted(set(advertised) - set(observed))
+    unadvertised = sorted(set(observed) - set(advertised))
+    if not unobserved and not unadvertised:
+        return True, "Controller supported_commands match"
+
+    details = []
+    if unobserved:
+        details.append(f"advertised but not observed: {unobserved}")
+    if unadvertised:
+        details.append(f"observed but not advertised: {unadvertised}")
+    return False, "Controller supported_commands mismatch: " + "; ".join(details)
 
 
 def _compare_artwork_summaries(
@@ -766,7 +1067,16 @@ def _formats_equal(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return all(left.get(key) == right.get(key) for key in AUDIO_FORMAT_FIELDS)
 
 
-def _compare_renegotiation_summaries(
+# The format each format-preference scenario has the client prefer. Fields left
+# out are the client's to choose, since it lists rates and channels it can play.
+FORMAT_PREFERENCE_TARGETS: dict[str, dict[str, Any]] = {
+    "client-initiated-state-format-pcm": {"codec": "pcm", "bit_depth": 16},
+    "client-initiated-state-format-flac": {"codec": "flac"},
+}
+
+
+def _compare_format_preference_summaries(
+    scenario: ScenarioSpec,
     server_summary: dict[str, Any],
     client_summary: dict[str, Any],
 ) -> tuple[bool, str]:
@@ -774,6 +1084,31 @@ def _compare_renegotiation_summaries(
         return False, f"Server summary status is {server_summary.get('status')!r}"
     if client_summary.get("status") != "ok":
         return False, f"Client summary status is {client_summary.get('status')!r}"
+
+    # The preference has to be observed on the server side of the wire. A client
+    # reporting that it asked for a format does not show which message carried it.
+    preference = server_summary.get("format_preference")
+    if not isinstance(preference, dict):
+        return (
+            False,
+            "Harness gap: the server adapter does not record the format preference "
+            "it receives in client/state",
+        )
+    received = preference.get("received")
+    if not isinstance(received, dict):
+        return (
+            False,
+            "Server received no player format preference in client/state "
+            "(roles/player/v1.md, client/state player object `format`)",
+        )
+    target = FORMAT_PREFERENCE_TARGETS[scenario.id]
+    if not _format_matches(received, target):
+        return (
+            False,
+            f"Server received client/state format {_format_label(received)}, but "
+            "this scenario has the client prefer "
+            + ", ".join(f"{field}={value}" for field, value in target.items()),
+        )
 
     renegotiation = client_summary.get("renegotiation")
     if not isinstance(renegotiation, dict):
@@ -783,12 +1118,29 @@ def _compare_renegotiation_summaries(
     if not isinstance(requested, dict):
         return False, "Client did not record a requested format"
 
-    stream_start_count = int(renegotiation.get("stream_start_count") or 0)
-    final = renegotiation.get("final_format")
-    if stream_start_count < 2 or not isinstance(final, dict):
+    if not _format_matches(received, requested):
         return (
             False,
-            "Server did not re-emit stream/start after the request "
+            f"Server received client/state format {_format_label(received)} but the "
+            f"client reports preferring {_format_label(requested)}",
+        )
+
+    stream_start_count = int(renegotiation.get("stream_start_count") or 0)
+    final = renegotiation.get("final_format")
+    sent = server_summary.get("stream")
+    server_applied = isinstance(sent, dict) and _format_matches(sent, requested)
+    if stream_start_count < 2 or not isinstance(final, dict):
+        if server_applied:
+            return (
+                False,
+                f"Server sent a stream/start in the preferred {_format_label(requested)} "
+                "but the client did not observe the stream change format "
+                f"(stream_start_count={stream_start_count})",
+            )
+        return (
+            False,
+            "Server kept the stream format after the client/state preference changed, "
+            "where roles/player/v1.md says it SHOULD select the preferred format "
             f"(stream_start_count={stream_start_count})",
         )
 
@@ -797,6 +1149,14 @@ def _compare_renegotiation_summaries(
             False,
             f"Renegotiated format {_format_label(final)} does not match "
             f"requested {_format_label(requested)}",
+        )
+
+    if not server_applied:
+        return (
+            False,
+            f"Client reports the stream changed to {_format_label(final)} but the "
+            "server's last stream/start was "
+            f"{_format_label(sent if isinstance(sent, dict) else None)}",
         )
 
     initial = renegotiation.get("initial_format")
@@ -811,9 +1171,32 @@ def _compare_summaries(
     server_summary: dict[str, Any],
     client_summary: dict[str, Any],
 ) -> tuple[bool, str]:
+    reported = _adapter_reported_failures({"server": server_summary, "client": client_summary})
+    if reported is not None:
+        return False, reported
     matches, reason = _dispatch_comparison(scenario, server_summary, client_summary)
     if not matches:
         return matches, reason
+    # RC1 opens every connection with the server's initial server/activate,
+    # whatever the scenario goes on to exercise, so this applies to all of them.
+    violation = activation_violation(server_summary)
+    if violation is not None:
+        return False, violation
+    # RC1 also has the server send a group/update after that first
+    # server/activate on every connection, and constrains every one it sends,
+    # so this applies to all of them too.
+    violation = group_update_violation(server_summary)
+    if violation is not None:
+        return False, violation
+    if _STREAMED_ROLE_FAMILIES.intersection(scenario.required_role_families):
+        violation = stream_start_gate_violation(server_summary)
+        if violation is not None:
+            return False, violation
+    # Clock sync is core messaging, open to every connection whatever its roles,
+    # so this applies to all of them too.
+    violation = time_exchange_violation(server_summary)
+    if violation is not None:
+        return False, violation
     # Every format the case negotiated must be one the client declared. Modes
     # that negotiate no player stream leave the check with nothing to inspect,
     # so it applies to all of them rather than to a list of audio modes that a
@@ -829,9 +1212,39 @@ def _dispatch_comparison(
     server_summary: dict[str, Any],
     client_summary: dict[str, Any],
 ) -> tuple[bool, str]:
+    if scenario.verification_mode == "protocol":
+        if server_summary.get("status") != "ok":
+            return False, f"Server summary status is {server_summary.get('status')!r}"
+        if client_summary.get("status") != "ok":
+            return False, f"Client summary status is {client_summary.get('status')!r}"
+        failure = protocol_evidence_failure(
+            server_summary,
+            client_summary,
+            assertion_ids=scenario.protocol_assertions,
+        )
+        if failure is not None:
+            return False, failure
+        return True, f"Passed {len(scenario.protocol_assertions)} protocol assertions"
     if scenario.verification_mode == "audio-pcm":
-        return _compare_audio_summaries(server_summary, client_summary)
+        matches, reason = _compare_audio_summaries(server_summary, client_summary)
+        if matches and scenario.verifies_stream_bit_depth is not None:
+            violation = stream_bit_depth_violation(
+                server_summary,
+                client_summary,
+                bit_depth=scenario.verifies_stream_bit_depth,
+            )
+            if violation is not None:
+                return False, violation
+        return matches, reason
     if scenario.verification_mode == "audio-encoded-bytes":
+        # A server that failed keeps its own reason; the status checks below name it.
+        if scenario.verifies_format_priority and server_summary.get("status") == "ok":
+            violation = format_priority_violation(
+                server_summary,
+                preferred_codec=scenario.preferred_codec,
+            )
+            if violation is not None:
+                return False, violation
         return _compare_encoded_audio_summaries(
             server_summary,
             client_summary,
@@ -843,8 +1256,10 @@ def _dispatch_comparison(
         return _compare_controller_summaries(server_summary, client_summary)
     if scenario.verification_mode == "artwork":
         return _compare_artwork_summaries(server_summary, client_summary)
-    if scenario.verification_mode == "format-renegotiation":
-        return _compare_renegotiation_summaries(server_summary, client_summary)
+    if scenario.verification_mode == "format-preference":
+        return _compare_format_preference_summaries(scenario, server_summary, client_summary)
+    if scenario.verification_mode == "audio-chunk-framing":
+        return chunk_framing_verdict(server_summary, client_summary)
     raise ValueError(f"Unsupported verification mode: {scenario.verification_mode}")
 
 
@@ -904,7 +1319,7 @@ async def _run_failfast_role(
     )
     try:
         await wait_for_file(ready_path, timeout_s=10)
-        await asyncio.wait_for(process.wait(), timeout=5)
+        await wait_for_exit(process, role=failing_role, timeout_s=5)
     except Exception as err:
         if process.returncode is None:
             try:
@@ -935,6 +1350,27 @@ async def _run_failfast_role(
         server_exit_code=process.returncode if failing_role == "server" else None,
         client_exit_code=process.returncode if failing_role == "client" else None,
     )
+
+
+async def _run_unsupported_role(
+    *,
+    context: CaseContext,
+    failing_role: RoleName,
+    failure_reason: str | None = None,
+) -> CaseResult:
+    """
+    Fail a case fast and record that the harness judged it unsupported.
+
+    The mark records the judgement made before launch, so it stands however the
+    fail-fast adapter then behaves.
+    """
+    result = await _run_failfast_role(
+        context=context,
+        failing_role=failing_role,
+        failure_reason=failure_reason,
+    )
+    result.unsupported = True
+    return result
 
 
 async def run_case(
@@ -971,7 +1407,7 @@ async def run_case(
     if not context.role_spec("server").supported:
         return _write_result(
             context,
-            await _run_failfast_role(
+            await _run_unsupported_role(
                 context=context,
                 failing_role="server",
             ),
@@ -979,7 +1415,7 @@ async def run_case(
     if not context.role_spec("client").supported:
         return _write_result(
             context,
-            await _run_failfast_role(
+            await _run_unsupported_role(
                 context=context,
                 failing_role="client",
             ),
@@ -988,7 +1424,7 @@ async def run_case(
     if server_capability_reason is not None:
         return _write_result(
             context,
-            await _run_failfast_role(
+            await _run_unsupported_role(
                 context=context,
                 failing_role="server",
                 failure_reason=server_capability_reason,
@@ -998,7 +1434,7 @@ async def run_case(
     if client_capability_reason is not None:
         return _write_result(
             context,
-            await _run_failfast_role(
+            await _run_unsupported_role(
                 context=context,
                 failing_role="client",
                 failure_reason=client_capability_reason,
@@ -1087,8 +1523,8 @@ async def run_case(
         )
         await wait_for_file(context.ready_path("client"), timeout_s=10)
 
-        await asyncio.wait_for(server_process.wait(), timeout=timeout_s)
-        await asyncio.wait_for(client_process.wait(), timeout=10)
+        await wait_for_exit(server_process, role="server", timeout_s=timeout_s)
+        await wait_for_exit(client_process, role="client", timeout_s=10)
     except Exception as err:
         if server_process.returncode is None:
             try:
@@ -1109,7 +1545,7 @@ async def run_case(
             _case_result(
                 context,
                 status="failed",
-                reason=str(err),
+                reason=_incomplete_case_reason(context, str(err) or err.__class__.__name__),
                 server_exit_code=server_process.returncode,
                 client_exit_code=None if client_process is None else client_process.returncode,
             ),
@@ -1125,10 +1561,13 @@ async def run_case(
             _case_result(
                 context,
                 status="failed",
-                reason=_missing_summary_reason(
-                    context=context,
-                    server_process=server_process,
-                    client_process=client_process,
+                reason=_incomplete_case_reason(
+                    context,
+                    _missing_summary_reason(
+                        context=context,
+                        server_process=server_process,
+                        client_process=client_process,
+                    ),
                 ),
                 server_exit_code=server_process.returncode,
                 client_exit_code=None if client_process is None else client_process.returncode,
@@ -1137,11 +1576,15 @@ async def run_case(
 
     server_payload = read_json(context.summary_path("server"))
     client_payload = read_json(context.summary_path("client"))
-    matches, comparison_reason = _compare_summaries(
-        scenario,
-        server_payload,
-        client_payload,
-    )
+    try:
+        matches, comparison_reason = _compare_summaries(
+            scenario,
+            server_payload,
+            client_payload,
+        )
+    except Exception as err:  # noqa: BLE001 - never let one bad case crash the whole matrix run
+        matches = False
+        comparison_reason = f"Comparison raised {err.__class__.__name__}: {err}"
     if not matches:
         status = "failed"
         reason = comparison_reason
@@ -1194,7 +1637,10 @@ async def run_matrix(
     data_dir.mkdir(parents=True, exist_ok=True)
     build_index = _build_result_index(build_results)
     server_impls = parse_implementation_filter(from_filter)
-    client_impls = parse_implementation_filter(to_filter)
+    client_impls = implementations_with_role(
+        "client",
+        names=parse_implementation_filter(to_filter),
+    )
     cases: list[tuple[int, str, str, str]] = []
     slot_index = 0
     for scenario in ordered_scenarios():
@@ -1209,7 +1655,6 @@ async def run_matrix(
                 slot_index += 1
 
     semaphore = asyncio.Semaphore(jobs)
-    resource_locks: dict[str, asyncio.Lock] = {}
 
     async def _run_limited(
         *,
@@ -1219,27 +1664,18 @@ async def run_matrix(
         client_impl: str,
     ) -> dict[str, Any]:
         async with semaphore:
-            async with AsyncExitStack() as stack:
-                for resource_key in _case_resource_keys(
-                    scenario_id=scenario_id,
-                    server_impl=server_impl,
-                    client_impl=client_impl,
-                ):
-                    await stack.enter_async_context(
-                        resource_locks.setdefault(resource_key, asyncio.Lock())
-                    )
-                result = await run_case(
-                    results_dir=data_dir,
-                    scenario_id=scenario_id,
-                    server_impl=server_impl,
-                    client_impl=client_impl,
-                    timeout_s=timeout_s,
-                    slot_index=slot_index,
-                    build_index=build_index,
-                    environment_id=environment_id,
-                    environment_name=environment_name,
-                )
-                return result.__dict__
+            result = await run_case(
+                results_dir=data_dir,
+                scenario_id=scenario_id,
+                server_impl=server_impl,
+                client_impl=client_impl,
+                timeout_s=timeout_s,
+                slot_index=slot_index,
+                build_index=build_index,
+                environment_id=environment_id,
+                environment_name=environment_name,
+            )
+            return result.__dict__
 
     results = await asyncio.gather(
         *[

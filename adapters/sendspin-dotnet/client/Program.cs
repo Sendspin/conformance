@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
+using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Discovery;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol;
@@ -37,6 +38,7 @@ using var loggerFactory = LoggerFactory.Create(builder =>
 });
 
 var pipeline = new HashingAudioPipeline(loggerFactory);
+var identity = SendspinIdentity.Generate();
 var disconnectTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 ConnectionSnapshot? connectedServer = null;
 string? failureReason = null;
@@ -75,7 +77,7 @@ var summary = new Dictionary<string, object?>
     ["initiator_role"] = options.InitiatorRole,
     ["preferred_codec"] = options.PreferredCodec,
     ["client_name"] = options.ClientName,
-    ["client_id"] = options.ClientId,
+    ["client_id"] = identity.PeerId,
     ["server"] = connectedServer,
     ["peer_hello"] = peerHello,
 };
@@ -84,6 +86,11 @@ if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "s
 {
     summary["stream"] = playerStream;
     summary["audio"] = pipeline.Snapshot();
+}
+else if (options.ScenarioId is "server-initiated-audio-chunk-framing")
+{
+    summary["stream"] = playerStream;
+    summary["audio"] = pipeline.ChunkFramingSnapshot();
 }
 else if (options.ScenarioId is "client-initiated-metadata" or "server-initiated-metadata")
 {
@@ -119,10 +126,10 @@ return failureReason is null ? 0 : 1;
 
 async Task RunListenerClientAsync()
 {
-    var capabilities = BuildCapabilities(options);
+    var clientOptions = BuildClientOptions();
     await using var host = new SendspinHostService(
         loggerFactory,
-        capabilities,
+        clientOptions,
         new ListenerOptions
         {
             Port = options.Port,
@@ -130,19 +137,26 @@ async Task RunListenerClientAsync()
         },
         new AdvertiserOptions
         {
-            ClientId = capabilities.ClientId,
-            PlayerName = capabilities.ClientName,
+            // The server finds this client through the harness registry. Advertising would
+            // let any Sendspin server on the network connect in under unpaired access and
+            // contend with the server under test.
+            Enabled = false,
+            PlayerName = clientOptions.Capabilities.ClientName,
             Port = options.Port,
             Path = options.Path,
-        },
-        pipeline,
-        new KalmanClockSynchronizer(loggerFactory.CreateLogger<KalmanClockSynchronizer>()));
+        });
 
     host.ServerConnected += (_, server) =>
     {
         connectedServer = new ConnectionSnapshot(server.ServerId, server.ServerName, "playback");
     };
     host.ServerDisconnected += (_, _) => disconnectTcs.TrySetResult(true);
+    host.StreamStartReceived += (_, payload) => CaptureStreamStart(payload);
+
+    // No ServerHelloReceived handler, so peer_hello stays null on this path: the SDK exposes
+    // no raw server/hello frame, and its ServerHelloPayload carries server_id, version and
+    // active_roles values that were not in that frame.
+
     host.GroupStateChanged += (_, group) =>
     {
         HandleGroupState(group, () => host.SendCommandAsync(options.ControllerCommand));
@@ -191,20 +205,13 @@ async Task RunOutboundClientAsync()
     try
     {
         var serverUrl = await WaitForRegistryAsync(options.Registry, options.ServerName, timeout.Token);
-        var capabilities = BuildCapabilities(options);
-        await using var connection = new SendspinConnection(
-            loggerFactory.CreateLogger<SendspinConnection>(),
+        await using var client = SendspinClientService.CreateForDial(
+            loggerFactory,
+            BuildClientOptions(),
             new ConnectionOptions
             {
                 AutoReconnect = false,
             });
-
-        using var client = new SendspinClientService(
-            loggerFactory.CreateLogger<SendspinClientService>(),
-            connection,
-            new KalmanClockSynchronizer(loggerFactory.CreateLogger<KalmanClockSynchronizer>()),
-            capabilities,
-            pipeline);
         client.ServerHelloReceived += (_, payload) => peerHello = ToWireElement(payload);
         client.StreamStartReceived += (_, payload) => CaptureStreamStart(payload);
         client.GroupStateChanged += (_, group) =>
@@ -225,7 +232,7 @@ async Task RunOutboundClientAsync()
         connectedServer = new ConnectionSnapshot(
             client.ServerId ?? "unknown",
             client.ServerName ?? "unknown",
-            client.ConnectionReason);
+            client.LastServerHello?.ConnectionReason);
 
         await disconnectTcs.Task.WaitAsync(timeout.Token);
     }
@@ -239,9 +246,21 @@ async Task RunOutboundClientAsync()
     }
 }
 
+SendspinClientOptions BuildClientOptions() =>
+    new()
+    {
+        // The adapter does not derive the harness's deterministic pairing credentials, so
+        // each run connects as a fresh, unpaired device under unpaired access.
+        Identity = identity,
+        Capabilities = BuildCapabilities(options),
+        AudioPipeline = pipeline,
+        ClockSynchronizer = new KalmanClockSynchronizer(loggerFactory.CreateLogger<KalmanClockSynchronizer>()),
+    };
+
 void CaptureStreamStart(StreamStartPayload payload)
 {
     if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "server-initiated-flac" or "server-initiated-pcm-24bit"
+            or "server-initiated-audio-chunk-framing"
         && payload.Format is not null)
     {
         playerStream = ToWireElement(payload.Format);
@@ -269,7 +288,7 @@ void HandleGroupState(GroupState group, Func<Task>? sendControllerCommand)
         return;
     }
 
-    receivedControllerState = NormalizeController(group, options.ControllerCommand);
+    receivedControllerState = NormalizeController(group);
     if (sentControllerCommand is not null || sendControllerCommand is null)
     {
         return;
@@ -324,11 +343,11 @@ static Dictionary<string, object?> NormalizeMetadata(TrackMetadata metadata)
     };
 }
 
-static Dictionary<string, object?> NormalizeController(GroupState group, string command)
+static Dictionary<string, object?> NormalizeController(GroupState group)
 {
     return new Dictionary<string, object?>
     {
-        ["supported_commands"] = new[] { command },
+        ["supported_commands"] = group.SupportedCommands,
         ["volume"] = group.Volume,
         ["muted"] = group.Muted,
         // repeat/shuffle are controller-role state, carried on GroupState in SDK v9.
@@ -383,10 +402,13 @@ static string? ReadRegistry(string path, string name)
 
 static ClientCapabilities BuildCapabilities(CliOptions options)
 {
+    // The 24-bit scenario offers 24-bit as its only depth, so the server has no
+    // 16-bit entry to stream and the SDK's 24-bit decode path is the one that runs.
+    var pcmBitDepth = options.ScenarioId == "server-initiated-pcm-24bit" ? 24 : 16;
     var audioFormats = options.PreferredCodec.Equals("pcm", StringComparison.OrdinalIgnoreCase)
         ? new List<AudioFormat>
         {
-            new() { Codec = "pcm", SampleRate = 8000, Channels = 1, BitDepth = 16 },
+            new() { Codec = "pcm", SampleRate = 8000, Channels = 1, BitDepth = pcmBitDepth },
         }
         : new List<AudioFormat>
         {
@@ -406,21 +428,21 @@ static ClientCapabilities BuildCapabilities(CliOptions options)
 
     return new ClientCapabilities
     {
-        ClientId = options.ClientId,
         ClientName = options.ClientName,
         Roles = roles,
         BufferCapacity = 2_000_000,
         AudioFormats = audioFormats,
-        ArtworkChannels = new List<ArtworkChannelSpec>
+        ArtworkChannels = new List<ArtworkChannelState>
         {
-            new ArtworkChannelSpec
+            new ArtworkChannelState
             {
                 Source = "album",
                 Format = options.ArtworkFormat,
-                MediaWidth = options.ArtworkWidth,
-                MediaHeight = options.ArtworkHeight,
+                Width = options.ArtworkWidth,
+                Height = options.ArtworkHeight,
             },
         },
+        UnpairedAccessEnabled = true,
         ProductName = "Conformance Dotnet Client",
         Manufacturer = "Sendspin Conformance",
         SoftwareVersion = "0.1.0",
@@ -583,15 +605,16 @@ internal sealed class HashingAudioPipeline : IAudioPipeline
 
     public event EventHandler<AudioPipelineState>? StateChanged;
     public event EventHandler<AudioPipelineError>? ErrorOccurred;
+    public event EventHandler<int>? OutputLatencyChanged;
 
-    public Task StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
+    public Task<AudioPipelineStartOutcome> StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
     {
         _decoder?.Dispose();
         _decoder = _decoderFactory.Create(format);
         _decodeBuffer = new float[_decoder.MaxSamplesPerFrame];
         CurrentFormat = format;
         SetState(AudioPipelineState.Buffering);
-        return Task.CompletedTask;
+        return Task.FromResult(AudioPipelineStartOutcome.Restarted);
     }
 
     public Task StopAsync()
@@ -608,6 +631,8 @@ internal sealed class HashingAudioPipeline : IAudioPipeline
     {
         _decoder?.Reset();
     }
+
+    public void ReanchorTiming() { }
 
     public void ProcessAudioChunk(AudioChunk chunk)
     {
@@ -633,6 +658,8 @@ internal sealed class HashingAudioPipeline : IAudioPipeline
 
     public void SetMuted(bool muted) { }
 
+    public void SetMinBufferMilliseconds(int minBufferMs) { }
+
     public Task SwitchDeviceAsync(string? deviceId, CancellationToken cancellationToken = default) =>
         Task.CompletedTask;
 
@@ -650,6 +677,15 @@ internal sealed class HashingAudioPipeline : IAudioPipeline
         received_encoded_sha256 = ToHex(SHA256.HashData(_encodedStream.ToArray())),
         received_sample_count = _decodedFloatStream.Length / sizeof(float),
         audio_chunk_count = _audioChunkCount,
+    };
+
+    // The SDK parses the header off each frame before the chunk reaches the
+    // pipeline, so the adapter never holds a raw frame.
+    public object ChunkFramingSnapshot() => new
+    {
+        audio_chunk_count = _audioChunkCount,
+        received_encoded_byte_count = _encodedStream.Length,
+        received_chunk_frames = (object?)null,
     };
 
     private void SetState(AudioPipelineState state)
