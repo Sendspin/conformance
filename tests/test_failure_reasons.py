@@ -26,8 +26,10 @@ from conformance.runner import (
 )
 from conformance.scenarios import require_scenario
 
-HANDSHAKE_REASON = "expected client/hello, got client/init"
-UNSUPPORTED_REASON = "sendspin-go server does not support server-initiated-pcm-24bit"
+HANDSHAKE_REASON = "client closed the connection before client/init"
+UNSUPPORTED_REASON = (
+    "sendspin-server-cpp server adapter does not support scenario server-initiated-flac"
+)
 
 # Stand-ins for an adapter CLI: each writes the files named on its command line.
 FAILING_SERVER = """
@@ -50,7 +52,7 @@ def _context(results_dir: Path, scenario_id: str) -> CaseContext:
         environment_id="test",
         environment_name="Test",
         scenario=require_scenario(scenario_id),
-        server_impl="sendspin-go",
+        server_impl="sendspin-server-cpp",
         client_impl="aiosendspin",
         timeout_s=1.0,
         slot_index=0,
@@ -83,7 +85,7 @@ class IncompleteCaseReasonTest(unittest.TestCase):
         self.assertEqual(reason, f"Server adapter reported: {HANDSHAKE_REASON}; {observed}")
 
     def test_server_reason_leads_when_the_ready_file_never_appears(self) -> None:
-        context = _context(self.results_dir, "server-initiated-pcm-24bit")
+        context = _context(self.results_dir, "server-initiated-flac")
         write_json(
             context.summary_path("server"),
             {"status": "error", "reason": UNSUPPORTED_REASON},
@@ -130,7 +132,7 @@ class RunCaseReasonTest(unittest.IsolatedAsyncioTestCase):
             return await run_case(
                 results_dir=self.results_dir,
                 scenario_id="server-initiated-pcm",
-                server_impl="sendspin-go",
+                server_impl="sendspin-server-cpp",
                 client_impl="aiosendspin",
                 timeout_s=10.0,
                 slot_index=0,

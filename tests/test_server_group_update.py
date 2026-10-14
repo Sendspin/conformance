@@ -151,10 +151,10 @@ class GroupUpdateSectionTests(unittest.TestCase):
         self.assertEqual(section.count("not in the message"), 2)
 
     def test_says_none_followed_an_activate_rather_than_that_none_was_sent(self) -> None:
-        section = _section(label="sendspin-go")
+        section = _section(label="sendspin-server-cpp")
 
         self.assertIn("observed after a", section)
-        self.assertIn("sendspin-go server sent no", section)
+        self.assertIn("sendspin-server-cpp server sent no", section)
         self.assertIn("never carried a", section)
 
     def test_summary_without_the_list_renders_no_section(self) -> None:

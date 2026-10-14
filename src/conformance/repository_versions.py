@@ -79,7 +79,6 @@ def _conformance_client_repo_path(key: str) -> str | None:
 def _conformance_server_repo_path(key: str) -> str | None:
     return {
         "aiosendspin": "src/conformance/adapters/aiosendspin_server.py",
-        "sendspin-go": "adapters/sendspin-go/server/main.go",
         "sendspin-server-cpp": "adapters/sendspin-server-cpp/server/main.cpp",
     }.get(key)
 

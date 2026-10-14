@@ -233,15 +233,14 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             supported_role_families=("player", "metadata", "controller", "artwork"),
         ),
         server=RoleSpec(
-            supported=True,
-            adapter_kind="go",
-            build_adapter="sendspin-go-server",
-            entrypoint="adapters/sendspin-go/server",
-            supports_server_initiated=True,
-            supports_client_initiated=True,
-            supports_flac=True,
-            supports_discovery=True,
-            supported_role_families=("player", "metadata", "controller", "artwork"),
+            supported=False,
+            adapter_kind="placeholder",
+            entrypoint="conformance.adapters.placeholder",
+            reason=(
+                "sendspin-go's server library expects client/hello as the first "
+                "message and has no client/init or Noise handshake, so every case "
+                "would end at the first RC1 handshake step."
+            ),
         ),
     ),
 }

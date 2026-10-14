@@ -443,14 +443,6 @@ def _build_plan() -> BuildPlan:
                 output_name="sendspin-go-client",
             ),
         ),
-        (
-            "sendspin-go-server",
-            lambda: _go_build_result(
-                adapter="sendspin-go-server",
-                package="server",
-                output_name="sendspin-go-server",
-            ),
-        ),
         ("sendspin-js-adapters", _node_build_result),
     )
 

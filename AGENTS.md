@@ -229,7 +229,7 @@ remote, so any such list goes stale on the next merge.
 - `src/conformance/adapters/aiosendspin_server.py`: real Python server adapter
 - `src/conformance/adapters/aiosendspin_client.py`: real Python client adapter
 - `adapters/sendspin-dotnet/client/`: real `.NET` client adapter source
-- `adapters/sendspin-go/`: real Go client/server adapter source
+- `adapters/sendspin-go/`: real Go client adapter source
 - `adapters/SendspinKit/client/`: real Swift client adapter source with an adapter-owned inbound WebSocket listener for server-initiated scenarios
 - `adapters/sendspin-rs/client/`: real Rust client adapter source
 - `adapters/sendspin-js/client.mjs`: real Node.js client adapter source that drives the public `SendspinCore` SDK over an adapter-owned WebSocket
