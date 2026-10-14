@@ -1,0 +1,29 @@
+name: vendor
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check-vendored-aiosendspin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+
+      # Fails when src/conformance/_vendor/ was edited by hand or a patch in
+      # patches/aiosendspin/ no longer produces the committed tree.
+      - name: Check bundled aiosendspin matches a rebuild
+        run: uv run --no-project python scripts/vendor_aiosendspin.py --check
