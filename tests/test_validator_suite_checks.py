@@ -406,9 +406,11 @@ class PostPairingTests(unittest.TestCase):
                 connection.came("client/state", {"player": {"output_delay_ms": delay}})
             return connection.record()
 
-        self.assertIs(only(check(reporting(0, 250), reporting(250))).verdict, Verdict.PASS)
-        self.assertIs(only(check(reporting(250), reporting(0))).verdict, Verdict.FAIL)
-        self.assertIs(only(check(reporting(), reporting(0))).verdict, Verdict.NOT_APPLICABLE)
+        self.assertIs(only(check(reporting(0, 250), reporting(250), 250)).verdict, Verdict.PASS)
+        self.assertIs(only(check(reporting(250), reporting(0), 250)).verdict, Verdict.FAIL)
+        self.assertIs(only(check(reporting(250), reporting(), 250)).verdict, Verdict.NOT_APPLICABLE)
+        # Matching defaults prove nothing when the validator could not set the delay.
+        self.assertIs(only(check(reporting(0), reporting(0), None)).verdict, Verdict.NOT_APPLICABLE)
 
 
 class SpecRefTests(unittest.TestCase):

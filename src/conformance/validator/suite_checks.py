@@ -554,35 +554,34 @@ def check_restart_keeps_pairing(record: ConnectionRecord) -> list[Finding]:
 
 
 def check_restart_keeps_output_delay(
-    before: ConnectionRecord, after: ConnectionRecord
+    before: ConnectionRecord, after: ConnectionRecord, commanded: int | None
 ) -> list[Finding]:
-    """POSTPAIR-006: output_delay_ms reported after a restart equals the value before it."""
-    reported = [
-        (f, delay)
-        for f in before.inbound("client/state")
-        if (delay := _output_delay(f)) is not None
-    ]
-    if not reported:
-        return [_n_a("POSTPAIR-006", "the client reported no player output_delay_ms before")]
-    last, expected = reported[-1]
-    first = next(
-        (
-            (f, delay)
-            for f in after.inbound("client/state")
-            if (delay := _output_delay(f)) is not None
-        ),
-        None,
-    )
-    if first is None:
+    """
+    POSTPAIR-006: the output delay the validator set before a restart is reported after it.
+
+    `commanded` is the delay the client reported back on `before` after the validator
+    set it, or None when it could not be set.
+    """
+    if commanded is None:
+        return [
+            _n_a(
+                "POSTPAIR-006",
+                "the validator could not set an output delay: the player does not offer "
+                "set_output_delay, or did not report the delay it was set to",
+            )
+        ]
+    echo = next(f for f in before.inbound("client/state") if _output_delay(f) == commanded)
+    state = next((f for f in after.inbound("client/state") if _output_delay(f) is not None), None)
+    if state is None:
         return [_n_a("POSTPAIR-006", "the client reported no player output_delay_ms after")]
-    state, delay = first
-    if delay != expected:
+    delay = _output_delay(state)
+    if delay != commanded:
         return [
             _finding(
                 "POSTPAIR-006",
                 Verdict.FAIL,
-                f"output_delay_ms was {expected} before the restart and {delay} after",
-                last,
+                f"output_delay_ms was set to {commanded} before the restart and is {delay} after",
+                echo,
                 state,
             )
         ]
@@ -591,7 +590,7 @@ def check_restart_keeps_output_delay(
             "POSTPAIR-006",
             Verdict.PASS,
             f"output_delay_ms stayed {delay} across the restart",
-            last,
+            echo,
             state,
         )
     ]

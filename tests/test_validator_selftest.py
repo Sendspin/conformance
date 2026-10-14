@@ -130,7 +130,7 @@ class Operator:
         elif line.startswith(("[R1]", "[R4]")):
             for record in await self.client.pairing_store.list_records():
                 self.long_term_psks.add(b64url_encode(record.psk))
-        elif line.startswith("Now fully quit your app"):
+        elif line.startswith("[R5 restart]"):
             await self.client.disconnect(GoodbyeReason.RESTART)
 
     async def _stay_connected(self) -> None:

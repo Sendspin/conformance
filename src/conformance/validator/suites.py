@@ -43,8 +43,8 @@ from .storage import AdmitUnpairedStore
 _RESPONSE_S = 10.0
 # How long to watch a connection for a late refusal once a step's exchange is done.
 _SETTLE_S = 3.0
-# Pause before dialing again after a connection that did not suit the step.
-_REDIAL_PAUSE_S = 1.0
+# How many connections a step tries before giving up on one that suits it.
+_MATCH_ATTEMPTS = 5
 # The range of the random output delay R5 sets before the restart, in milliseconds.
 _DELAY_MIN_MS, _DELAY_SPAN_MS = 100, 400
 
@@ -211,31 +211,28 @@ class Link:
         self, holds: Callable[[ConnectionRecord], bool], mismatch: str
     ) -> int | None:
         """
-        Return an open connection whose record satisfies `holds`, reconnecting until one does.
+        Return an open connection whose record satisfies `holds`, or None.
 
-        `mismatch` is told to the user the first time a new connection does not satisfy
-        it. None when none does within the timeout.
+        When the current connection does not, the validator reconnects. Each new
+        connection that still does not is reported to the user as `mismatch`, and they
+        are asked whether to try again, up to a few times. None when they stop, the
+        attempts run out, or the app does not reconnect in time.
         """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._timeout_s
         number = self.current
-        attempts = 0
-        while True:
+        for attempt in range(_MATCH_ATTEMPTS):
             if self.is_open(number) and holds(self.record(number)):
                 return number
-            if attempts:
-                # A connection made for this step did not suit it either.
-                if attempts == 1:
-                    self._prompter.instruct(mismatch)
-                await asyncio.sleep(_REDIAL_PAUSE_S)
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return None
-            await self._close()
-            number = await self._next(self._watermark(), remaining)
+            if attempt:
+                self._prompter.instruct(mismatch)
+                answer = await self._prompter.confirm("Try again?")
+                if answer.reply is not Reply.RETRY and not (
+                    answer.reply is Reply.ANSWERED and answer.value
+                ):
+                    return None
+            number = await self.reconnect()
             if number is None:
                 return None
-            attempts += 1
+        return number if self.is_open(number) and holds(self.record(number)) else None
 
     async def _close(self) -> None:
         """Close the current connection, if open, and stop any dialing toward the client."""
@@ -274,6 +271,7 @@ class Link:
         new = self.connections_since(watermark)
         if any(self._keyed(n) for n in new):
             return True
+        # A second new connection means the app gave up on the first and tried again.
         return bool(new) and (self.record(new[0]).rejected or len(new) > 1)
 
     def _keyed(self, number: int) -> bool:
@@ -308,19 +306,7 @@ class SuiteRunner:
     async def run(self) -> list[Finding]:
         """Run every selected suite in order and return the findings, as reported."""
         if Suite.UNPAIRED in self._options.suites:
-            await self._step("U1", _U1, self._u1)
-            await self._step("U2", _U2, self._u2, evidence=Evidence.HUMAN)
-            if self._options.fault_injection:
-                await self._step("U4", _U4, self._u4)
-            else:
-                self._report(
-                    suite_checks.not_run(
-                        STEP_CHECKS["U4"],
-                        Verdict.NOT_APPLICABLE,
-                        "fault injection is opt-in: run with --fault-injection",
-                    )
-                )
-            await self._step("U3", _U3, self._u3, evidence=Evidence.HUMAN)
+            await self._unpaired()
         if Suite.PAIRING in self._options.suites:
             await self._pairing()
         if Suite.POST_PAIRING in self._options.suites:
@@ -354,12 +340,33 @@ class SuiteRunner:
             self._prompter.report_check(finding)
             self._findings.append(finding)
 
+    async def _unpaired(self) -> None:
+        """Run U1–U4, restoring afterwards a pairing an earlier run left, which U1 forgets."""
+        earlier = await self._store.record_by_client_id(self._link.client_id)
+        try:
+            await self._step("U1", _U1, self._u1)
+            await self._step("U2", _U2, self._u2, evidence=Evidence.HUMAN)
+            if self._options.fault_injection:
+                await self._step("U4", _U4, self._u4)
+            else:
+                self._report(
+                    suite_checks.not_run(
+                        STEP_CHECKS["U4"],
+                        Verdict.NOT_APPLICABLE,
+                        "fault injection is opt-in: run with --fault-injection",
+                    )
+                )
+            await self._step("U3", _U3, self._u3, evidence=Evidence.HUMAN)
+        finally:
+            if earlier is not None:
+                await self._store.store_record(earlier)
+
     async def _u1(self) -> list[Finding]:
         number = self._link.current
         if await self._store.record_by_client_id(self._link.client_id) is not None:
             self._prompter.instruct(
                 "The validator paired with your app in an earlier run. It forgets that pairing "
-                "and reconnects, so this connection is unpaired."
+                "until the unpaired steps are done, and reconnects unpaired."
             )
             await self._store.remove_record(self._link.client_id)
             number = await self._link.reconnect()
@@ -370,8 +377,7 @@ class SuiteRunner:
     async def _u2(self) -> list[Finding]:
         number = await self._link.connect_matching(
             lambda record: suite_checks.unpaired_access(record) is False,
-            "Your app still reports unpaired access on. Turn it off; the validator keeps "
-            "reconnecting until it is.",
+            "Your app still reports unpaired access on. Turn it off, then try again.",
         )
         if number is None:
             return _not_reached("U2", "no connection reported unpaired access off in time")
@@ -385,7 +391,7 @@ class SuiteRunner:
     async def _u4(self) -> list[Finding]:
         number = await self._link.connect_matching(
             lambda record: suite_checks.unpaired_access(record) is False,
-            "Your app reports unpaired access on. Turn it off for this step.",
+            "Your app reports unpaired access on. Turn it off for this step, then try again.",
         )
         if number is None:
             return _not_reached("U4", "no connection reported unpaired access off in time")
@@ -404,8 +410,7 @@ class SuiteRunner:
     async def _u3(self) -> list[Finding]:
         number = await self._link.connect_matching(
             lambda record: suite_checks.unpaired_access(record) is True,
-            "Your app still reports unpaired access off. Turn it on; the validator keeps "
-            "reconnecting until it is.",
+            "Your app still reports unpaired access off. Turn it on, then try again.",
         )
         if number is None:
             return _not_reached("U3", "no connection reported unpaired access on in time")
@@ -421,7 +426,7 @@ class SuiteRunner:
             self._report(
                 _not_reached("P1", "the client's hello does not offer pairing_psk")
                 if number is not None
-                else _not_reached("P1", "the client sent no client/hello")
+                else _not_reached("P1", "no connection of the client completed its handshake")
             )
             return
         await self._step("P1", _P1, self._p1)
@@ -535,9 +540,10 @@ class SuiteRunner:
         if number is None:
             return _not_reached("R5", "your app did not reconnect in time")
         await self._link.until(number, _ended_or_said({"client/state"}), _RESPONSE_S)
-        await self._set_output_delay(number)
+        delay = await self._set_output_delay(number)
         self._prompter.instruct(
-            "Now fully quit your app and start it again. Closing a window is not enough."
+            "[R5 restart] Now fully quit your app and start it again. Closing a window is not "
+            "enough."
         )
         answer = await self._prompter.confirm("Has your app restarted?")
         if answer.reply is not Reply.ANSWERED or not answer.value:
@@ -551,7 +557,7 @@ class SuiteRunner:
         after = self._link.record(restarted)
         return [
             *suite_checks.check_restart_keeps_pairing(after),
-            *suite_checks.check_restart_keeps_output_delay(self._link.record(number), after),
+            *suite_checks.check_restart_keeps_output_delay(self._link.record(number), after, delay),
         ]
 
     async def _r4(self) -> list[Finding]:
@@ -596,8 +602,12 @@ class SuiteRunner:
         )
         return len(self._link.record(number).outbound("server/activate")) > before
 
-    async def _set_output_delay(self, number: int) -> None:
-        """Command a random output delay, if the player offers it, and wait for the echo."""
+    async def _set_output_delay(self, number: int) -> int | None:
+        """
+        Command a random output delay and return it once the client reports it.
+
+        None when the player does not offer set_output_delay or did not report the delay.
+        """
         offered = any(
             "set_output_delay" in (_player(f.payload).get("supported_commands") or [])
             for f in self._link.record(number).inbound("client/state")
@@ -605,11 +615,11 @@ class SuiteRunner:
         client = self._server.get_client(self._link.client_id)
         players = client.roles_by_family("player") if client is not None else []
         if not offered or not players:
-            return
+            return None
         delay = _DELAY_MIN_MS + secrets.randbelow(_DELAY_SPAN_MS)
         self._prompter.instruct(f"The validator sets your app's output delay to {delay} ms.")
         players[0].set_output_delay(delay)
-        await self._link.until(
+        echoed = await self._link.until(
             number,
             lambda r: any(
                 _player(f.payload).get("output_delay_ms") == delay
@@ -617,6 +627,7 @@ class SuiteRunner:
             ),
             _RESPONSE_S,
         )
+        return delay if echoed else None
 
     def _note_keying(self, number: int) -> None:
         """Record which PSK keys connection `number` now, after a re-handshake."""
