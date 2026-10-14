@@ -32,7 +32,9 @@ __all__ = [
     "GroupRoleEvent",
     "GroupStateChangedEvent",
     "MinBufferChangedEvent",
+    "NoncomplianceObserver",
     "ObservedFrame",
+    "ObservedNoncompliance",
     "OutputDelayChangedEvent",
     "RequiredLeadTimeChangedEvent",
     "SendspinClient",
@@ -52,7 +54,7 @@ from conformance._vendor.aiosendspin.noise.wire import FrameDirection, FramePhas
 
 from .audio import AudioFormat
 from .client import ConnectionSecurity, DisconnectBehaviour, SendspinClient
-from .connection import FrameObserver, ObservedFrame
+from .connection import FrameObserver, NoncomplianceObserver, ObservedFrame, ObservedNoncompliance
 from .events import (
     ClientEvent,
     ClientGroupChangedEvent,
