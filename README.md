@@ -30,9 +30,9 @@ Current scenarios:
 - `sendspin-js`: real Node.js client adapter driving the public `SendspinCore` SDK over an adapter-owned WebSocket; covers client-initiated PCM plus the server-initiated PCM, metadata, and controller scenarios (FLAC/OPUS decode and `artwork@v1` are not exposed by the public SDK in a headless Node environment); server placeholder
 - `sendspin-jvm`: real JVM client adapter written in Kotlin, for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
 - `sendspin-rs`: real Rust client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
-- `sendspin-server-cpp`: real C++ server adapter for the client- and server-initiated PCM, 24-bit PCM, protocol-baseline, audio-chunk-framing, metadata, artwork and controller scenarios and `client-initiated-state-format-pcm`, built on the library's public API and evidenced from its message trace; client placeholder (its client counterpart is `sendspin-cpp`)
+- `sendspin-server-cpp`: real C++ server adapter for the client- and server-initiated PCM, 24-bit PCM, protocol-baseline, audio-chunk-framing, metadata, artwork and controller scenarios, the server-initiated FLAC and OPUS scenarios (both encoded by the library) and both `client-initiated-state-format-*` scenarios, built on the library's public API and evidenced from its message trace; the library has no unencrypted mode, so it takes no part in `server-initiated-legacy-unencrypted`; client placeholder (its client counterpart is `sendspin-cpp`)
 
-The OPUS scenario is currently exercised only by the `SendspinKit` and `sendspin-cpp` clients against the `aiosendspin` server until other implementations opt in via `supports_opus`.
+The OPUS scenario is currently exercised only by the `SendspinKit` and `sendspin-cpp` clients against the `aiosendspin` and `sendspin-server-cpp` servers until other implementations opt in via `supports_opus`.
 
 The `client-initiated-state-format-*` scenarios have no capability flag of their own: RC1 gives every player the `client/state` `format` preference, so a client that never sends one shows as a failed case. The FLAC variant still needs a client that can list FLAC (`supports_flac`). The `aiosendspin` and `SendspinKit` client adapters drive them today.
 

@@ -215,6 +215,9 @@ void ServerSession::start() {
     config.listen_port = static_cast<uint16_t>(this->args_.port);
     config.path = "/sendspin";
     config.approve_all_clients = true;
+    // The library encodes Opus only when the host opts in; the adapter offers every codec it can
+    // produce, so a player that lists Opus first is streamed it (server-initiated-opus)
+    config.enable_opus = true;
     config.trace = [this](const TracedMessage& message) { this->recorder_.on_message(message); };
     config.trace_writes = true;
     config.log_level = LogLevel::INFO;

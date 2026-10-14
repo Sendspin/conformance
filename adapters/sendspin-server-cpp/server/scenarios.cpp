@@ -26,7 +26,10 @@ constexpr const char* PROTOCOL_SPEC_REVISION = "8c9577ea8719ad082d051ec13cc73ef1
 constexpr const char* CLIENT_INITIATED_PCM = "client-initiated-pcm";
 constexpr const char* SERVER_INITIATED_PCM = "server-initiated-pcm";
 constexpr const char* SERVER_INITIATED_PCM_24BIT = "server-initiated-pcm-24bit";
+constexpr const char* SERVER_INITIATED_FLAC = "server-initiated-flac";
+constexpr const char* SERVER_INITIATED_OPUS = "server-initiated-opus";
 constexpr const char* CLIENT_INITIATED_STATE_FORMAT_PCM = "client-initiated-state-format-pcm";
+constexpr const char* CLIENT_INITIATED_STATE_FORMAT_FLAC = "client-initiated-state-format-flac";
 constexpr const char* SERVER_INITIATED_AUDIO_CHUNK_FRAMING =
     "server-initiated-audio-chunk-framing";
 constexpr const char* SERVER_INITIATED_PROTOCOL_BASELINE =
@@ -44,9 +47,24 @@ const std::set<std::string> PLAYER_STREAM_SCENARIOS = {
     CLIENT_INITIATED_PCM,
     SERVER_INITIATED_PCM,
     SERVER_INITIATED_PCM_24BIT,
+    SERVER_INITIATED_FLAC,
+    SERVER_INITIATED_OPUS,
     CLIENT_INITIATED_STATE_FORMAT_PCM,
+    CLIENT_INITIATED_STATE_FORMAT_FLAC,
     SERVER_INITIATED_AUDIO_CHUNK_FRAMING,
     SERVER_INITIATED_PROTOCOL_BASELINE,
+};
+
+// The scenarios in which the client changes its preferred format mid-stream through client/state
+const std::set<std::string> FORMAT_PREFERENCE_SCENARIOS = {
+    CLIENT_INITIATED_STATE_FORMAT_PCM,
+    CLIENT_INITIATED_STATE_FORMAT_FLAC,
+};
+
+// The scenarios judged on the encoded bytes the server sent, which the library encoded itself
+const std::set<std::string> ENCODED_AUDIO_SCENARIOS = {
+    SERVER_INITIATED_FLAC,
+    SERVER_INITIATED_OPUS,
 };
 
 // The role each of the other scenarios exercises, with no audio
@@ -683,7 +701,7 @@ void drive_scenario(const Args& args, ServerSession& session, TraceRecorder& rec
         throw std::runtime_error("the client never reported available: true in client/state");
     }
     stream_fixture(session, recorder, fixture,
-                   args.scenario_id == CLIENT_INITIATED_STATE_FORMAT_PCM, deadline);
+                   FORMAT_PREFERENCE_SCENARIOS.count(args.scenario_id) != 0, deadline);
 }
 
 void add_scenario_evidence(JsonObject summary, const Args& args, const ConnectionRecord& record,
@@ -729,7 +747,19 @@ void add_scenario_evidence(JsonObject summary, const Args& args, const Connectio
         audio["chunked_by"] = "implementation";
         audio["legacy_header_reason"] = nullptr;
     }
-    if (args.scenario_id == CLIENT_INITIATED_STATE_FORMAT_PCM) {
+    if (ENCODED_AUDIO_SCENARIOS.count(args.scenario_id) != 0) {
+        // The audio chunk payloads as they went on the wire; the stream/start codec_header is
+        // in summary["stream"], where the matrix reads it
+        audio["sent_audio_chunk_count"] = record.sent_audio_chunk_count;
+        audio["sent_encoded_byte_count"] = record.sent_audio.size();
+        if (record.sent_audio_chunk_count != 0) {
+            audio["sent_encoded_sha256"] =
+                sha256_hex(record.sent_audio.data(), record.sent_audio.size());
+        } else {
+            audio["sent_encoded_sha256"] = nullptr;
+        }
+    }
+    if (FORMAT_PREFERENCE_SCENARIOS.count(args.scenario_id) != 0) {
         summary["format_preference"]["received"] =
             parse_json(record.preferred_format).as<JsonVariantConst>();
     }
