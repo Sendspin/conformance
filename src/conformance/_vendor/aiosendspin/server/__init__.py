@@ -22,6 +22,9 @@ __all__ = [
     "DisconnectBehaviour",
     "ExternalStreamStartCallback",
     "ExternalStreamStartRequest",
+    "FrameDirection",
+    "FrameObserver",
+    "FramePhase",
     "GroupDeletedEvent",
     "GroupEvent",
     "GroupMemberAddedEvent",
@@ -29,6 +32,7 @@ __all__ = [
     "GroupRoleEvent",
     "GroupStateChangedEvent",
     "MinBufferChangedEvent",
+    "ObservedFrame",
     "OutputDelayChangedEvent",
     "RequiredLeadTimeChangedEvent",
     "SendspinClient",
@@ -44,9 +48,11 @@ __all__ = [
 ]
 
 from conformance._vendor.aiosendspin.models.types import AudioCodec, SignalState
+from conformance._vendor.aiosendspin.noise.wire import FrameDirection, FramePhase
 
 from .audio import AudioFormat
 from .client import ConnectionSecurity, DisconnectBehaviour, SendspinClient
+from .connection import FrameObserver, ObservedFrame
 from .events import (
     ClientEvent,
     ClientGroupChangedEvent,

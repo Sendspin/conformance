@@ -85,7 +85,7 @@ from .trust_store import (
     StagedPairingPsk,
     TrustedUnpairedClient,
 )
-from .wire import EncryptedWebSocket, RawWebSocket
+from .wire import EncryptedWebSocket, FrameDirection, FramePhase, FrameTap, RawWebSocket
 
 __all__ = [
     "DEFAULT_HANDSHAKE_TIMEOUT_S",
@@ -108,6 +108,9 @@ __all__ = [
     "EncryptedWebSocket",
     "FileClientPairingStore",
     "FileServerPairingStore",
+    "FrameDirection",
+    "FramePhase",
+    "FrameTap",
     "HandshakeAbortedError",
     "HandshakeNoncomplianceError",
     "HandshakeResult",
