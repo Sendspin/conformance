@@ -49,7 +49,7 @@ from .models import (
 )
 from .session import NoiseCipherSuite, NoiseSession
 from .trust_store import PskCategory, ResolvedPsk
-from .wire import EncryptedWebSocket, RawWebSocket
+from .wire import EncryptedWebSocket, FrameDirection, FramePhase, FrameTap, RawWebSocket
 
 # Per-message timeout during cleartext init and Noise handshake.
 DEFAULT_HANDSHAKE_TIMEOUT_S: Final[float] = 30.0
@@ -137,9 +137,17 @@ async def run_handshake_server(
     client_init_text: str | None = None,
     timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
     strict: bool = False,
+    frame_tap: FrameTap | None = None,
 ) -> HandshakeResult:
-    """Run the server-side (Noise initiator) handshake, rejecting spec violations if ``strict``."""
+    """Run the server-side (Noise initiator) handshake, rejecting spec violations if ``strict``.
+
+    ``frame_tap``, when set, sees each cleartext frame of the handshake and is handed on
+    to the returned ``EncryptedWebSocket``.
+    """
     compliance = _ServerCompliance(strict)
+    raw_ws = ws
+    if frame_tap is not None:
+        ws = _TappedWebSocket(ws, frame_tap)
     if client_init_text is None:
         client_init_text = await receive_client_init_frame(ws, timeout_s=timeout_s)
     try:
@@ -194,7 +202,7 @@ async def run_handshake_server(
         resolved = _sentinel_psk()
 
     return HandshakeResult(
-        encrypted_ws=EncryptedWebSocket(ws, session),
+        encrypted_ws=EncryptedWebSocket(raw_ws, session, frame_tap=frame_tap),
         peer_id=client_id,
         suite=suite,
         psk=resolved,
@@ -356,8 +364,14 @@ async def receive_client_init_frame(
     ws: HandshakeWebSocket,
     *,
     timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
+    frame_tap: FrameTap | None = None,
 ) -> str:
-    """Receive the ``client/init`` TEXT frame, answering a BINARY one with ``server/error``."""
+    """Receive the ``client/init`` TEXT frame, answering a BINARY one with ``server/error``.
+
+    ``frame_tap``, when set, sees the frame received and any ``server/error`` sent.
+    """
+    if frame_tap is not None:
+        ws = _TappedWebSocket(ws, frame_tap)
     msg = await _receive_frame(ws, what="client/init", timeout_s=timeout_s)
     if msg.type is WSMsgType.BINARY:
         await _send_server_error(ws, ServerErrorReason.MALFORMED)
@@ -365,6 +379,46 @@ async def receive_client_init_frame(
     if msg.type is not WSMsgType.TEXT:
         raise HandshakeAbortedError(f"expected client/init (TEXT), got {msg.type.name}")
     return cast("str", msg.data)
+
+
+class _TappedWebSocket:
+    """``HandshakeWebSocket`` that reports each frame it carries as cleartext."""
+
+    def __init__(self, ws: HandshakeWebSocket, frame_tap: FrameTap) -> None:
+        self._ws = ws
+        self._frame_tap = frame_tap
+
+    @property
+    def closed(self) -> bool:
+        return self._ws.closed
+
+    @property
+    def close_code(self) -> int | None:
+        return self._ws.close_code
+
+    async def close(self) -> bool:
+        return await self._ws.close()
+
+    def exception(self) -> BaseException | None:
+        return self._ws.exception()
+
+    async def send_str(self, data: str) -> None:
+        await self._ws.send_str(data)
+        self._frame_tap(FrameDirection.OUT, FramePhase.CLEARTEXT, data.encode("utf-8"))
+
+    async def send_bytes(self, data: bytes) -> None:
+        await self._ws.send_bytes(data)
+        self._frame_tap(FrameDirection.OUT, FramePhase.CLEARTEXT, data)
+
+    async def receive(self) -> WSMessage:
+        msg = await self._ws.receive()
+        if msg.type is WSMsgType.TEXT:
+            self._frame_tap(
+                FrameDirection.IN, FramePhase.CLEARTEXT, cast("str", msg.data).encode("utf-8")
+            )
+        elif msg.type is WSMsgType.BINARY:
+            self._frame_tap(FrameDirection.IN, FramePhase.CLEARTEXT, cast("bytes", msg.data))
+        return msg
 
 
 async def _receive_frame(ws: HandshakeWebSocket, *, what: str, timeout_s: float) -> WSMessage:

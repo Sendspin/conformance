@@ -1,0 +1,915 @@
+From fd139e1287978ae3e7a44f46771f10225f8df045 Mon Sep 17 00:00:00 2001
+From: Chris Uthe <chris.uthe@openhomefoundation.org>
+Date: Wed, 14 Oct 2026 11:02:27 -0500
+Subject: [PATCH] Add an optional frame observer to the server for protocol
+ tracing
+
+SendspinServer takes a frame_observer that is called with every frame each
+encrypted connection sends or receives: the cleartext client/init,
+server/init, noise/handshake and server/error exchange, then every message
+on the Noise transport as plaintext, with inbound messages reassembled from
+their fragments. A frame that fails to decrypt or decode is still reported,
+as received and with the reason.
+
+Each ObservedFrame carries its direction, phase, data, the server clock time,
+a per-server connection number, and the client id once the handshake names
+it. Without an observer nothing changes. An observer that raises is logged
+once per connection and never affects it.
+---
+ aiosendspin/noise/__init__.py            |   5 +-
+ aiosendspin/noise/driver.py              |  62 +++++++++-
+ aiosendspin/noise/wire.py                |  81 ++++++++++--
+ aiosendspin/server/__init__.py           |   6 +
+ aiosendspin/server/connection.py         |  79 +++++++++++-
+ aiosendspin/server/server.py             |  12 +-
+ tests/integration/test_frame_observer.py | 133 ++++++++++++++++++++
+ tests/noise/test_driver.py               |  75 +++++++++++
+ tests/noise/test_wire.py                 | 151 ++++++++++++++++++++++-
+ 9 files changed, 587 insertions(+), 17 deletions(-)
+ create mode 100644 tests/integration/test_frame_observer.py
+
+diff --git a/aiosendspin/noise/__init__.py b/aiosendspin/noise/__init__.py
+index 3e345fc..cf9ec68 100644
+--- a/aiosendspin/noise/__init__.py
++++ b/aiosendspin/noise/__init__.py
+@@ -85,7 +85,7 @@ from .trust_store import (
+     StagedPairingPsk,
+     TrustedUnpairedClient,
+ )
+-from .wire import EncryptedWebSocket, RawWebSocket
++from .wire import EncryptedWebSocket, FrameDirection, FramePhase, FrameTap, RawWebSocket
+ 
+ __all__ = [
+     "DEFAULT_HANDSHAKE_TIMEOUT_S",
+@@ -108,6 +108,9 @@ __all__ = [
+     "EncryptedWebSocket",
+     "FileClientPairingStore",
+     "FileServerPairingStore",
++    "FrameDirection",
++    "FramePhase",
++    "FrameTap",
+     "HandshakeAbortedError",
+     "HandshakeNoncomplianceError",
+     "HandshakeResult",
+diff --git a/aiosendspin/noise/driver.py b/aiosendspin/noise/driver.py
+index c998ab2..18dba9c 100644
+--- a/aiosendspin/noise/driver.py
++++ b/aiosendspin/noise/driver.py
+@@ -49,7 +49,7 @@ from .models import (
+ )
+ from .session import NoiseCipherSuite, NoiseSession
+ from .trust_store import PskCategory, ResolvedPsk
+-from .wire import EncryptedWebSocket, RawWebSocket
++from .wire import EncryptedWebSocket, FrameDirection, FramePhase, FrameTap, RawWebSocket
+ 
+ # Per-message timeout during cleartext init and Noise handshake.
+ DEFAULT_HANDSHAKE_TIMEOUT_S: Final[float] = 30.0
+@@ -137,9 +137,17 @@ async def run_handshake_server(
+     client_init_text: str | None = None,
+     timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
+     strict: bool = False,
++    frame_tap: FrameTap | None = None,
+ ) -> HandshakeResult:
+-    """Run the server-side (Noise initiator) handshake, rejecting spec violations if ``strict``."""
++    """Run the server-side (Noise initiator) handshake, rejecting spec violations if ``strict``.
++
++    ``frame_tap``, when set, sees each cleartext frame of the handshake and is handed on
++    to the returned ``EncryptedWebSocket``.
++    """
+     compliance = _ServerCompliance(strict)
++    raw_ws = ws
++    if frame_tap is not None:
++        ws = _TappedWebSocket(ws, frame_tap)
+     if client_init_text is None:
+         client_init_text = await receive_client_init_frame(ws, timeout_s=timeout_s)
+     try:
+@@ -194,7 +202,7 @@ async def run_handshake_server(
+         resolved = _sentinel_psk()
+ 
+     return HandshakeResult(
+-        encrypted_ws=EncryptedWebSocket(ws, session),
++        encrypted_ws=EncryptedWebSocket(raw_ws, session, frame_tap=frame_tap),
+         peer_id=client_id,
+         suite=suite,
+         psk=resolved,
+@@ -356,8 +364,14 @@ async def receive_client_init_frame(
+     ws: HandshakeWebSocket,
+     *,
+     timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
++    frame_tap: FrameTap | None = None,
+ ) -> str:
+-    """Receive the ``client/init`` TEXT frame, answering a BINARY one with ``server/error``."""
++    """Receive the ``client/init`` TEXT frame, answering a BINARY one with ``server/error``.
++
++    ``frame_tap``, when set, sees the frame received and any ``server/error`` sent.
++    """
++    if frame_tap is not None:
++        ws = _TappedWebSocket(ws, frame_tap)
+     msg = await _receive_frame(ws, what="client/init", timeout_s=timeout_s)
+     if msg.type is WSMsgType.BINARY:
+         await _send_server_error(ws, ServerErrorReason.MALFORMED)
+@@ -367,6 +381,46 @@ async def receive_client_init_frame(
+     return cast("str", msg.data)
+ 
+ 
++class _TappedWebSocket:
++    """``HandshakeWebSocket`` that reports each frame it carries as cleartext."""
++
++    def __init__(self, ws: HandshakeWebSocket, frame_tap: FrameTap) -> None:
++        self._ws = ws
++        self._frame_tap = frame_tap
++
++    @property
++    def closed(self) -> bool:
++        return self._ws.closed
++
++    @property
++    def close_code(self) -> int | None:
++        return self._ws.close_code
++
++    async def close(self) -> bool:
++        return await self._ws.close()
++
++    def exception(self) -> BaseException | None:
++        return self._ws.exception()
++
++    async def send_str(self, data: str) -> None:
++        await self._ws.send_str(data)
++        self._frame_tap(FrameDirection.OUT, FramePhase.CLEARTEXT, data.encode("utf-8"))
++
++    async def send_bytes(self, data: bytes) -> None:
++        await self._ws.send_bytes(data)
++        self._frame_tap(FrameDirection.OUT, FramePhase.CLEARTEXT, data)
++
++    async def receive(self) -> WSMessage:
++        msg = await self._ws.receive()
++        if msg.type is WSMsgType.TEXT:
++            self._frame_tap(
++                FrameDirection.IN, FramePhase.CLEARTEXT, cast("str", msg.data).encode("utf-8")
++            )
++        elif msg.type is WSMsgType.BINARY:
++            self._frame_tap(FrameDirection.IN, FramePhase.CLEARTEXT, cast("bytes", msg.data))
++        return msg
++
++
+ async def _receive_frame(ws: HandshakeWebSocket, *, what: str, timeout_s: float) -> WSMessage:
+     try:
+         async with asyncio.timeout(timeout_s):
+diff --git a/aiosendspin/noise/wire.py b/aiosendspin/noise/wire.py
+index af7b830..1ab8acc 100644
+--- a/aiosendspin/noise/wire.py
++++ b/aiosendspin/noise/wire.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import asyncio
++from enum import StrEnum
+ from typing import TYPE_CHECKING, Protocol
+ 
+ from aiohttp import WSMessage, WSMsgType
+@@ -33,6 +34,43 @@ MAX_REASSEMBLED_MESSAGE_BYTES = 64 * 1024 * 1024
+ _TRANSPORT_BINARY_TYPES = frozenset({MSG_TYPE_FRAGMENT, 2, 3})
+ 
+ 
++class FrameDirection(StrEnum):
++    """Which way a frame travelled, from the local end's point of view."""
++
++    IN = "in"
++    OUT = "out"
++
++
++class FramePhase(StrEnum):
++    """Which part of a connection a frame belongs to."""
++
++    CLEARTEXT = "cleartext"
++    """The unencrypted ``client/init``, ``server/init``, ``noise/handshake`` and
++    ``server/error`` exchange that precedes the Noise transport."""
++    TRANSPORT = "transport"
++    """Messages carried by the Noise transport once the handshake is complete, including
++    the ``noise/handshake`` messages of an in-band re-handshake."""
++
++
++class FrameTap(Protocol):
++    """Receives every frame a connection sends or receives.
++
++    ``error`` is ``None`` for a frame that decoded, and otherwise says why it did not;
++    ``data`` is then the frame as it arrived. Called synchronously on the I/O path, so it
++    must be cheap and must not block. Exceptions it raises propagate to the caller.
++    """
++
++    def __call__(
++        self,
++        direction: FrameDirection,
++        phase: FramePhase,
++        data: bytes,
++        *,
++        error: str | None = None,
++    ) -> None:
++        """Observe one frame."""
++
++
+ class RawWebSocket(Protocol):
+     """Structural typing for the subset of aiohttp WS APIs we use.
+ 
+@@ -77,9 +115,16 @@ class EncryptedWebSocket:
+       delivered as ordinary binary messages, for the owner to ignore.
+     - ``legacy_fragment_framing``: when true, oversized messages are sent with
+       the legacy type ``2``/``3`` framing.
++
++    ``frame_tap``, when set, sees every message as transport plaintext (type byte
++    plus payload): outbound once it has been sent, inbound once it is reassembled.
++    A frame that fails to decrypt or decode reaches it as received, with an error; the
++    earlier fragments of a message abandoned that way are not reported.
+     """
+ 
+-    def __init__(self, ws: RawWebSocket, session: NoiseSession) -> None:
++    def __init__(
++        self, ws: RawWebSocket, session: NoiseSession, *, frame_tap: FrameTap | None = None
++    ) -> None:
+         """Initialize the wrapper; ``session`` must already be in transport mode."""
+         if not session.handshake_complete:
+             msg = "NoiseSession must be in transport mode before wrapping a WebSocket"
+@@ -90,6 +135,7 @@ class EncryptedWebSocket:
+         self._reasm_type: int | None = None
+         self._reasm_legacy = False
+         self._send_lock = asyncio.Lock()
++        self._frame_tap = frame_tap
+         # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+         self.on_legacy_fragment: Callable[[], None] | None = None
+         # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+@@ -147,11 +193,13 @@ class EncryptedWebSocket:
+         async with self._send_lock:
+             if len(plaintext) <= MAX_TRANSPORT_PLAINTEXT:
+                 await self._ws.send_bytes(self._session.encrypt(plaintext))
+-                return
+-            # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+-            fragment = _fragment_legacy if self.legacy_fragment_framing else _fragment
+-            for frame in fragment(plaintext):
+-                await self._ws.send_bytes(self._session.encrypt(frame))
++            else:
++                # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
++                fragment = _fragment_legacy if self.legacy_fragment_framing else _fragment
++                for frame in fragment(plaintext):
++                    await self._ws.send_bytes(self._session.encrypt(frame))
++            if self._frame_tap is not None:
++                self._frame_tap(FrameDirection.OUT, FramePhase.TRANSPORT, plaintext)
+ 
+     def __aiter__(self) -> EncryptedWebSocket:
+         """Iterate decrypted messages (the wrapper is its own async iterator)."""
+@@ -186,6 +234,19 @@ class EncryptedWebSocket:
+                 return decoded, received_us
+ 
+     def _decode(self, msg: WSMessage) -> WSMessage | None:
++        """Decode one frame, reporting it to the frame tap if it failed."""
++        decoded = self._decode_frame(msg)
++        if (
++            self._frame_tap is not None
++            and decoded is not None
++            and decoded.type is WSMsgType.ERROR
++            and msg.type is not WSMsgType.ERROR
++        ):
++            data = msg.data.encode("utf-8") if isinstance(msg.data, str) else msg.data
++            self._frame_tap(FrameDirection.IN, FramePhase.TRANSPORT, data, error=str(decoded.data))
++        return decoded
++
++    def _decode_frame(self, msg: WSMessage) -> WSMessage | None:
+         """Decrypt one frame; return a ``WSMessage`` or ``None`` to await more fragments."""
+         if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
+             return msg
+@@ -283,8 +344,12 @@ class EncryptedWebSocket:
+     def _dispatch(self, plaintext: bytes) -> WSMessage:
+         """Synthesize a ``WSMessage`` from a complete, type-prefixed plaintext."""
+         if plaintext[0] == MSG_TYPE_JSON_BODY:
+-            return WSMessage(WSMsgType.TEXT, plaintext[1:].decode("utf-8"), "")
+-        return WSMessage(WSMsgType.BINARY, plaintext, "")
++            msg = WSMessage(WSMsgType.TEXT, plaintext[1:].decode("utf-8"), "")
++        else:
++            msg = WSMessage(WSMsgType.BINARY, plaintext, "")
++        if self._frame_tap is not None:
++            self._frame_tap(FrameDirection.IN, FramePhase.TRANSPORT, plaintext)
++        return msg
+ 
+     def _error(self, message: str) -> WSMessage:
+         """Discard any reassembly state and build an ERROR ``WSMessage``."""
+diff --git a/aiosendspin/server/__init__.py b/aiosendspin/server/__init__.py
+index 8bef6dd..bc91c2b 100644
+--- a/aiosendspin/server/__init__.py
++++ b/aiosendspin/server/__init__.py
+@@ -22,6 +22,9 @@ __all__ = [
+     "DisconnectBehaviour",
+     "ExternalStreamStartCallback",
+     "ExternalStreamStartRequest",
++    "FrameDirection",
++    "FrameObserver",
++    "FramePhase",
+     "GroupDeletedEvent",
+     "GroupEvent",
+     "GroupMemberAddedEvent",
+@@ -29,6 +32,7 @@ __all__ = [
+     "GroupRoleEvent",
+     "GroupStateChangedEvent",
+     "MinBufferChangedEvent",
++    "ObservedFrame",
+     "OutputDelayChangedEvent",
+     "RequiredLeadTimeChangedEvent",
+     "SendspinClient",
+@@ -44,9 +48,11 @@ __all__ = [
+ ]
+ 
+ from aiosendspin.models.types import AudioCodec, SignalState
++from aiosendspin.noise.wire import FrameDirection, FramePhase
+ 
+ from .audio import AudioFormat
+ from .client import ConnectionSecurity, DisconnectBehaviour, SendspinClient
++from .connection import FrameObserver, ObservedFrame
+ from .events import (
+     ClientEvent,
+     ClientGroupChangedEvent,
+diff --git a/aiosendspin/server/connection.py b/aiosendspin/server/connection.py
+index 5b1c5df..d3ceff3 100644
+--- a/aiosendspin/server/connection.py
++++ b/aiosendspin/server/connection.py
+@@ -165,7 +165,12 @@ from aiosendspin.noise.pairing import (
+     run_static_pairing_code_server,
+ )
+ from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairingRecord
+-from aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
++from aiosendspin.noise.wire import (
++    EncryptedWebSocket,
++    FrameDirection,
++    FramePhase,
++    QueuedEncryptedWebSocket,
++)
+ from aiosendspin.util import (
+     WARN_INTERVAL_S,
+     _peek_message_type,
+@@ -195,6 +200,38 @@ if TYPE_CHECKING:
+ Transport = EncryptedWebSocket | web.WebSocketResponse | ClientWebSocketResponse
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class ObservedFrame:
++    """One frame a connection sent or received, as handed to a ``FrameObserver``.
++
++    ``data`` depends on ``phase``. A cleartext frame is the UTF-8 text of the handshake
++    message, or the bytes of a binary frame sent in its place. A transport frame is the
++    Noise plaintext: the type byte followed by the payload, so a JSON message starts with
++    byte ``0``. Inbound transport frames are whole messages, reassembled from their
++    fragments.
++
++    A frame that failed to decrypt or decode carries an ``error``, and its ``data`` is
++    the frame as it arrived. The earlier fragments of a message abandoned that way are
++    not reported.
++    """
++
++    connection: int
++    """Number of the connection, unique within the server."""
++    client_id: str | None
++    """The client's id, or ``None`` until the handshake has named it."""
++    direction: FrameDirection
++    phase: FramePhase
++    data: bytes
++    monotonic_us: int
++    """Server clock time when the frame was sent or decoded."""
++    error: str | None = None
++    """Why the frame failed to decrypt or decode, or ``None`` if it did not."""
++
++
++# Called synchronously on the connection's I/O path, so it must be cheap and must not block.
++FrameObserver = Callable[[ObservedFrame], None]
++
++
+ logger = logging.getLogger(__name__)
+ 
+ MAX_PENDING_MSG = 4096  # Default queue cap (per role queues, and global control queues)
+@@ -368,6 +405,9 @@ class SendspinConnection:
+         # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
+         self._sent_psk_pair_init = False
+         self._connection_done = asyncio.Event()
++        # Taken when the handshake starts, and only for a server with a frame observer.
++        self._connection_number: int | None = None
++        self._frame_observer_failed = False
+         self._transport: Transport | None = None
+         self._pending_first_text: str | None = None  # legacy first frame held for the loop
+ 
+@@ -1189,7 +1229,11 @@ class SendspinConnection:
+         Handshake failures, and a pairing dial the client lacks the Pairing PSK for, raise
+         ``HandshakeAbortedError``.
+         """
+-        first_text = await receive_client_init_frame(raw)
++        frame_tap = None
++        if self._server._frame_observer is not None:  # noqa: SLF001
++            self._connection_number = next(self._server._connection_numbers)  # noqa: SLF001
++            frame_tap = self._observe_frame
++        first_text = await receive_client_init_frame(raw, frame_tap=frame_tap)
+         if _peek_message_type(first_text) == "client/hello" and self._pairing_attempt is None:
+             if self._server.allow_unencrypted:
+                 self._pending_first_text = first_text
+@@ -1203,6 +1247,7 @@ class SendspinConnection:
+                 psk_provider=self._psk_provider,
+                 client_init_text=first_text,
+                 strict=not self._server.allow_noncompliant_clients,
++                frame_tap=frame_tap,
+             )
+         except HandshakeNoncomplianceError as exc:
+             self._flag_noncompliance(str(exc))
+@@ -1228,6 +1273,36 @@ class SendspinConnection:
+             )
+         return result.encrypted_ws
+ 
++    def _observe_frame(
++        self,
++        direction: FrameDirection,
++        phase: FramePhase,
++        data: bytes,
++        *,
++        error: str | None = None,
++    ) -> None:
++        """Hand one frame to the server's frame observer, logging only its first failure."""
++        observer = self._server._frame_observer  # noqa: SLF001
++        assert observer is not None
++        assert self._connection_number is not None
++        frame = ObservedFrame(
++            connection=self._connection_number,
++            client_id=self._client_id,
++            direction=direction,
++            phase=phase,
++            data=data,
++            monotonic_us=self._server.clock.now_us(),
++            error=error,
++        )
++        try:
++            observer(frame)
++        except Exception:
++            if not self._frame_observer_failed:
++                self._frame_observer_failed = True
++                self._logger.exception(
++                    "Error in frame observer; further errors on this connection are not logged"
++                )
++
+     async def _psk_provider(self, client_id: str) -> ResolvedPsk | None:
+         """Pick the PSK to admit ``client_id`` with, or ``None`` to refuse it."""
+         if self._pairing_attempt is not None:
+diff --git a/aiosendspin/server/server.py b/aiosendspin/server/server.py
+index 6e1aaa5..2dca034 100644
+--- a/aiosendspin/server/server.py
++++ b/aiosendspin/server/server.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import asyncio
++import itertools
+ import logging
+ import time
+ from collections.abc import Callable, Sequence
+@@ -43,7 +44,7 @@ from aiosendspin.noise.trust_store import ServerPairingStore, TrustedUnpairedCli
+ from aiosendspin.util import create_task, get_local_ip, warn_deprecated
+ 
+ from .client import SendspinClient
+-from .connection import SendspinConnection
++from .connection import FrameObserver, SendspinConnection
+ from .group import SendspinGroup
+ from .roles.visualizer.v1 import warn_pitch_deprecated
+ 
+@@ -201,6 +202,7 @@ class SendspinServer:
+         allow_noncompliant_clients: bool = True,
+         languages: Sequence[str] | None = None,
+         clock: Clock | None = None,
++        frame_observer: FrameObserver | None = None,
+     ) -> None:
+         """Initialize a Sendspin server instance.
+ 
+@@ -221,6 +223,12 @@ class SendspinServer:
+             languages: BCP 47 tags in descending operator preference, sent to clients
+                 in server/hello, or None to declare none.
+             clock: Clock source, or None for the default monotonic clock.
++            frame_observer: Called with every frame each encrypted connection sends or
++                receives, handshake included, for protocol tracing; or None. A legacy
++                unencrypted connection reports only its first frame. It runs
++                synchronously on the connection's I/O path, so it must be cheap and must
++                not block. An exception it raises is logged and does not affect the
++                connection.
+ 
+         Raises:
+             TypeError: If ``languages`` is a single string rather than a sequence of tags.
+@@ -250,6 +258,8 @@ class SendspinServer:
+                 "rejects unencrypted clients"
+             )
+         self._clock: Clock = clock or RawMonotonicClock()
++        self._frame_observer = frame_observer
++        self._connection_numbers = itertools.count(1)
+ 
+         self._clients: dict[str, SendspinClient] = {}
+         self._event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]] = []
+diff --git a/tests/integration/test_frame_observer.py b/tests/integration/test_frame_observer.py
+new file mode 100644
+index 0000000..e7ace81
+--- /dev/null
++++ b/tests/integration/test_frame_observer.py
+@@ -0,0 +1,133 @@
++"""End-to-end tests for the server's frame observer."""
++
++from __future__ import annotations
++
++import asyncio
++import logging
++from collections.abc import AsyncIterator
++from contextlib import asynccontextmanager
++from typing import TYPE_CHECKING
++
++import orjson
++from aiohttp import ClientSession, WSMsgType, web
++from aiohttp.test_utils import TestServer
++
++from aiosendspin.models.core import ClientHelloMessage, ClientHelloPayload
++from aiosendspin.models.types import Roles
++from aiosendspin.noise.keys import Identity
++from aiosendspin.noise.trust_store import InMemoryServerPairingStore
++from aiosendspin.server import (
++    FrameDirection,
++    FrameObserver,
++    FramePhase,
++    ObservedFrame,
++    SendspinServer,
++)
++from tests.conftest import make_sdk_client
++
++if TYPE_CHECKING:
++    import pytest
++
++
++@asynccontextmanager
++async def _serve(
++    frame_observer: FrameObserver, *, allow_unencrypted: bool = False
++) -> AsyncIterator[tuple[SendspinServer, str]]:
++    server = SendspinServer(
++        loop=asyncio.get_running_loop(),
++        identity=Identity.generate(),
++        server_name="test-server",
++        pairing_store=InMemoryServerPairingStore(),
++        allow_unencrypted=allow_unencrypted,
++        frame_observer=frame_observer,
++    )
++    app = web.Application()
++    app.router.add_get(SendspinServer.API_PATH, server.on_client_connect)
++    test_server = TestServer(app)
++    await test_server.start_server()
++    try:
++        yield server, f"ws://127.0.0.1:{test_server.port}{SendspinServer.API_PATH}"
++    finally:
++        await test_server.close()
++        await server.close()
++
++
++def _message_type(frame: ObservedFrame) -> str:
++    text = frame.data if frame.phase is FramePhase.CLEARTEXT else frame.data[1:]
++    return str(orjson.loads(text)["type"])
++
++
++async def test_observer_sees_handshake_and_hellos_in_order() -> None:
++    """Every frame of a connection reaches the observer, tagged with its connection."""
++    frames: list[ObservedFrame] = []
++    identity = Identity.generate()
++    async with _serve(frames.append) as (_, url):
++        client = make_sdk_client(identity=identity, client_name="c", roles=[Roles.CONTROLLER])
++        try:
++            await client.connect(url)
++        finally:
++            await client.disconnect()
++
++    json_frames = [f for f in frames if f.phase is FramePhase.CLEARTEXT or f.data[0] == 0]
++    assert [(f.direction, f.phase, _message_type(f)) for f in json_frames[:7]] == [
++        (FrameDirection.IN, FramePhase.CLEARTEXT, "client/init"),
++        (FrameDirection.OUT, FramePhase.CLEARTEXT, "server/init"),
++        (FrameDirection.OUT, FramePhase.CLEARTEXT, "noise/handshake"),
++        (FrameDirection.IN, FramePhase.CLEARTEXT, "noise/handshake"),
++        (FrameDirection.OUT, FramePhase.TRANSPORT, "server/hello"),
++        (FrameDirection.IN, FramePhase.TRANSPORT, "client/hello"),
++        (FrameDirection.OUT, FramePhase.TRANSPORT, "server/activate"),
++    ]
++    assert {f.connection for f in frames} == {1}
++    assert {f.client_id for f in frames[4:]} == {identity.peer_id}
++    assert all(f.error is None for f in frames)
++    times = [f.monotonic_us for f in frames]
++    assert times == sorted(times)
++
++
++async def test_failing_observer_is_logged_once_and_does_not_break_the_connection(
++    caplog: pytest.LogCaptureFixture,
++) -> None:
++    """An observer that raises on every frame leaves the session working."""
++
++    def observe(_frame: ObservedFrame) -> None:
++        raise RuntimeError("observer failed")
++
++    async with _serve(observe) as (server, url):
++        identity = Identity.generate()
++        client = make_sdk_client(identity=identity, client_name="c", roles=[Roles.CONTROLLER])
++        with caplog.at_level(logging.ERROR):
++            try:
++                await client.connect(url)
++                assert client.connected
++                assert server.get_client(identity.peer_id) is not None
++            finally:
++                await client.disconnect()
++
++    failures = [r for r in caplog.records if r.getMessage().startswith("Error in frame observer")]
++    assert len(failures) == 1
++
++
++async def test_legacy_unencrypted_connection_reports_only_its_first_frame() -> None:
++    """A transition-mode client's opening client/hello is observed, and nothing after it."""
++    frames: list[ObservedFrame] = []
++    hello = ClientHelloMessage(
++        payload=ClientHelloPayload(
++            client_id="legacy-client",
++            name="legacy",
++            version=1,
++            supported_roles=[Roles.CONTROLLER.value],
++        )
++    ).to_json()
++    async with (
++        _serve(frames.append, allow_unencrypted=True) as (_, url),
++        ClientSession() as session,
++        session.ws_connect(url) as ws,
++    ):
++        await ws.send_str(hello)
++        msg = await asyncio.wait_for(ws.receive(), timeout=5)
++        assert msg.type is WSMsgType.TEXT
++
++    assert [(f.direction, f.phase, f.data) for f in frames] == [
++        (FrameDirection.IN, FramePhase.CLEARTEXT, hello.encode("utf-8"))
++    ]
+diff --git a/tests/noise/test_driver.py b/tests/noise/test_driver.py
+index faf05a5..0db2e8e 100644
+--- a/tests/noise/test_driver.py
++++ b/tests/noise/test_driver.py
+@@ -22,6 +22,7 @@ from aiosendspin.noise.driver import (
+     PskProvider,
+     PskResolver,
+     _exchange_as_responder,
++    receive_client_init_frame,
+     run_handshake_client,
+     run_handshake_server,
+     run_rehandshake_client,
+@@ -47,6 +48,7 @@ from aiosendspin.noise.models import (
+ )
+ from aiosendspin.noise.session import NoiseCipherSuite, NoiseSession
+ from aiosendspin.noise.trust_store import PskCategory, ResolvedPsk
++from aiosendspin.noise.wire import FrameDirection, FramePhase
+ from tests.noise.conftest import FakeWebSocket, make_ws_pair, non_canonical_peer_id
+ 
+ if TYPE_CHECKING:
+@@ -1519,3 +1521,76 @@ async def test_fork_refuses_a_message_1_it_cannot_reproduce() -> None:
+         pytest.raises(RuntimeError, match="differs from the one sent"),
+     ):
+         session.fork_at_message_2(generate_psk())
++
++
++class _RecordingTap:
++    """Frame tap that records each call as ``(direction, phase, data)``."""
++
++    def __init__(self) -> None:
++        self.frames: list[tuple[FrameDirection, FramePhase, bytes]] = []
++
++    def __call__(
++        self,
++        direction: FrameDirection,
++        phase: FramePhase,
++        data: bytes,
++        *,
++        error: str | None = None,
++    ) -> None:
++        assert error is None
++        self.frames.append((direction, phase, data))
++
++
++async def test_server_frame_tap_sees_cleartext_handshake_then_transport() -> None:
++    """The tap sees each handshake frame as cleartext, then rides the encrypted socket."""
++    server_id, client_id = Identity.generate(), Identity.generate()
++    psk = generate_psk()
++    server_psk = ResolvedPsk(psk_id_for(psk), psk, PskCategory.LONG_TERM, client_id.peer_id)
++    client_psk = replace(server_psk, counterparty_id=server_id.peer_id)
++    server_ws, client_ws = make_ws_pair()
++    tap = _RecordingTap()
++
++    server_result, _ = await asyncio.gather(
++        run_handshake_server(
++            server_ws,
++            local_identity=server_id,
++            psk_provider=_provider(server_psk),
++            frame_tap=tap,
++        ),
++        run_handshake_client(
++            client_ws,
++            local_identity=client_id,
++            suite=NoiseCipherSuite.CHACHAPOLY,
++            psk_resolver=_resolver({client_psk.psk_id: client_psk}),
++        ),
++    )
++    await server_result.encrypted_ws.send_str("{}")
++
++    cleartext = [frame for frame in tap.frames if frame[1] is FramePhase.CLEARTEXT]
++    assert [(direction, orjson.loads(data)["type"]) for direction, _, data in cleartext] == [
++        (FrameDirection.IN, "client/init"),
++        (FrameDirection.OUT, "server/init"),
++        (FrameDirection.OUT, "noise/handshake"),
++        (FrameDirection.IN, "noise/handshake"),
++    ]
++    assert [data.decode("utf-8") for _, _, data in cleartext] == [
++        client_ws.sent[0],
++        server_ws.sent[0],
++        server_ws.sent[1],
++        client_ws.sent[1],
++    ]
++    assert tap.frames[len(cleartext) :] == [(FrameDirection.OUT, FramePhase.TRANSPORT, b"\x00{}")]
++
++
++async def test_client_init_frame_tap_sees_binary_frame_and_server_error() -> None:
++    """A BINARY first frame and the server/error answering it are both tapped."""
++    server_ws = FakeWebSocket()
++    await server_ws.push(WSMessage(WSMsgType.BINARY, b"\x00", ""))
++    tap = _RecordingTap()
++    with pytest.raises(InitRejectedError):
++        await receive_client_init_frame(server_ws, frame_tap=tap)
++    error = ServerErrorMessage(payload=ServerErrorPayload(reason=_MALFORMED)).to_json()
++    assert tap.frames == [
++        (FrameDirection.IN, FramePhase.CLEARTEXT, b"\x00"),
++        (FrameDirection.OUT, FramePhase.CLEARTEXT, error.encode("utf-8")),
++    ]
+diff --git a/tests/noise/test_wire.py b/tests/noise/test_wire.py
+index 80d8dfb..56aa497 100644
+--- a/tests/noise/test_wire.py
++++ b/tests/noise/test_wire.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ from typing import TYPE_CHECKING
++from unittest.mock import patch
+ 
+ import pytest
+ from aiohttp import WSMessage, WSMsgType
+@@ -18,7 +19,7 @@ from aiosendspin.noise.constants import (
+ )
+ from aiosendspin.noise.keys import Identity
+ from aiosendspin.noise.session import NoiseCipherSuite, NoiseSession
+-from aiosendspin.noise.wire import EncryptedWebSocket
++from aiosendspin.noise.wire import EncryptedWebSocket, FrameDirection, FramePhase
+ from tests.noise.conftest import FakeWebSocket, make_paired_sessions
+ 
+ if TYPE_CHECKING:
+@@ -759,3 +760,151 @@ def test_swap_session_replaces_transport_session() -> None:
+     new_initiator, _ = make_paired_sessions()
+     wrapper.swap_session(new_initiator)
+     assert wrapper.session is new_initiator
++
++
++class _RecordingTap:
++    """Frame tap that records each call as ``(direction, phase, data, error)``."""
++
++    def __init__(self) -> None:
++        self.frames: list[tuple[FrameDirection, FramePhase, bytes, str | None]] = []
++
++    def __call__(
++        self,
++        direction: FrameDirection,
++        phase: FramePhase,
++        data: bytes,
++        *,
++        error: str | None = None,
++    ) -> None:
++        self.frames.append((direction, phase, data, error))
++
++
++async def test_frame_tap_sees_sent_message_whole_after_fragmentation() -> None:
++    """A fragmented send is tapped once, as the plaintext before fragmentation."""
++    initiator, _ = make_paired_sessions()
++    ws = FakeWebSocket()
++    tap = _RecordingTap()
++    wrapper = EncryptedWebSocket(ws, initiator, frame_tap=tap)
++
++    payload = b"\x04" + b"x" * (2 * MAX_TRANSPORT_PLAINTEXT)
++    await wrapper.send_bytes(payload)
++    await wrapper.send_str('{"type":"server/time"}')
++
++    assert len(ws.sent) > 2
++    assert tap.frames == [
++        (FrameDirection.OUT, FramePhase.TRANSPORT, payload, None),
++        (FrameDirection.OUT, FramePhase.TRANSPORT, b'\x00{"type":"server/time"}', None),
++    ]
++
++
++async def test_frame_tap_skips_a_send_that_failed() -> None:
++    """A message the socket refused to send is not tapped."""
++    initiator, _ = make_paired_sessions()
++    ws = FakeWebSocket()
++    tap = _RecordingTap()
++    wrapper = EncryptedWebSocket(ws, initiator, frame_tap=tap)
++
++    async def send_bytes(_data: bytes) -> None:
++        raise ConnectionResetError
++
++    with patch.object(ws, "send_bytes", send_bytes), pytest.raises(ConnectionResetError):
++        await wrapper.send_str("{}")
++    assert tap.frames == []
++
++
++async def test_frame_tap_sees_received_message_once_reassembled() -> None:
++    """Inbound fragments are tapped once, as the reassembled plaintext."""
++    initiator, responder = make_paired_sessions()
++    sender_ws = FakeWebSocket()
++    sender = EncryptedWebSocket(sender_ws, initiator)
++    receiver_ws = FakeWebSocket()
++    tap = _RecordingTap()
++    receiver = EncryptedWebSocket(receiver_ws, responder, frame_tap=tap)
++
++    payload = b"\x04" + b"y" * (2 * MAX_TRANSPORT_PLAINTEXT)
++    await sender.send_bytes(payload)
++    for ct in sender_ws.sent:
++        await receiver_ws.push(WSMessage(WSMsgType.BINARY, ct, ""))
++    await receiver_ws.push(None)
++
++    assert [m.data async for m in receiver] == [payload]
++    assert tap.frames == [(FrameDirection.IN, FramePhase.TRANSPORT, payload, None)]
++
++
++async def test_frame_tap_reports_undecryptable_frame_as_received() -> None:
++    """A frame that fails authentication is tapped as received, with the reason."""
++    initiator, responder = make_paired_sessions()
++    ws = FakeWebSocket()
++    tap = _RecordingTap()
++    wrapper = EncryptedWebSocket(ws, responder, frame_tap=tap)
++
++    corrupt = _tamper_tag(initiator.encrypt(b'\x00{"type":"server/hello"}'))
++    await ws.push(WSMessage(WSMsgType.BINARY, corrupt, ""))
++    await ws.push(None)
++
++    assert [m.type async for m in wrapper] == [WSMsgType.ERROR]
++    assert tap.frames == [
++        (
++            FrameDirection.IN,
++            FramePhase.TRANSPORT,
++            corrupt,
++            "Noise transport frame failed authentication",
++        )
++    ]
++
++
++async def test_frame_tap_reports_frame_that_decrypts_but_fails_to_decode_as_received() -> None:
++    """A fragment with reserved flag bits is tapped as its ciphertext, with the reason."""
++    initiator, responder = make_paired_sessions()
++    ws = FakeWebSocket()
++    tap = _RecordingTap()
++    wrapper = EncryptedWebSocket(ws, responder, frame_tap=tap)
++
++    frame = initiator.encrypt(bytes([MSG_TYPE_FRAGMENT, 0x80, 0x04]) + b"x")
++    await ws.push(WSMessage(WSMsgType.BINARY, frame, ""))
++    await ws.push(None)
++
++    assert [m.type async for m in wrapper] == [WSMsgType.ERROR]
++    assert tap.frames == [
++        (
++            FrameDirection.IN,
++            FramePhase.TRANSPORT,
++            frame,
++            "fragment flags 0x80 set reserved bits",
++        )
++    ]
++
++
++async def test_frame_tap_reports_text_frame_after_handshake_as_received() -> None:
++    """A cleartext TEXT frame on the encrypted transport is tapped as its UTF-8 bytes."""
++    _, responder = make_paired_sessions()
++    ws = FakeWebSocket()
++    tap = _RecordingTap()
++    wrapper = EncryptedWebSocket(ws, responder, frame_tap=tap)
++
++    await ws.push(WSMessage(WSMsgType.TEXT, "{}", ""))
++    await ws.push(None)
++
++    assert [m.type async for m in wrapper] == [WSMsgType.ERROR]
++    assert tap.frames == [
++        (
++            FrameDirection.IN,
++            FramePhase.TRANSPORT,
++            b"{}",
++            "unexpected TEXT frame after Noise handshake",
++        )
++    ]
++
++
++async def test_frame_tap_ignores_transport_error_and_close() -> None:
++    """Socket ERROR and CLOSED messages are not frames, so nothing is tapped."""
++    _, responder = make_paired_sessions()
++    ws = FakeWebSocket()
++    tap = _RecordingTap()
++    wrapper = EncryptedWebSocket(ws, responder, frame_tap=tap)
++
++    await ws.push(WSMessage(WSMsgType.ERROR, RuntimeError("reset"), ""))
++    await ws.push(None)
++
++    assert [m.type async for m in wrapper] == [WSMsgType.ERROR]
++    assert tap.frames == []
+-- 
+2.55.0
+

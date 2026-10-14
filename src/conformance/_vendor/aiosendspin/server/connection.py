@@ -165,7 +165,12 @@ from conformance._vendor.aiosendspin.noise.pairing import (
     run_static_pairing_code_server,
 )
 from conformance._vendor.aiosendspin.noise.trust_store import PskCategory, ResolvedPsk, ServerPairingRecord
-from conformance._vendor.aiosendspin.noise.wire import EncryptedWebSocket, QueuedEncryptedWebSocket
+from conformance._vendor.aiosendspin.noise.wire import (
+    EncryptedWebSocket,
+    FrameDirection,
+    FramePhase,
+    QueuedEncryptedWebSocket,
+)
 from conformance._vendor.aiosendspin.util import (
     WARN_INTERVAL_S,
     _peek_message_type,
@@ -193,6 +198,38 @@ if TYPE_CHECKING:
 # Transport used by the writer and message loop: the encrypted wrapper post-handshake,
 # or the raw aiohttp socket for a legacy (transition-mode) connection.
 Transport = EncryptedWebSocket | web.WebSocketResponse | ClientWebSocketResponse
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedFrame:
+    """One frame a connection sent or received, as handed to a ``FrameObserver``.
+
+    ``data`` depends on ``phase``. A cleartext frame is the UTF-8 text of the handshake
+    message, or the bytes of a binary frame sent in its place. A transport frame is the
+    Noise plaintext: the type byte followed by the payload, so a JSON message starts with
+    byte ``0``. Inbound transport frames are whole messages, reassembled from their
+    fragments.
+
+    A frame that failed to decrypt or decode carries an ``error``, and its ``data`` is
+    the frame as it arrived. The earlier fragments of a message abandoned that way are
+    not reported.
+    """
+
+    connection: int
+    """Number of the connection, unique within the server."""
+    client_id: str | None
+    """The client's id, or ``None`` until the handshake has named it."""
+    direction: FrameDirection
+    phase: FramePhase
+    data: bytes
+    monotonic_us: int
+    """Server clock time when the frame was sent or decoded."""
+    error: str | None = None
+    """Why the frame failed to decrypt or decode, or ``None`` if it did not."""
+
+
+# Called synchronously on the connection's I/O path, so it must be cheap and must not block.
+FrameObserver = Callable[[ObservedFrame], None]
 
 
 logger = logging.getLogger(__name__)
@@ -368,6 +405,9 @@ class SendspinConnection:
         # DEPRECATED(spec-pr-247): remove in aiosendspin <version>
         self._sent_psk_pair_init = False
         self._connection_done = asyncio.Event()
+        # Taken when the handshake starts, and only for a server with a frame observer.
+        self._connection_number: int | None = None
+        self._frame_observer_failed = False
         self._transport: Transport | None = None
         self._pending_first_text: str | None = None  # legacy first frame held for the loop
 
@@ -1189,7 +1229,11 @@ class SendspinConnection:
         Handshake failures, and a pairing dial the client lacks the Pairing PSK for, raise
         ``HandshakeAbortedError``.
         """
-        first_text = await receive_client_init_frame(raw)
+        frame_tap = None
+        if self._server._frame_observer is not None:  # noqa: SLF001
+            self._connection_number = next(self._server._connection_numbers)  # noqa: SLF001
+            frame_tap = self._observe_frame
+        first_text = await receive_client_init_frame(raw, frame_tap=frame_tap)
         if _peek_message_type(first_text) == "client/hello" and self._pairing_attempt is None:
             if self._server.allow_unencrypted:
                 self._pending_first_text = first_text
@@ -1203,6 +1247,7 @@ class SendspinConnection:
                 psk_provider=self._psk_provider,
                 client_init_text=first_text,
                 strict=not self._server.allow_noncompliant_clients,
+                frame_tap=frame_tap,
             )
         except HandshakeNoncomplianceError as exc:
             self._flag_noncompliance(str(exc))
@@ -1227,6 +1272,36 @@ class SendspinConnection:
                 "Sentinel PSK; it needs re-pairing before it can play again"
             )
         return result.encrypted_ws
+
+    def _observe_frame(
+        self,
+        direction: FrameDirection,
+        phase: FramePhase,
+        data: bytes,
+        *,
+        error: str | None = None,
+    ) -> None:
+        """Hand one frame to the server's frame observer, logging only its first failure."""
+        observer = self._server._frame_observer  # noqa: SLF001
+        assert observer is not None
+        assert self._connection_number is not None
+        frame = ObservedFrame(
+            connection=self._connection_number,
+            client_id=self._client_id,
+            direction=direction,
+            phase=phase,
+            data=data,
+            monotonic_us=self._server.clock.now_us(),
+            error=error,
+        )
+        try:
+            observer(frame)
+        except Exception:
+            if not self._frame_observer_failed:
+                self._frame_observer_failed = True
+                self._logger.exception(
+                    "Error in frame observer; further errors on this connection are not logged"
+                )
 
     async def _psk_provider(self, client_id: str) -> ResolvedPsk | None:
         """Pick the PSK to admit ``client_id`` with, or ``None`` to refuse it."""

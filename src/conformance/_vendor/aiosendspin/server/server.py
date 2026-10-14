@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import time
 from collections.abc import Callable, Sequence
@@ -43,7 +44,7 @@ from conformance._vendor.aiosendspin.noise.trust_store import ServerPairingStore
 from conformance._vendor.aiosendspin.util import create_task, get_local_ip, warn_deprecated
 
 from .client import SendspinClient
-from .connection import SendspinConnection
+from .connection import FrameObserver, SendspinConnection
 from .group import SendspinGroup
 from .roles.visualizer.v1 import warn_pitch_deprecated
 
@@ -201,6 +202,7 @@ class SendspinServer:
         allow_noncompliant_clients: bool = True,
         languages: Sequence[str] | None = None,
         clock: Clock | None = None,
+        frame_observer: FrameObserver | None = None,
     ) -> None:
         """Initialize a Sendspin server instance.
 
@@ -221,6 +223,12 @@ class SendspinServer:
             languages: BCP 47 tags in descending operator preference, sent to clients
                 in server/hello, or None to declare none.
             clock: Clock source, or None for the default monotonic clock.
+            frame_observer: Called with every frame each encrypted connection sends or
+                receives, handshake included, for protocol tracing; or None. A legacy
+                unencrypted connection reports only its first frame. It runs
+                synchronously on the connection's I/O path, so it must be cheap and must
+                not block. An exception it raises is logged and does not affect the
+                connection.
 
         Raises:
             TypeError: If ``languages`` is a single string rather than a sequence of tags.
@@ -250,6 +258,8 @@ class SendspinServer:
                 "rejects unencrypted clients"
             )
         self._clock: Clock = clock or RawMonotonicClock()
+        self._frame_observer = frame_observer
+        self._connection_numbers = itertools.count(1)
 
         self._clients: dict[str, SendspinClient] = {}
         self._event_cbs: list[Callable[[SendspinServer, SendspinEvent], None]] = []

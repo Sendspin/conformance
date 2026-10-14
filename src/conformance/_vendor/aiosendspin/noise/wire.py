@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 from aiohttp import WSMessage, WSMsgType
@@ -31,6 +32,43 @@ MAX_REASSEMBLED_MESSAGE_BYTES = 64 * 1024 * 1024
 
 # Binary types owned by the transport: 1 is a fragment and 2-3 are reserved.
 _TRANSPORT_BINARY_TYPES = frozenset({MSG_TYPE_FRAGMENT, 2, 3})
+
+
+class FrameDirection(StrEnum):
+    """Which way a frame travelled, from the local end's point of view."""
+
+    IN = "in"
+    OUT = "out"
+
+
+class FramePhase(StrEnum):
+    """Which part of a connection a frame belongs to."""
+
+    CLEARTEXT = "cleartext"
+    """The unencrypted ``client/init``, ``server/init``, ``noise/handshake`` and
+    ``server/error`` exchange that precedes the Noise transport."""
+    TRANSPORT = "transport"
+    """Messages carried by the Noise transport once the handshake is complete, including
+    the ``noise/handshake`` messages of an in-band re-handshake."""
+
+
+class FrameTap(Protocol):
+    """Receives every frame a connection sends or receives.
+
+    ``error`` is ``None`` for a frame that decoded, and otherwise says why it did not;
+    ``data`` is then the frame as it arrived. Called synchronously on the I/O path, so it
+    must be cheap and must not block. Exceptions it raises propagate to the caller.
+    """
+
+    def __call__(
+        self,
+        direction: FrameDirection,
+        phase: FramePhase,
+        data: bytes,
+        *,
+        error: str | None = None,
+    ) -> None:
+        """Observe one frame."""
 
 
 class RawWebSocket(Protocol):
@@ -77,9 +115,16 @@ class EncryptedWebSocket:
       delivered as ordinary binary messages, for the owner to ignore.
     - ``legacy_fragment_framing``: when true, oversized messages are sent with
       the legacy type ``2``/``3`` framing.
+
+    ``frame_tap``, when set, sees every message as transport plaintext (type byte
+    plus payload): outbound once it has been sent, inbound once it is reassembled.
+    A frame that fails to decrypt or decode reaches it as received, with an error; the
+    earlier fragments of a message abandoned that way are not reported.
     """
 
-    def __init__(self, ws: RawWebSocket, session: NoiseSession) -> None:
+    def __init__(
+        self, ws: RawWebSocket, session: NoiseSession, *, frame_tap: FrameTap | None = None
+    ) -> None:
         """Initialize the wrapper; ``session`` must already be in transport mode."""
         if not session.handshake_complete:
             msg = "NoiseSession must be in transport mode before wrapping a WebSocket"
@@ -90,6 +135,7 @@ class EncryptedWebSocket:
         self._reasm_type: int | None = None
         self._reasm_legacy = False
         self._send_lock = asyncio.Lock()
+        self._frame_tap = frame_tap
         # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
         self.on_legacy_fragment: Callable[[], None] | None = None
         # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
@@ -147,11 +193,13 @@ class EncryptedWebSocket:
         async with self._send_lock:
             if len(plaintext) <= MAX_TRANSPORT_PLAINTEXT:
                 await self._ws.send_bytes(self._session.encrypt(plaintext))
-                return
-            # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
-            fragment = _fragment_legacy if self.legacy_fragment_framing else _fragment
-            for frame in fragment(plaintext):
-                await self._ws.send_bytes(self._session.encrypt(frame))
+            else:
+                # DEPRECATED(spec-pr-172): remove in aiosendspin <version>
+                fragment = _fragment_legacy if self.legacy_fragment_framing else _fragment
+                for frame in fragment(plaintext):
+                    await self._ws.send_bytes(self._session.encrypt(frame))
+            if self._frame_tap is not None:
+                self._frame_tap(FrameDirection.OUT, FramePhase.TRANSPORT, plaintext)
 
     def __aiter__(self) -> EncryptedWebSocket:
         """Iterate decrypted messages (the wrapper is its own async iterator)."""
@@ -186,6 +234,19 @@ class EncryptedWebSocket:
                 return decoded, received_us
 
     def _decode(self, msg: WSMessage) -> WSMessage | None:
+        """Decode one frame, reporting it to the frame tap if it failed."""
+        decoded = self._decode_frame(msg)
+        if (
+            self._frame_tap is not None
+            and decoded is not None
+            and decoded.type is WSMsgType.ERROR
+            and msg.type is not WSMsgType.ERROR
+        ):
+            data = msg.data.encode("utf-8") if isinstance(msg.data, str) else msg.data
+            self._frame_tap(FrameDirection.IN, FramePhase.TRANSPORT, data, error=str(decoded.data))
+        return decoded
+
+    def _decode_frame(self, msg: WSMessage) -> WSMessage | None:
         """Decrypt one frame; return a ``WSMessage`` or ``None`` to await more fragments."""
         if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED):
             return msg
@@ -283,8 +344,12 @@ class EncryptedWebSocket:
     def _dispatch(self, plaintext: bytes) -> WSMessage:
         """Synthesize a ``WSMessage`` from a complete, type-prefixed plaintext."""
         if plaintext[0] == MSG_TYPE_JSON_BODY:
-            return WSMessage(WSMsgType.TEXT, plaintext[1:].decode("utf-8"), "")
-        return WSMessage(WSMsgType.BINARY, plaintext, "")
+            msg = WSMessage(WSMsgType.TEXT, plaintext[1:].decode("utf-8"), "")
+        else:
+            msg = WSMessage(WSMsgType.BINARY, plaintext, "")
+        if self._frame_tap is not None:
+            self._frame_tap(FrameDirection.IN, FramePhase.TRANSPORT, plaintext)
+        return msg
 
     def _error(self, message: str) -> WSMessage:
         """Discard any reassembly state and build an ERROR ``WSMessage``."""
