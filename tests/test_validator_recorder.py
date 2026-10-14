@@ -12,7 +12,7 @@ from conformance._vendor.aiosendspin.server import (
     ObservedFrame,
     ObservedNoncompliance,
 )
-from conformance.validator.recorder import REDACTED, Recorder
+from conformance.validator.recorder import REDACTED, EventKind, Recorder
 
 SECRETS = {
     "long_term_psk": "LTPSK-secret-value",
@@ -136,6 +136,17 @@ class DecodeTests(unittest.TestCase):
             ObservedNoncompliance(connection=1, client_id=None, reason="x", monotonic_us=1)
         )
         self.assertEqual(self.recorder.noncompliance[0].after_frame, 1)
+
+    def test_events_point_at_the_last_frame_of_their_connection(self) -> None:
+        verbose = io.StringIO()
+        recorder = Recorder(verbose=verbose)
+        recorder.observe_frame(json_frame({"type": "client/hello", "payload": {}}))
+        recorder.observe_event(1, "client", EventKind.KEYED, psk_category="long_term")
+        recorder.observe_event(2, "client", EventKind.CLOSED)
+        [keyed, closed] = recorder.events
+        self.assertEqual((keyed.after_frame, keyed.psk_category), (1, "long_term"))
+        self.assertEqual((closed.after_frame, closed.psk_category), (None, None))
+        self.assertIn("c1 keyed long_term", verbose.getvalue())
 
     def test_a_recorder_failure_is_kept_not_raised(self) -> None:
         frame = observed(b"\x00{}")

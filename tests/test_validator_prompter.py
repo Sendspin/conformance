@@ -86,6 +86,13 @@ class AutoAnswerPrompterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await prompter.confirm("Heard it?"), Answer(Reply.ANSWERED, True))
 
+    async def test_answers_a_secret_without_echoing_it(self) -> None:
+        output = io.StringIO()
+        prompter = AutoAnswerPrompter(secret_answer="SP:0SECRET", output=output)
+        answer = await prompter.ask_text("Paste the token", secret=True)
+        self.assertEqual(answer, Answer(Reply.ANSWERED, "SP:0SECRET"))
+        self.assertNotIn("SECRET", output.getvalue())
+
 
 class HumanVerdictTests(unittest.TestCase):
     def test_skip_and_not_sure_are_skipped_never_pass(self) -> None:

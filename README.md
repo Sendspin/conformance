@@ -153,9 +153,7 @@ connects to the one you pick, taking it over from any server holding it idle;
 stderr, and `--fresh` starts from a new validator identity. The identity is kept in the
 platform user-data directory.
 
-This first version admits the client through unpaired access, so an app with unpaired
-access disabled gets the connection checks only; pairing arrives in a later version.
-It checks:
+On the first connection it checks:
 
 - `client/init`: `client_id`, `version`, `suite`, and no undefined fields
 - the Noise handshake: message 2 carries exactly `{}`
@@ -163,7 +161,23 @@ It checks:
 - `client/hello`: support objects, role names, pairing methods, `unpaired_access`, no
   undefined fields, and (a warning only) the mDNS TXT `name`
 - the initial `client/state`, its `available` field and its role objects, and `client/time`
-- every rule aiosendspin's strict mode enforces, each cited to the spec line it comes from
+- every rule aiosendspin's strict mode enforces, on every connection of the run, each
+  cited to the spec line it comes from
+
+It then walks you through the suites `--suite` names, in this order (default: all):
+
+- `unpaired`: U1 the Sentinel handshake; U2 refusing playback with unpaired access
+  off (`pairing_required`); U3 accepting it with unpaired access on. U4, an activation
+  no client may accept, runs only with `--fault-injection`.
+- `pairing`: P1, pairing with the token (`SP:…`) you paste from your app or leaflet,
+  through both re-handshakes.
+- `post-pairing`: R1 reconnecting paired; R3 accepting the Sentinel once the validator
+  forgets the pairing; R5 keeping the pairing and output delay across a full restart;
+  R4 `server/unpair`, then checking the app really dropped the pairing.
+
+Every step waits for you, and every question accepts `s` (skip), `r` (retry) and `?`
+(not sure). The hidden `--auto-answer` and `--auto-answer-token` flags are for the CI
+self-test only.
 
 The run writes `report.json`, a self-contained `report.html` and `protocol.log.jsonl`
 to `./sendspin-validate-<client-name>-<timestamp>/`. Pairing secrets are redacted as
