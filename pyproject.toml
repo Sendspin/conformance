@@ -10,8 +10,18 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "aiosendspin[server]",
-  "av>=13.1.0",
-  "Pillow>=10.0.0",
+  # The bundled aiosendspin's runtime and server dependencies, with the ranges its
+  # pyproject.toml declares at the commit src/conformance/_vendor/VENDORED.md records.
+  "aiohttp>=3.9.2",
+  "av>=15.0.0",
+  "cpace>=0.1.0",
+  "cryptography>=42",
+  "mashumaro>=3.14",
+  "noiseprotocol>=0.3.1",
+  "numpy>=1.26.0",
+  "orjson>=3.10.0",
+  "Pillow>=11.0.0",
+  "zeroconf>=0.147",
 ]
 
 [project.scripts]
@@ -22,3 +32,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"conformance._vendor" = ["VENDORED.md"]
+"conformance._vendor.aiosendspin" = ["LICENSE", "py.typed"]

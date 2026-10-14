@@ -1,0 +1,1299 @@
+"""
+Core messages for the Sendspin protocol.
+
+This module contains the fundamental messages that establish communication between
+clients and the server. These messages handle initial handshakes, ongoing clock
+synchronization, stream lifecycle management, and role-based state updates and commands.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, fields, is_dataclass, replace
+from typing import Annotated, Any, ClassVar, Literal
+
+from mashumaro.types import Alias
+
+from .artwork import (
+    ClientHelloArtworkSupport,
+    ClientStateArtwork,
+    StreamRequestFormatArtwork,
+    StreamStartArtwork,
+)
+from .base import (
+    SendspinConfig,
+    SendspinModel,
+    collect_application_objects,
+    expand_application_objects,
+    is_unknown_enum_value,
+    split_enum_values,
+)
+from .color import SessionUpdateColor
+from .controller import ControllerCommandPayload, ControllerStatePayload
+from .metadata import SessionUpdateMetadata
+from .player import (
+    ClientHelloPlayerSupport,
+    PlayerCommandPayload,
+    PlayerStatePayload,
+    StreamRequestFormatPlayer,
+    StreamStartPlayer,
+)
+from .source import (
+    ClientHelloSourceSupport,
+    ServerHelloSourceSupport,
+    SourceCommandServerPayload,
+    SourceStatePayload,
+)
+from .types import (
+    PAIRING_CODE_FORMATS,
+    PAIRING_CODE_OUT_CHANNELS,
+    SECRET_LOCATIONS,
+    Activity,
+    ClientMessage,
+    ConnectionReason,
+    GoodbyeReason,
+    MediaCommand,
+    PairingCodeFormat,
+    PairMethod,
+    PlaybackStateType,
+    RepeatMode,
+    Roles,
+    ServerMessage,
+    UndefinedField,
+    undefined_field,
+)
+from .visualizer import (
+    ClientHelloVisualizerSupport,
+    StreamRequestFormatVisualizer,
+    StreamStartVisualizer,
+    VisualizerStatePayload,
+)
+from .visualizer_draft_r1 import (
+    ClientHelloVisualizerSupport as ClientHelloVisualizerSupportDraftR1,
+)
+from .visualizer_draft_r1 import (
+    StreamStartVisualizer as StreamStartVisualizerDraftR1,
+)
+
+
+def _has_merge_value(value: Any) -> bool:
+    """Return whether a field value should overwrite the existing value during merge."""
+    return not isinstance(value, UndefinedField)
+
+
+def _merge_optional_field_value(existing: Any, incoming: Any) -> Any:
+    """Merge one field value, recursively merging nested dataclasses when both are present."""
+    if not _has_merge_value(incoming):
+        return existing
+    if (
+        incoming is not None
+        and _has_merge_value(existing)
+        and is_dataclass(existing)
+        and is_dataclass(incoming)
+    ):
+        return _merge_optional_dataclass_fields(existing, incoming)
+    return incoming
+
+
+def _merge_optional_dataclass_fields(existing: Any, incoming: Any) -> Any:
+    """Merge dataclass instances by preferring incoming values that are actually present."""
+    merged_values = {
+        field.name: _merge_optional_field_value(
+            getattr(existing, field.name),
+            getattr(incoming, field.name),
+        )
+        for field in fields(existing)
+    }
+    return type(existing)(**merged_values)
+
+
+@dataclass
+class DeviceInfo(SendspinModel):
+    """Optional information about the device."""
+
+    product_name: str | None = None
+    """Device model/product name."""
+    manufacturer: str | None = None
+    """Device manufacturer name."""
+    software_version: str | None = None
+    """Software version of the client (not the Sendspin version)."""
+    mac_address: str | None = None
+    """MAC address of the connection's network interface, lowercase colon-separated."""
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+# Descriptor fields whose values a peer filters down to the identifiers it knows, keyed by
+# the method that carries them. Doubles as the set of method identifiers we recognize.
+_PAIR_METHOD_VALUE_FILTERS: dict[str, dict[str, frozenset[str]]] = {
+    PairMethod.PAIRING_PSK.value: {"locations": SECRET_LOCATIONS},
+    PairMethod.STATIC_PAIRING_CODE.value: {"locations": SECRET_LOCATIONS},
+    PairMethod.DYNAMIC_PAIRING_CODE.value: {
+        "formats": PAIRING_CODE_FORMATS,
+        "out_channels": PAIRING_CODE_OUT_CHANNELS,
+    },
+}
+
+# Records the parser writes onto the container; never read from the wire.
+_PAIR_METHOD_SIDECARS: frozenset[str] = frozenset(
+    {
+        "ignored_methods",
+        "ignored_values",
+        "unusable_methods",
+        "offered_both_pairing_code_methods",
+    }
+)
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+_LEGACY_PIN_METHODS: dict[str, str] = {
+    "dynamic_pin": PairMethod.DYNAMIC_PAIRING_CODE.value,
+    "static_pin": PairMethod.STATIC_PAIRING_CODE.value,
+}
+# The server always activates this dynamic PIN length.
+_LEGACY_DYNAMIC_PIN_LENGTH = 6
+
+
+# DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+def _pair_methods_from_list(entries: Any) -> dict[str, Any]:
+    """Key a superseded list of self-describing descriptors by method identifier."""
+    return dict(
+        _list_entry(entry)
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("method"), str)
+    )
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+def _list_entry(entry: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Return a list entry's method and descriptor, renaming the pre-rename PIN methods."""
+    method = entry["method"]
+    descriptor = {k: v for k, v in entry.items() if k != "method"}
+    if method == "dynamic_pin":
+        # A client whose shortest PIN exceeds the activated length is left with no format.
+        min_pin_length = entry.get("min_pin_length", _LEGACY_DYNAMIC_PIN_LENGTH)
+        usable = isinstance(min_pin_length, int) and min_pin_length <= _LEGACY_DYNAMIC_PIN_LENGTH
+        descriptor["formats"] = [PairingCodeFormat.DIGITS.value] if usable else []
+    return _LEGACY_PIN_METHODS.get(method, method), descriptor
+
+
+# DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+def _uses_legacy_pin_methods(entries: Any) -> bool:
+    """Whether a superseded descriptor list names a pre-rename PIN method."""
+    return any(
+        isinstance(entry, dict) and entry.get("method") in _LEGACY_PIN_METHODS for entry in entries
+    )
+
+
+def _filter_descriptor_values(
+    descriptor: dict[str, Any], value_filters: dict[str, frozenset[str]]
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    """Drop unrecognized descriptor values, also returning each dropped identifier and its field."""
+    filtered = dict(descriptor)
+    ignored: list[tuple[str, str]] = []
+    for field_name, allowed in value_filters.items():
+        if field_name not in filtered:
+            continue
+        values = filtered[field_name]
+        # A field of the wrong type offers nothing usable, same as one filtered empty. Values
+        # are matched as identifiers, so anything that is not one is simply not recognized —
+        # tested before membership, since an unhashable value cannot be looked up at all.
+        if not isinstance(values, list):
+            filtered[field_name] = []
+            continue
+        identifiers = [v for v in values if isinstance(v, str)]
+        filtered[field_name] = [v for v in identifiers if v in allowed]
+        ignored.extend((field_name, v) for v in identifiers if v not in allowed)
+    return filtered, ignored
+
+
+def _is_malformed_descriptor(method: str, descriptor: dict[str, Any]) -> bool:
+    """Whether a recognized method's descriptor has the wrong shape, before value filtering."""
+    locations = descriptor.get("locations")
+    if locations is not None and not isinstance(locations, list):
+        return True
+    if method != PairMethod.DYNAMIC_PAIRING_CODE.value:
+        return False
+    return descriptor.get("formats") == [] or not all(
+        isinstance(descriptor.get(key), list) for key in ("formats", "out_channels")
+    )
+
+
+@dataclass
+class PairMethodDescriptor(SendspinModel):
+    """A secret-based pairing method a client offers in client/hello."""
+
+    locations: list[str] | None = None
+    """Where the operator finds the method's configured secret, from SECRET_LOCATIONS."""
+
+    class Config(SendspinConfig):
+        """Omit the hint where the client does not give one."""
+
+        omit_none = True
+
+
+@dataclass
+class DynamicPairMethodDescriptor(SendspinModel):
+    """The dynamic pairing code method a client offers in client/hello."""
+
+    out_channels: list[str]
+    """Channels through which the code reaches the operator, from PAIRING_CODE_OUT_CHANNELS."""
+    formats: list[str]
+    """Emission formats the client offers, from PAIRING_CODE_FORMATS. Non-empty."""
+
+    def __post_init__(self) -> None:
+        """Validate field values."""
+        if not self.formats:
+            raise ValueError("formats must be non-empty")
+        if not self.out_channels:
+            raise ValueError("out_channels must be non-empty")
+
+
+@dataclass
+class SupportedPairMethods(SendspinModel):
+    """Pairing methods a client offers, keyed by method identifier.
+
+    Only recognized methods survive the parse: an identifier this implementation does not
+    know is dropped into ``ignored_methods`` rather than rejected, since it signals a client
+    speaking a newer revision of the spec. Tolerance covers identifiers and values, not
+    shape: a recognized method whose descriptor is not an object fails the parse.
+    """
+
+    pairing_psk: PairMethodDescriptor | None = None
+    """The pairing PSK method, offered by every conformant client."""
+    static_pairing_code: PairMethodDescriptor | None = None
+    """The static pairing code method."""
+    dynamic_pairing_code: DynamicPairMethodDescriptor | None = None
+    """The per-session dynamic pairing code method."""
+    ignored_methods: list[str] | None = None
+    """Method identifiers this implementation does not recognize, recorded for the server
+    to log. Not part of the wire schema (omitted when None)."""
+    unusable_methods: list[str] | None = None
+    """Recognized methods dropped for offering no value this implementation knows, recorded
+    for the server to log. Not part of the wire schema (omitted when None)."""
+    offered_both_pairing_code_methods: bool | None = None
+    """Whether the client offered both pairing-code methods, recorded for the server to log.
+    The static one is dropped in favor of a dynamic one offering digits. Not part of the wire
+    schema (omitted when None)."""
+    ignored_values: list[str] | None = None
+    """Descriptor values this implementation does not recognize, as ``method.field=value``,
+    recorded for the server to log. Not part of the wire schema (omitted when None)."""
+
+    class Config(SendspinConfig):
+        """Omit methods the client does not offer."""
+
+        omit_none = True
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop unrecognized methods and values, preferring dynamic code with digits over static."""
+        normalized = {k: v for k, v in d.items() if k in _PAIR_METHOD_VALUE_FILTERS}
+        ignored = sorted(set(d) - set(normalized) - _PAIR_METHOD_SIDECARS)
+        ignored_values: list[str] = []
+        for key, value_filters in _PAIR_METHOD_VALUE_FILTERS.items():
+            descriptor = normalized.get(key)
+            if not isinstance(descriptor, dict):
+                continue
+            normalized[key], dropped = _filter_descriptor_values(descriptor, value_filters)
+            ignored_values.extend(f"{key}.{field}={value}" for field, value in dropped)
+        both = (
+            PairMethod.STATIC_PAIRING_CODE.value in normalized
+            and PairMethod.DYNAMIC_PAIRING_CODE.value in normalized
+        )
+        dynamic = normalized.get(PairMethod.DYNAMIC_PAIRING_CODE.value)
+        unusable = isinstance(dynamic, dict) and not (
+            dynamic.get("formats") and dynamic.get("out_channels")
+        )
+        # Every server can enter a digits code, but only some can scan a QR code.
+        offers_digits = isinstance(dynamic, dict) and PairingCodeFormat.DIGITS.value in (
+            dynamic.get("formats") or ()
+        )
+        if unusable:
+            del normalized[PairMethod.DYNAMIC_PAIRING_CODE.value]
+        elif both and offers_digits:
+            del normalized[PairMethod.STATIC_PAIRING_CODE.value]
+        # Always overwrite so a client cannot spoof the records via the wire.
+        normalized["ignored_methods"] = ignored or None
+        normalized["ignored_values"] = ignored_values or None
+        normalized["unusable_methods"] = (
+            [PairMethod.DYNAMIC_PAIRING_CODE.value] if unusable else None
+        )
+        normalized["offered_both_pairing_code_methods"] = both or None
+        return super().__pre_deserialize__(normalized)
+
+
+assert set(_PAIR_METHOD_VALUE_FILTERS) <= {f.name for f in fields(SupportedPairMethods)}
+
+
+@dataclass
+class UnpairedAccess(SendspinModel):
+    """Whether the client currently admits unpaired access."""
+
+    enabled: bool = False
+
+
+# Client -> Server: client/hello
+@dataclass
+class ClientHelloPayload(SendspinModel):
+    """Information about a connected client."""
+
+    name: str
+    """Friendly name of the client."""
+    supported_roles: list[str]
+    """List of versioned role IDs the client supports (e.g., 'player@v1')."""
+    device_info: DeviceInfo | None = None
+    """Optional information about the device."""
+    client_id: str | None = None
+    """Client identifier. Omitted under encryption (taken from client/init); sent by
+    legacy unencrypted clients."""
+    version: int | None = None
+    """Core protocol version. Omitted under encryption (taken from client/init)."""
+    player_support: Annotated[ClientHelloPlayerSupport | None, Alias("player@v1_support")] = None
+    """Player support configuration - only if player role is in supported_roles."""
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    artwork_support: Annotated[ClientHelloArtworkSupport | None, Alias("artwork@v1_support")] = None
+    """Artwork channels declared by clients predating the client/state artwork object."""
+    visualizer_support: Annotated[
+        ClientHelloVisualizerSupport | None, Alias("visualizer@v1_support")
+    ] = None
+    """Visualizer support configuration - only if visualizer@v1 role is in supported_roles."""
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+    visualizer_draft_r1_support: Annotated[
+        ClientHelloVisualizerSupportDraftR1 | None, Alias("visualizer@_draft_r1_support")
+    ] = None
+    """Visualizer support for clients on the legacy `visualizer@_draft_r1` wire."""
+    supported_pair_methods: SupportedPairMethods | None = None
+    """Pairing methods this client offers."""
+    unpaired_access: UnpairedAccess = field(default_factory=UnpairedAccess)
+    """Whether this client currently admits unpaired access."""
+    legacy_support_keys_used: list[str] | None = None
+    """Unversioned support keys the parser rewrote to versioned aliases, recorded for
+    the server to flag. Not part of the wire schema (omitted when None)."""
+    unlisted_support_roles: list[str] | None = None
+    """Roles whose support object was provided without listing the role in
+    ``supported_roles`` (dropped during parse), recorded for the server to flag.
+    Not part of the wire schema (omitted when None)."""
+    source_support: Annotated[ClientHelloSourceSupport | None, Alias("source@v1_support")] = None
+    """Source support configuration."""
+    missing_support_roles: list[str] | None = None
+    """Listed role versions whose required support object is missing, recorded for the
+    server to flag and never activate. Not part of the wire schema (omitted when None)."""
+    # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+    legacy_pair_methods_list_used: bool | None = None
+    """Whether supported_pair_methods arrived as the superseded list, recorded for the
+    server to flag. Not part of the wire schema (omitted when None)."""
+    # DEPRECATED(spec-pr-158): remove in aiosendspin <version>
+    trust_level_used: bool | None = None
+    """Whether the removed trust_level key was present, recorded for the server to treat
+    the client as legacy. Not part of the wire schema (omitted when None)."""
+    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+    legacy_pin_methods_used: bool | None = None
+    """Whether supported_pair_methods named the pre-rename PIN methods, recorded for the
+    server to pair over the PIN wire. Not part of the wire schema (omitted when None)."""
+    malformed_pair_method_descriptor: bool | None = None
+    """Whether a recognized pair method's descriptor had the wrong shape, recorded for the
+    server to flag. Not part of the wire schema (omitted when None)."""
+    unpaired_access_incomplete: bool | None = None
+    """Whether unpaired_access or its enabled field was omitted, recorded for the server to
+    flag. Not part of the wire schema (omitted when None)."""
+
+    # Static mapping: unversioned support key -> actual alias key.
+    _SUPPORT_KEY_ALIASES: ClassVar[dict[str, str]] = {
+        "player_support": "player@v1_support",
+        "artwork_support": "artwork@v1_support",
+        "visualizer_support": "visualizer@v1_support",
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+        "visualizer_draft_r1_support": "visualizer@_draft_r1_support",
+    }
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Rewrite legacy unversioned support keys to versioned aliases, recording which."""
+        normalized = dict(d)
+        legacy_keys: list[str] = []
+        for legacy_key, versioned_key in cls._SUPPORT_KEY_ALIASES.items():
+            if legacy_key not in normalized:
+                continue
+            legacy_keys.append(legacy_key)
+            value = normalized.pop(legacy_key)
+            # Rewrite to the versioned alias only when the client didn't also send it.
+            if versioned_key not in normalized:
+                normalized[versioned_key] = value
+        # DEPRECATED(spec-pr-179): remove in aiosendspin <version>
+        # Clients on the superseded wire send supported_pair_methods as a list whose
+        # entries each name their own method; rewrite it onto the keyed object.
+        pair_methods = normalized.get("supported_pair_methods")
+        legacy_pair_methods_list = isinstance(pair_methods, list)
+        if legacy_pair_methods_list:
+            normalized["supported_pair_methods"] = _pair_methods_from_list(pair_methods)
+        normalized["legacy_pair_methods_list_used"] = legacy_pair_methods_list or None
+        # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+        normalized["legacy_pin_methods_used"] = (
+            legacy_pair_methods_list and _uses_legacy_pin_methods(pair_methods)
+        ) or None
+        # DEPRECATED(spec-pr-158): remove in aiosendspin <version>
+        normalized["trust_level_used"] = "trust_level" in normalized or None
+        # Always overwrite so a client cannot spoof the record via the wire.
+        normalized["legacy_support_keys_used"] = legacy_keys or None
+        normalized["malformed_pair_method_descriptor"] = (
+            isinstance(pair_methods, dict)
+            and any(
+                _is_malformed_descriptor(method, descriptor)
+                for method, descriptor in pair_methods.items()
+                if method in _PAIR_METHOD_VALUE_FILTERS and isinstance(descriptor, dict)
+            )
+        ) or None
+        unpaired_access = normalized.get("unpaired_access")
+        normalized["unpaired_access_incomplete"] = (
+            not isinstance(unpaired_access, dict) or "enabled" not in unpaired_access
+        ) or None
+        return super().__pre_deserialize__(normalized)
+
+    def __post_init__(self) -> None:
+        """Match support configs to supported roles, recording each mismatch."""
+        # Require support objects only for the exact role version we parse (e.g. "player@v1").
+        # Clients may advertise newer versions (e.g. "player@v2") which this server may not
+        # implement. Those must not trigger v1 support requirements.
+        unlisted: list[str] = []
+        missing: list[str] = []
+        player_role_supported = Roles.PLAYER.value in self.supported_roles
+        if player_role_supported and self.player_support is None:
+            missing.append(Roles.PLAYER.value)
+        if not player_role_supported:
+            if self.player_support is not None:
+                unlisted.append(Roles.PLAYER.value)
+            self.player_support = None
+
+        # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+        if Roles.ARTWORK.value not in self.supported_roles:
+            if self.artwork_support is not None:
+                unlisted.append(Roles.ARTWORK.value)
+            self.artwork_support = None
+
+        visualizer_role_supported = Roles.VISUALIZER.value in self.supported_roles
+        if visualizer_role_supported and self.visualizer_support is None:
+            missing.append(Roles.VISUALIZER.value)
+        if not visualizer_role_supported:
+            if self.visualizer_support is not None:
+                unlisted.append(Roles.VISUALIZER.value)
+            self.visualizer_support = None
+
+        # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+        visualizer_draft_supported = "visualizer@_draft_r1" in self.supported_roles
+        if visualizer_draft_supported and self.visualizer_draft_r1_support is None:
+            missing.append("visualizer@_draft_r1")
+        if not visualizer_draft_supported:
+            if self.visualizer_draft_r1_support is not None:
+                unlisted.append("visualizer@_draft_r1")
+            self.visualizer_draft_r1_support = None
+
+        source_role_supported = Roles.SOURCE.value in self.supported_roles
+        if source_role_supported and self.source_support is None:
+            missing.append(Roles.SOURCE.value)
+        if not source_role_supported:
+            if self.source_support is not None:
+                unlisted.append(Roles.SOURCE.value)
+            self.source_support = None
+
+        # Overwrite so a client cannot spoof the records via the wire.
+        self.unlisted_support_roles = unlisted or None
+        self.missing_support_roles = missing or None
+
+    @property
+    def activatable_roles(self) -> list[str]:
+        """Listed role versions, in client order, less those missing their support object."""
+        missing = self.missing_support_roles or ()
+        return [role for role in self.supported_roles if role not in missing]
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+        serialize_by_alias = True
+
+
+@dataclass
+class ClientHelloMessage(ClientMessage):
+    """Message sent by the client to identify itself."""
+
+    payload: ClientHelloPayload
+    type: Literal["client/hello"] = "client/hello"
+
+
+# Client -> Server: client/time
+@dataclass
+class ClientTimePayload(SendspinModel):
+    """Timing information from the client."""
+
+    client_transmitted: int
+    """Client's internal clock timestamp in microseconds."""
+
+
+@dataclass
+class ClientTimeMessage(ClientMessage):
+    """Message sent by the client for time synchronization."""
+
+    payload: ClientTimePayload
+    type: Literal["client/time"] = "client/time"
+
+
+# Client -> Server: client/state
+@dataclass
+class ClientStatePayload(SendspinModel):
+    """Client sends state updates to the server."""
+
+    available: bool | None = None
+    """
+    Whether the client is available to participate in Sendspin playback.
+
+    - true: operational and ready; for a player, its clock is synchronized.
+    - false: output is in use by an external system, not currently participating.
+    """
+    player: PlayerStatePayload | None = None
+    """Player state - only if client has player role."""
+    # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
+    legacy_state_used: bool | None = None
+    """Set when the parser read a legacy top-level `state` field, recorded for the server
+    to flag. Not part of the wire schema (omitted when None)."""
+    source: SourceStatePayload | None = None
+    """Source state."""
+    artwork: ClientStateArtwork | None = None
+    """Artwork channel configuration - only if client has artwork role."""
+    visualizer: VisualizerStatePayload | None = None
+    """Visualizer stream configuration - only if client has visualizer role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Normalize a legacy `state` enum to `available`, recording that it was used.
+
+        Application-specific role objects are nested under `application_objects`.
+        """
+        d = collect_application_objects(d)
+        # DEPRECATED(spec-pr-115): remove in aiosendspin <version>
+        legacy_state = "state" in d
+        if d.get("available") is None and legacy_state:
+            d["available"] = d["state"] != "external_source"
+        # Always overwrite so a client cannot spoof the record via the wire.
+        d["legacy_state_used"] = legacy_state or None
+        return super().__pre_deserialize__(d)
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ClientStateMessage(ClientMessage):
+    """Message sent by the client to report state changes."""
+
+    payload: ClientStatePayload
+    type: Literal["client/state"] = "client/state"
+
+
+# Client -> Server: client/command
+@dataclass
+class ClientCommandPayload(SendspinModel):
+    """Client sends commands to the server."""
+
+    controller: ControllerCommandPayload | None = None
+    """Controller commands - only if client has controller role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+    unrecognized_command_used: bool | None = None
+    """Whether the controller object named an unrecognized command, recorded for the server to
+    flag. Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop a controller object with an unrecognized command, and nest application objects."""
+        controller = d.get("controller")
+        unrecognized = isinstance(controller, dict) and is_unknown_enum_value(
+            controller.get("command"), MediaCommand
+        )
+        normalized = {k: v for k, v in d.items() if k != "controller"} if unrecognized else d
+        # Always overwrite so a client cannot spoof the record via the wire.
+        return super().__pre_deserialize__(
+            collect_application_objects(
+                normalized | {"unrecognized_command_used": unrecognized or None}
+            )
+        )
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ClientCommandMessage(ClientMessage):
+    """Message sent by the client to send commands."""
+
+    payload: ClientCommandPayload
+    type: Literal["client/command"] = "client/command"
+
+
+# Client -> Server: client/goodbye
+@dataclass
+class ClientGoodbyePayload(SendspinModel):
+    """Payload for client goodbye message."""
+
+    reason: GoodbyeReason | None
+    """Reason for disconnecting, or None when the client sent one this implementation
+    does not recognize."""
+    unrecognized_reason: str | None = None
+    """The reason as sent when it was not recognized, recorded for the server to log.
+    Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Set aside a reason this implementation does not recognize."""
+        reason = d.get("reason")
+        unrecognized = is_unknown_enum_value(reason, GoodbyeReason)
+        # Always overwrite so a client cannot spoof the record via the wire.
+        normalized = d | {"unrecognized_reason": reason if unrecognized else None}
+        if unrecognized:
+            normalized["reason"] = None
+        return super().__pre_deserialize__(normalized)
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ClientGoodbyeMessage(ClientMessage):
+    """Message sent by the client before gracefully closing the connection."""
+
+    payload: ClientGoodbyePayload
+    type: Literal["client/goodbye"] = "client/goodbye"
+
+
+# Client -> Server: client/leave
+@dataclass
+class ClientLeavePayload(SendspinModel):
+    """Empty ``client/leave`` payload."""
+
+
+@dataclass
+class ClientLeaveMessage(ClientMessage):
+    """Message sent by the client to leave its current group."""
+
+    payload: ClientLeavePayload = field(default_factory=ClientLeavePayload)
+    type: Literal["client/leave"] = "client/leave"
+    payload_missing: bool | None = None
+    """Set when the message carried no payload object, recorded for the server to flag.
+    Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop a payload that is not an object, recording that it was missing."""
+        payload_missing = not isinstance(d.get("payload"), dict)
+        normalized = {k: v for k, v in d.items() if k != "payload"} if payload_missing else d
+        # Always overwrite so a client cannot spoof the record via the wire.
+        return super().__pre_deserialize__(
+            normalized | {"payload_missing": payload_missing or None}
+        )
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+# Server -> Client: server/hello
+@dataclass
+class ServerHelloPayload(SendspinModel):
+    """Information about the server."""
+
+    name: str
+    """Friendly name of the server"""
+    languages: list[str] | None = None
+    """BCP 47 tags in descending operator preference, informing operator-facing output."""
+    source_support: Annotated[ServerHelloSourceSupport | None, Alias("source@v1_support")] = None
+    """Codecs accepted from sources; present only when the server supports source@v1."""
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+        serialize_by_alias = True
+
+
+@dataclass
+class ServerHelloMessage(ServerMessage):
+    """Message sent by the server to identify itself."""
+
+    payload: ServerHelloPayload
+    type: Literal["server/hello"] = "server/hello"
+
+
+# Legacy (transition-mode) server/hello, for unencrypted clients that predate
+# server/activate. Standalone (NOT a ServerMessage subtype): it serializes to the
+# same ``type: "server/hello"`` as the encrypted-path message above, so keeping it
+# out of the discriminated union avoids an ambiguous dispatch. The server only ever
+# serializes and sends it; our own client always speaks the encrypted path and so
+# never deserializes it.
+@dataclass
+class LegacyServerHelloPayload(SendspinModel):
+    """Server identity for a legacy unencrypted connection (no server/activate)."""
+
+    server_id: str
+    """Identifier of the server."""
+    name: str
+    """Friendly name of the server."""
+    version: int
+    """Version of the core message format (independent of role versions)."""
+    connection_reason: ConnectionReason
+    """Reason for this connection (relevant for multi-server environments)."""
+    active_roles: list[str]
+    """Versioned role IDs active for this client (e.g., 'player@v1')."""
+    selected_pair_method: PairMethod | None = None
+    """Pairing method the server picked; present when connection_reason is 'pairing'."""
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class LegacyServerHelloMessage(SendspinModel):
+    """Legacy server/hello for transition-mode (unencrypted) clients."""
+
+    payload: LegacyServerHelloPayload
+    type: Literal["server/hello"] = "server/hello"
+
+
+# Server -> Client: server/activate
+@dataclass
+class ActivatePairing(SendspinModel):
+    """Parameters of the pairing attempt a server/activate admits."""
+
+    method: PairMethod
+    """Pairing method the server picked, drawn from the client's supported_pair_methods."""
+    format: str | None = None
+    """The dynamic pairing-code emission format; required for dynamic_pairing_code."""
+    # DEPRECATED(spec-pr-241): remove in aiosendspin <version>
+    languages: list[str] | None = None
+    """BCP 47 tags in descending operator preference, for spoken pairing-code emission."""
+    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+    legacy_pin_wire: bool | None = None
+    """Serialize with the pre-rename PIN method names, for a client that offered them.
+    Not part of the wire schema (omitted when None)."""
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+    # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Rewrite a pairing-code method to its PIN name when ``legacy_pin_wire`` is set."""
+        if not d.pop("legacy_pin_wire", None):
+            return d
+        if self.method is PairMethod.DYNAMIC_PAIRING_CODE:
+            d["method"] = "dynamic_pin"
+            d["pin_length"] = _LEGACY_DYNAMIC_PIN_LENGTH
+            d.pop("format", None)
+        elif self.method is PairMethod.STATIC_PAIRING_CODE:
+            d["method"] = "static_pin"
+        return d
+
+
+@dataclass
+class ServerActivatePayload(SendspinModel):
+    """Declares the server's current purpose on this connection."""
+
+    activities: list[Activity]
+    """The set of currently-active purposes on this connection. May be empty."""
+    active_roles: list[str] | None = None
+    """Versioned role IDs active for this client (e.g., 'player@v1'). Required on
+    connections capable of playback; absent otherwise. Persists across subsequent
+    server/activate messages that omit it."""
+    pairing: ActivatePairing | None = None
+    """Parameters of the admitted pairing attempt. Required when 'pairing' is in activities."""
+    ignored_activities: list[str] | None = None
+    """Activities this implementation does not recognize, dropped during parse and
+    recorded for the client to reject. Not part of the wire schema (omitted when None)."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop activities this implementation does not recognize, recording them."""
+        activities, ignored = split_enum_values(d.get("activities"), Activity)
+        normalized = dict(d)
+        if "activities" in d:
+            normalized["activities"] = activities
+        # Always overwrite so a server cannot spoof the record via the wire.
+        normalized["ignored_activities"] = ignored or None
+        return super().__pre_deserialize__(normalized)
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ServerActivateMessage(ServerMessage):
+    """Message sent by the server to declare its active purpose on this connection."""
+
+    payload: ServerActivatePayload
+    type: Literal["server/activate"] = "server/activate"
+
+
+# DEPRECATED(spec-pr-130): remove in aiosendspin <version>
+@dataclass
+class LegacyServerActivateMessage(ServerMessage):
+    """
+    Legacy server/activate that also names a Pairing PSK or PIN attempt in selected_pair_method.
+
+    Only for clients that read the method from there. Never parsed.
+    """
+
+    payload: ServerActivatePayload
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Copy a Pairing PSK or PIN method to the payload's selected_pair_method."""
+        pairing = self.payload.pairing
+        if pairing is not None and (
+            pairing.method is PairMethod.PAIRING_PSK
+            # DEPRECATED(spec-pr-137): remove in aiosendspin <version>
+            or pairing.legacy_pin_wire
+        ):
+            d["payload"]["selected_pair_method"] = d["payload"]["pairing"]["method"]
+        return {"type": "server/activate", "payload": d["payload"]}
+
+
+# Server -> Client: server/time
+@dataclass
+class ServerTimePayload(SendspinModel):
+    """Timing information from the server."""
+
+    client_transmitted: int
+    """Client's internal clock timestamp received in the client/time message"""
+    server_received: int
+    """Timestamp that the server received the client/time message in microseconds"""
+    server_transmitted: int
+    """Timestamp that the server transmitted this message in microseconds"""
+
+
+@dataclass
+class ServerTimeMessage(ServerMessage):
+    """Message sent by the server for time synchronization."""
+
+    payload: ServerTimePayload
+    type: Literal["server/time"] = "server/time"
+
+
+# Server -> Client: server/state
+@dataclass
+class ServerStatePayload(SendspinModel):
+    """Server sends state updates to the client."""
+
+    metadata: SessionUpdateMetadata | UndefinedField = field(default_factory=undefined_field)
+    """Metadata state - only sent to clients with metadata role."""
+    controller: ControllerStatePayload | UndefinedField = field(default_factory=undefined_field)
+    """Controller state - only sent to clients with controller role."""
+    color: SessionUpdateColor | UndefinedField = field(default_factory=undefined_field)
+    """Color state - only sent to clients with color role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+
+    def merge(self, other: ServerStatePayload) -> ServerStatePayload:
+        """Return this state updated with the role objects present in `other`.
+
+        Each present role object replaces the existing one wholesale.
+        Role objects omitted from `other` are kept. Application-specific role objects
+        follow the same rule per key.
+        """
+        return replace(
+            self,
+            **{
+                role.name: getattr(other, role.name)
+                for role in fields(other)
+                if role.name != "application_objects"
+                and not isinstance(getattr(other, role.name), UndefinedField)
+            },
+            application_objects=self.application_objects | other.application_objects,
+        )
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """
+        Nest application-specific role objects under `application_objects`.
+
+        Raises ValueError if a role object is null.
+        """
+        if null_roles := sorted(key for key, value in d.items() if value is None):
+            msg = f"server/state role objects must not be null, got {null_roles}"
+            raise ValueError(msg)
+        return super().__pre_deserialize__(collect_application_objects(d))
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_default = True
+
+
+# DEPRECATED(spec-pr-275): remove in aiosendspin <version>
+@dataclass
+class LegacyServerStateClearMessage(ServerMessage):
+    """
+    Legacy server/state clearing one role with a null role object.
+
+    Only for clients that predate the activation-driven discard; never parsed.
+    """
+
+    role: str
+    """Wire key of the role object to clear."""
+
+    def __post_serialize__(self, _d: dict[str, Any]) -> dict[str, Any]:
+        """Send the role object as null inside a server/state envelope."""
+        return {"type": "server/state", "payload": {self.role: None}}
+
+
+# DEPRECATED(spec-pr-175): remove in aiosendspin <version>
+@dataclass
+class LegacyServerStateMessage(ServerMessage):
+    """
+    Legacy server/state that sends unset metadata and color fields as null.
+
+    Only for clients that merge each role object into the previous one. Never parsed.
+    """
+
+    payload: ServerStatePayload
+    # DEPRECATED(spec-pr-81): remove in aiosendspin <version>
+    metadata_repeat: RepeatMode | None = None
+    """Repeat mode added to the metadata object, for clients that read it there."""
+    # DEPRECATED(spec-pr-81): remove in aiosendspin <version>
+    metadata_shuffle: bool | None = None
+    """Shuffle state added to the metadata object, for clients that read it there."""
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Add every unset metadata and color field as null, and any metadata repeat and shuffle."""
+        payload = d["payload"]
+        for key, model in (("metadata", SessionUpdateMetadata), ("color", SessionUpdateColor)):
+            if isinstance(role_object := payload.get(key), dict):
+                payload[key] = {f.name: None for f in fields(model)} | role_object
+        # DEPRECATED(spec-pr-81): remove in aiosendspin <version>
+        if isinstance(metadata := payload.get("metadata"), dict):
+            if self.metadata_repeat is not None:
+                metadata["repeat"] = self.metadata_repeat.value
+            if self.metadata_shuffle is not None:
+                metadata["shuffle"] = self.metadata_shuffle
+        return {"type": "server/state", "payload": payload}
+
+
+@dataclass
+class ServerStateMessage(ServerMessage):
+    """Message sent by the server to send state updates."""
+
+    payload: ServerStatePayload
+    type: Literal["server/state"] = "server/state"
+
+    def merge(self, other: ServerMessage) -> ServerMessage | None:
+        """Merge with another server/state message, replacing each role object it includes."""
+        if not isinstance(other, ServerStateMessage):
+            return None
+
+        return ServerStateMessage(self.payload.merge(other.payload))
+
+
+# Server -> Client: group/update
+@dataclass
+class GroupUpdateServerPayload(SendspinModel):
+    """State update of the group this client is part of."""
+
+    playback_state: PlaybackStateType | None = None
+    """Playback state of the group."""
+    group_id: str | None = None
+    """Group identifier."""
+    group_name: str | None = None
+    """Friendly name of the group."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Drop a playback state this implementation does not recognize."""
+        if is_unknown_enum_value(d.get("playback_state"), PlaybackStateType):
+            return super().__pre_deserialize__(
+                {k: v for k, v in d.items() if k != "playback_state"}
+            )
+        return super().__pre_deserialize__(d)
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class GroupUpdateServerMessage(ServerMessage):
+    """Message sent by the server to update group state."""
+
+    payload: GroupUpdateServerPayload
+    type: Literal["group/update"] = "group/update"
+
+    def merge(self, other: ServerMessage) -> ServerMessage | None:
+        """Merge with another group/update message, preferring defined incoming fields."""
+        if not isinstance(other, GroupUpdateServerMessage):
+            return None
+
+        merged_payload = _merge_optional_dataclass_fields(self.payload, other.payload)
+        return GroupUpdateServerMessage(merged_payload)
+
+
+# Server -> Client: server/command
+@dataclass
+class ServerCommandPayload(SendspinModel):
+    """Server sends commands to the client."""
+
+    player: PlayerCommandPayload | None = None
+    """Player commands - only sent to clients with player role."""
+    source: SourceCommandServerPayload | None = None
+    """Source command - only sent to clients with source role."""
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Nest application-specific role objects under `application_objects`."""
+        return super().__pre_deserialize__(collect_application_objects(d))
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class ServerCommandMessage(ServerMessage):
+    """Message sent by the server to send commands to the client."""
+
+    payload: ServerCommandPayload
+    type: Literal["server/command"] = "server/command"
+
+
+# Shape carried by `StreamStartPayload.visualizer`. The field is typed `Any`
+# so mashumaro defers to the dispatch hooks below, but callers should annotate
+# against this alias for static checking.
+# DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+StreamStartVisualizerLike = StreamStartVisualizer | StreamStartVisualizerDraftR1 | None
+
+
+def _serialize_stream_start_visualizer(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (StreamStartVisualizer, StreamStartVisualizerDraftR1)):
+        raise TypeError(
+            "StreamStartPayload.visualizer must be a StreamStartVisualizer, "
+            f"StreamStartVisualizerDraftR1, or None; got {type(value).__name__}"
+        )
+    return value.to_dict()
+
+
+def _deserialize_stream_start_visualizer(
+    value: Any,
+) -> StreamStartVisualizer | StreamStartVisualizerDraftR1 | None:
+    """Pick the visualizer wire schema by its discriminating field.
+
+    The v1 and draft schemas overlap on `types`/`spectrum` and share the
+    class name `StreamStartVisualizer`, so mashumaro's bare-union resolution
+    cannot tell them apart (it yields None / raises for a draft payload).
+    They are distinguished by the required `rate_max` (v1) vs `batch_max`
+    (draft); dispatch explicitly. The field is annotated `Any` so mashumaro
+    defers to these hooks instead of generating union codec.
+    """
+    if not isinstance(value, dict):
+        return None
+    # DEPRECATED(spec-pr-86): remove in aiosendspin <version>
+    if "batch_max" in value and "rate_max" not in value:
+        return StreamStartVisualizerDraftR1.from_dict(value)
+    return StreamStartVisualizer.from_dict(value)
+
+
+# Server -> Client: stream/start
+@dataclass
+class StreamStartPayload(SendspinModel):
+    """Information about an active streaming session."""
+
+    server_transmitted: int = 0
+    """Timestamp the server transmitted this message in microseconds. Stamped at send."""
+    player: StreamStartPlayer | None = None
+    """Information about the player."""
+    artwork: StreamStartArtwork | None = None
+    """Artwork information (sent to clients with artwork role)."""
+    # Typed `Any` (rather than `StreamStartVisualizerLike`) so mashumaro defers
+    # to the explicit serialize/deserialize hooks; the bare union cannot
+    # disambiguate the two same-named schemas. The serialize hook rejects
+    # anything other than the alias's members at runtime.
+    visualizer: Any = field(
+        default=None,
+        metadata={
+            "serialize": _serialize_stream_start_visualizer,
+            "deserialize": _deserialize_stream_start_visualizer,
+        },
+    )
+    """Visualizer information (sent to clients with visualizer role).
+
+    Carries the v1 schema by default; legacy clients on `visualizer@_draft_r1`
+    get the draft schema. Roles emit whichever matches their negotiated wire.
+    """
+    application_objects: dict[str, Any] = field(default_factory=dict)
+    """Objects of application-specific roles, keyed by their `_`-prefixed wire key."""
+
+    @classmethod
+    def __pre_deserialize__(cls, d: dict[str, Any]) -> dict[str, Any]:
+        """Nest application-specific role objects under `application_objects`."""
+        return super().__pre_deserialize__(collect_application_objects(d))
+
+    def __post_serialize__(self, d: dict[str, Any]) -> dict[str, Any]:
+        """Send application-specific role objects as top-level payload keys."""
+        return expand_application_objects(d)
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class StreamStartMessage(ServerMessage):
+    """Message sent by the server to start a stream."""
+
+    payload: StreamStartPayload
+    type: Literal["stream/start"] = "stream/start"
+
+
+# Role family names that support stream/clear (have buffers to clear).
+STREAM_CLEAR_ROLE_FAMILIES = frozenset({"player", "visualizer"})
+
+# Role family names that support stream/end.
+STREAM_END_ROLE_FAMILIES = frozenset({"player", "artwork", "visualizer"})
+
+
+# Server -> Client: stream/clear
+@dataclass
+class StreamClearPayload(SendspinModel):
+    """Instructs clients to clear buffers without ending the stream."""
+
+    server_transmitted: int = 0
+    """Timestamp the server transmitted this message in microseconds. Stamped at send."""
+    roles: list[str] | None = None
+    """Roles to clear: player, visualizer, or both. If omitted, clears both roles."""
+
+    def __post_init__(self) -> None:
+        """Validate role names. Permits known families and `_`-prefixed app roles."""
+        if self.roles is not None:
+            invalid_roles = {
+                role
+                for role in self.roles
+                if role not in STREAM_CLEAR_ROLE_FAMILIES and not role.startswith("_")
+            }
+            if invalid_roles:
+                supported = sorted(STREAM_CLEAR_ROLE_FAMILIES)
+                invalid = sorted(invalid_roles)
+                raise ValueError(
+                    f"stream/clear only supports roles {supported} or `_`-prefixed "
+                    f"application roles, got invalid roles: {invalid}"
+                )
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class StreamClearMessage(ServerMessage):
+    """Message sent by the server to clear stream buffers (e.g., for seek operations)."""
+
+    payload: StreamClearPayload
+    type: Literal["stream/clear"] = "stream/clear"
+
+
+# Client -> Server: stream/request-format
+@dataclass
+class StreamRequestFormatPayload(SendspinModel):
+    """Request different stream format (upgrade or downgrade)."""
+
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    player: StreamRequestFormatPlayer | None = None
+    """Pre-#195 player format request, superseded by the client/state player `format`."""
+    artwork: StreamRequestFormatArtwork | None = None
+    """Artwork format request (only for clients with artwork role)."""
+    # DEPRECATED(spec-pr-195): remove in aiosendspin <version>
+    visualizer: StreamRequestFormatVisualizer | None = None
+    """Pre-#195 visualizer format request, superseded by the client/state visualizer object."""
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class StreamRequestFormatMessage(ClientMessage):
+    """Message sent by the client to request different stream format."""
+
+    payload: StreamRequestFormatPayload
+    type: Literal["stream/request-format"] = "stream/request-format"
+
+
+# Server -> Client: stream/end
+@dataclass
+class StreamEndPayload(SendspinModel):
+    """Payload for stream/end message."""
+
+    roles: list[str] | None = None
+    """Roles to end streams for. If omitted, ends all active streams."""
+
+    def __post_init__(self) -> None:
+        """Validate role names. Permits known families and `_`-prefixed app roles."""
+        if self.roles is not None:
+            invalid_roles = {
+                role
+                for role in self.roles
+                if role not in STREAM_END_ROLE_FAMILIES and not role.startswith("_")
+            }
+            if invalid_roles:
+                supported = sorted(STREAM_END_ROLE_FAMILIES)
+                invalid = sorted(invalid_roles)
+                raise ValueError(
+                    f"stream/end only supports roles {supported} or `_`-prefixed "
+                    f"application roles, got invalid roles: {invalid}"
+                )
+
+    class Config(SendspinConfig):
+        """Config for parsing json messages."""
+
+        omit_none = True
+
+
+@dataclass
+class StreamEndMessage(ServerMessage):
+    """Message sent by the server to end a stream."""
+
+    payload: StreamEndPayload
+    type: Literal["stream/end"] = "stream/end"
