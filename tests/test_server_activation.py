@@ -126,10 +126,10 @@ class ActivationSectionTests(unittest.TestCase):
         self.assertIn("{&quot;a&quot;: 1}", section)
 
     def test_states_plainly_when_no_activate_was_sent(self) -> None:
-        section = _render_activation_section({"activation": None}, label="sendspin-go")
+        section = _render_activation_section({"activation": None}, label="sendspin-server-cpp")
 
         self.assertIn("No <span class='font-mono text-[13px]'>server/activate</span> observed", section)
-        self.assertIn("sendspin-go server sent no", section)
+        self.assertIn("sendspin-server-cpp server sent no", section)
 
     def test_summary_without_the_field_renders_no_section(self) -> None:
         self.assertEqual(_render_activation_section({"status": "error"}, label="aiosendspin"), "")

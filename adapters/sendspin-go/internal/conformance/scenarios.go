@@ -58,32 +58,3 @@ func BuildReadyPayload(scenarioID string, initiatorRole string, url string) map[
 	}
 	return payload
 }
-
-func ActiveRoles(scenarioID string, supported []string) []string {
-	families := map[string]bool{}
-	switch {
-	case IsPlayerScenario(scenarioID):
-		families["player"] = true
-		families["metadata"] = true
-	case IsMetadataScenario(scenarioID):
-		families["metadata"] = true
-	case IsControllerScenario(scenarioID):
-		families["controller"] = true
-	case IsArtworkScenario(scenarioID):
-		families["artwork"] = true
-	}
-
-	roles := make([]string, 0, len(supported))
-	seen := map[string]bool{}
-	for _, role := range supported {
-		family := role
-		if index := strings.Index(role, "@"); index > 0 {
-			family = role[:index]
-		}
-		if families[family] && !seen[family] {
-			roles = append(roles, role)
-			seen[family] = true
-		}
-	}
-	return roles
-}

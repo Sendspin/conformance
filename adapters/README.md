@@ -10,7 +10,7 @@ Current checked-in adapters:
 - `src/conformance/adapters/aiosendspin_server.py`: real Python server adapter
 - `src/conformance/adapters/aiosendspin_client.py`: real Python client adapter
 - `adapters/sendspin-dotnet/client/`: real `.NET` client adapter source for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios
-- `adapters/sendspin-go/`: real Go adapter source for the current client/server scenario set
+- `adapters/sendspin-go/`: real Go client adapter source for the current client scenario set
 - `adapters/SendspinKit/client/`: real Swift client adapter source for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios
 - `adapters/sendspin-js/client.mjs`: real Node.js client adapter for client-initiated PCM plus the server-initiated PCM, metadata, and controller scenarios, driving the public `SendspinCore` SDK over an adapter-owned WebSocket
 - `adapters/sendspin-cpp/client/`: real C++ client adapter source for the server-initiated metadata, artwork, and controller scenarios, built on the public `SendspinClient` API only. sendspin-cpp exposes no public hook for transported audio chunks, so the player scenarios report the negotiated stream and then fail with that reason instead of an audio hash. It takes part as a player in the protocol-baseline and `client-initiated-state-format-*` scenarios too, then fails naming the hook it lacks: sendspin-cpp has no public trace of the messages it exchanges, and no public way to set the `client/state` player `format`
@@ -167,11 +167,6 @@ Not judged, each for want of evidence or of a rule:
 - Whether `server_transmitted` was stamped as late as the spec requires. That needs the
   instant the frame left, which no summary carries.
 - Whether the client's time filter converged. That is client state no message reports.
-
-The sendspin-go server adapter answers `client/time` in its own code, so its
-`time_exchange` records a reply the adapter wrote, not one the sendspin-go library sent.
-It records that reply as the value it handed to the library's send queue, which has no
-hook on the write, and records no `other-sent` entries.
 
 The sendspin-server-cpp server adapter places each `server/time` and `other-sent` entry at
 the library's trace entry for that message, taken immediately before encryption, which is

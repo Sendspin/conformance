@@ -1,10 +1,9 @@
 """
 Coverage for the verdict on the ``client/time`` to ``server/time`` exchange.
 
-The aiosendspin server answers every ``client/time`` it reads, and every
-sendspin-go server case fails earlier on its missing ``server/activate``, so the
-published matrix never reaches a violation. The rule is exercised here against
-synthetic exchanges, and the recorder against stand-ins for the SDK transport.
+The aiosendspin server answers every ``client/time`` it reads, so it never
+commits a violation. The rule is exercised here against synthetic exchanges,
+and the recorder against stand-ins for the SDK transport.
 """
 
 from __future__ import annotations

@@ -2,9 +2,8 @@
 Coverage for the available gate on ``stream/start`` and the trace it is judged from.
 
 The aiosendspin server holds ``stream/start`` until the client reports available,
-and every sendspin-go server case fails earlier on its missing ``server/activate``,
-so the published matrix never reaches a violation. The rule is exercised here
-against synthetic traces, and the recorder against stand-ins for the SDK transport.
+so it never commits a violation. The rule is exercised here against synthetic
+traces, and the recorder against stand-ins for the SDK transport.
 """
 
 from __future__ import annotations

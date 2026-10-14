@@ -42,8 +42,8 @@ def normalized_format(value: Any) -> dict[str, Any] | None:
     """Return the audio format an adapter summary object describes, or None.
 
     Codecs are casefolded because they reach the summaries from independent
-    producers: aiosendspin serializes an enum value, while the Go server copies
-    the raw wire envelope through untouched.
+    producers: aiosendspin serializes an enum value, while other adapters copy
+    the codec from the wire untouched.
     """
     if not isinstance(value, dict):
         return None

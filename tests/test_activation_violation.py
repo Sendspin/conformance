@@ -1,10 +1,9 @@
 """
 Coverage for the verdict drawn from a server's recorded initial ``server/activate``.
 
-The sendspin-go server sends none in the published matrix and needs a Go
-toolchain to run, and no implementation puts an activity RC1 does not
-define on the wire today. The rule is therefore exercised here against
-synthetic summaries shaped like the ones the adapters really write.
+No implementation puts an activity RC1 does not define on the wire today,
+so the rule is exercised here against synthetic summaries shaped like the
+ones the adapters really write.
 """
 
 from __future__ import annotations

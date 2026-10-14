@@ -19,7 +19,7 @@ from conformance.models import CaseResult
 from conformance.runner import LaunchSpec, run_case
 from conformance.site import _display_status, _status_counts
 
-ADAPTER_WORDED_REASON = "sendspin-go server does not support server-initiated-pcm"
+ADAPTER_WORDED_REASON = "server adapter does not support scenario server-initiated-pcm"
 
 # Stand-ins for an adapter CLI: each writes the files named on its command line.
 FAILING_SERVER = """
@@ -149,7 +149,7 @@ class RunCaseUnsupportedTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_an_adapter_calling_itself_unsupported_is_a_failure(self) -> None:
         with mock.patch("conformance.runner._build_role_command", side_effect=self._launch):
-            result = await self._run("server-initiated-pcm", "sendspin-go", "aiosendspin")
+            result = await self._run("server-initiated-pcm", "sendspin-server-cpp", "aiosendspin")
 
         self.assertEqual(result.status, "failed")
         self.assertIn("does not support", result.reason)
