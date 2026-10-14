@@ -1,9 +1,9 @@
 """Coverage for the spec MUST that a negotiated format be one the client declared.
 
-The pairing that violates it in the published matrix (a sendspin-go server
-negotiating 24-bit FLAC to a sendspin-jvm client that offered only 16-bit) needs
-a Go toolchain and a JDK to reproduce, so the rule is exercised here against
-synthetic summaries shaped like the ones the adapters really write.
+Reproducing a violation end to end (for example a server negotiating 24-bit
+FLAC to a client that offered only 16-bit) needs real implementations and their
+toolchains, so the rule is exercised here against synthetic summaries shaped
+like the ones the adapters really write.
 """
 
 from __future__ import annotations
