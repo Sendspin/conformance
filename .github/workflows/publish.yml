@@ -72,10 +72,16 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
+      # 17 builds the sendspin-jvm adapter and 21 the android one. The last
+      # version listed becomes JAVA_HOME. The runner image already carries the
+      # Android SDK the android adapter's composite build configures against,
+      # with ANDROID_HOME set.
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: |
+            17
+            21
           distribution: 'temurin'
 
       - name: Show Swift version
@@ -96,7 +102,7 @@ jobs:
             --results-dir artifacts/results \
             --build-report-path artifacts/build-report.json \
             --from "aiosendspin,sendspin-server-cpp" \
-            --to "aiosendspin,sendspin-cpp,sendspin-dotnet,sendspin-js,sendspin-jvm,sendspin-rs,SendspinKit"
+            --to "aiosendspin,android,sendspin-cpp,sendspin-dotnet,sendspin-js,sendspin-jvm,sendspin-rs,SendspinKit"
 
       - name: Record harness outcome
         if: always()

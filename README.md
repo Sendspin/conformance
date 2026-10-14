@@ -23,6 +23,7 @@ Current scenarios:
 ## Current coverage
 
 - `aiosendspin`: real server adapter, including OPUS encoding, and real client adapter; the client SDK decodes PCM and FLAC only, so it does not advertise OPUS
+- `android`: real JVM client adapter for [SendspinDroid](https://github.com/chrisuthe/SendspinDroid), driving the app's Kotlin Multiplatform `:shared` protocol layer through a Gradle composite build, for client-initiated PCM and `client-initiated-state-format-pcm`. Its `client/hello` is the app's own `MessageBuilder.buildSupportedFormats` output for an API 31+ device: 48 kHz stereo and mono PCM at 32, 24 and 16 bits, behind the one preferred compressed codec. It takes part in `client-initiated-state-format-flac` as a player but then fails it: the app lists its preferred codec ahead of PCM, so it cannot advertise the PCM-then-FLAC order the scenario starts from. FLAC and OPUS are decoded only by Android MediaCodec, so decoded audio is not judged for them. Building it needs JDK 21 and an Android SDK (`ANDROID_HOME`), because SendspinDroid's Gradle settings include its Android modules; server placeholder
 - `sendspin-dotnet`: real client adapter for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios; server placeholder
 - `SendspinKit`: real Swift client adapter for client-initiated PCM, Flac, and Opus plus the server-initiated PCM, Flac, Opus, metadata, artwork, and controller scenarios; server placeholer
 - `sendspin-cpp`: real C++ client adapter for client-initiated PCM plus the server-initiated PCM, 24-bit PCM, metadata, artwork, controller, FLAC, OPUS, legacy-unencrypted, protocol-baseline and audio-chunk-framing scenarios, evidenced from the library's message trace; it joins the `client-initiated-state-format-*` scenarios as a player but fails them, since the library exposes no way to set the `client/state` player `format`; server placeholder
@@ -75,7 +76,8 @@ That flow:
 
 To run against a checkout somewhere else, set `CONFORMANCE_REPO_<NAME>` to its
 absolute path, with the repository name upper-cased and `-` written as `_` (for
-example `CONFORMANCE_REPO_SENDSPIN_CLI`). A non-empty value must point at an
+example `CONFORMANCE_REPO_SENDSPIN_CLI`, or `CONFORMANCE_REPO_SENDSPINDROID` for
+the `android` implementation). A non-empty value must point at an
 existing path: the harness stops at startup rather than fall back to `repos/<name>`.
 An empty value counts as unset.
 

@@ -274,12 +274,24 @@ def _swift_build_result() -> BuildResult:
     )
 
 
-def _gradle_build_result() -> BuildResult:
+def _gradle_build_result(
+    *,
+    adapter: str,
+    adapter_dir: str,
+    repo_dirname: str,
+    gradle_root: str = "",
+) -> BuildResult:
+    """
+    Build a Gradle adapter's fat jar with the Gradle wrapper of the repository it builds against.
+
+    `gradle_root` is the directory of that repository holding `gradlew`. The
+    adapter's `jar` task must write `build/libs/conformance-client.jar`.
+    """
     try:
-        repo = ensure_repo_checkout("sendspin-jvm")
+        repo = ensure_repo_checkout(repo_dirname)
     except FileNotFoundError as err:
         return {
-            "adapter": "sendspin-jvm-client",
+            "adapter": adapter,
             "status": "failed",
             "detail": str(err),
         }
@@ -287,23 +299,24 @@ def _gradle_build_result() -> BuildResult:
     java = find_java()
     if java is None:
         return {
-            "adapter": "sendspin-jvm-client",
+            "adapter": adapter,
             "status": "failed",
             "detail": "java executable is not available",
         }
 
-    gradlew = repo / ("gradlew.bat" if os.name == "nt" else "gradlew")
-    adapter_dir = repo_root() / "adapters" / "sendspin-jvm" / "client"
-    jar = adapter_dir / "build" / "libs" / "conformance-client.jar"
+    gradle_dir = repo / gradle_root
+    gradlew = gradle_dir / ("gradlew.bat" if os.name == "nt" else "gradlew")
+    adapter_root = repo_root() / adapter_dir
+    jar = adapter_root / "build" / "libs" / "conformance-client.jar"
     completed = _run_command(
-        [str(gradlew), "--project-dir", str(adapter_dir), "jar"],
-        cwd=repo,
+        [str(gradlew), "--project-dir", str(adapter_root), "jar"],
+        cwd=gradle_dir,
     )
     runtime_command_prefix = None
     if completed.returncode == 0 and jar.exists():
         runtime_command_prefix = [java, "-jar", str(jar)]
     return _built_result(
-        adapter="sendspin-jvm-client",
+        adapter=adapter,
         completed=completed,
         runtime_command_prefix=runtime_command_prefix,
     )
@@ -373,7 +386,23 @@ def build_adapters(report_path: Path | None = None) -> list[BuildResult]:
 def _build_plan() -> BuildPlan:
     return (
         ("python-adapters", _python_build_result),
-        ("sendspin-jvm-client", _gradle_build_result),
+        (
+            "sendspin-jvm-client",
+            lambda: _gradle_build_result(
+                adapter="sendspin-jvm-client",
+                adapter_dir="adapters/sendspin-jvm/client",
+                repo_dirname="sendspin-jvm",
+            ),
+        ),
+        (
+            "android-client",
+            lambda: _gradle_build_result(
+                adapter="android-client",
+                adapter_dir="adapters/android/client",
+                repo_dirname="SendspinDroid",
+                gradle_root="android",
+            ),
+        ),
         ("sendspin-dotnet-client", _dotnet_build_result),
         ("sendspin-rs-client", _cargo_build_result),
         ("SendspinKit-client", _swift_build_result),

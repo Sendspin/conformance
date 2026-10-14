@@ -17,5 +17,7 @@ adapters/**/bin/
 adapters/**/obj/
 adapters/**/.build/
 adapters/**/target/
+adapters/**/.gradle/
+adapters/**/.kotlin/
 adapters/**/node_modules/
 .DS_Store

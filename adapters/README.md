@@ -9,6 +9,7 @@ Current checked-in adapters:
 
 - `src/conformance/adapters/aiosendspin_server.py`: real Python server adapter
 - `src/conformance/adapters/aiosendspin_client.py`: real Python client adapter
+- `adapters/android/client/`: real Kotlin/JVM client adapter source for SendspinDroid, covering client-initiated PCM and `client-initiated-state-format-pcm`, launched through `src/conformance/adapters/android_client.py`. It is a Gradle composite build that includes `repos/SendspinDroid/android` and depends on the JVM target of its `:shared` module, and it runs on the app's own handshake driver, Noise wire codec, `MessageBuilder` and `MessageParser`. Its `client/hello` formats come from `MessageBuilder.buildSupportedFormats`, never a hand-written list, and its evidence comes from each frame as the codec decrypted it. Its PCM hash is computed from those frames; FLAC and OPUS are not decoded, so their decoded audio is not judged. It takes part as a player in `client-initiated-state-format-flac` too, then fails: SendspinDroid lists its preferred codec ahead of PCM, so it cannot advertise the PCM-then-FLAC order the scenario starts from
 - `adapters/sendspin-dotnet/client/`: real `.NET` client adapter source for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios
 - `adapters/sendspin-go/`: Go client adapter source, kept but not currently built or tested
 - `adapters/SendspinKit/client/`: real Swift client adapter source for client-initiated PCM plus the server-initiated PCM, metadata, artwork, controller, and FLAC scenarios

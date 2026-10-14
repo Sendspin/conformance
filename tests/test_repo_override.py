@@ -107,7 +107,11 @@ class RepoOverrideTests(unittest.TestCase):
     def test_a_build_step_does_not_report_it_as_a_failed_build(self) -> None:
         os.environ["CONFORMANCE_REPO_SENDSPIN_JVM"] = str(self.root / "missing" / "jvm")
         with self.assertRaises(RepoOverrideError):
-            build._gradle_build_result()
+            build._gradle_build_result(
+                adapter="sendspin-jvm-client",
+                adapter_dir="adapters/sendspin-jvm/client",
+                repo_dirname="sendspin-jvm",
+            )
 
     def test_the_cli_stops_before_building_or_running(self) -> None:
         os.environ["CONFORMANCE_REPO_SPEC"] = str(self.missing)

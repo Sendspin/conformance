@@ -236,6 +236,7 @@ remote, so any such list goes stale on the next merge.
 
 - `src/conformance/adapters/aiosendspin_server.py`: real Python server adapter
 - `src/conformance/adapters/aiosendspin_client.py`: real Python client adapter
+- `adapters/android/client/`: real Kotlin/JVM client adapter source for SendspinDroid, built against `repos/SendspinDroid` as a Gradle composite build
 - `adapters/sendspin-dotnet/client/`: real `.NET` client adapter source
 - `adapters/sendspin-go/`: Go client adapter source, kept but not currently built or tested
 - `adapters/SendspinKit/client/`: real Swift client adapter source with an adapter-owned inbound WebSocket listener for server-initiated scenarios
