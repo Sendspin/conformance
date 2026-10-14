@@ -8,6 +8,7 @@ on:
       - "src/**"
       - "tests/**"
       - "scripts/**"
+      - "patches/**"
       - "pyproject.toml"
       - ".github/workflows/ci.yml"
   pull_request:
@@ -37,6 +38,11 @@ jobs:
 
       - name: Install package
         run: uv sync
+
+      # Fails when src/conformance/_vendor/ was edited by hand or a patch in
+      # patches/aiosendspin/ no longer produces the committed tree.
+      - name: Check bundled aiosendspin matches a rebuild
+        run: uv run python scripts/vendor_aiosendspin.py --check
 
       - name: Run unit tests
         run: uv run python -m unittest discover -s tests

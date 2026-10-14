@@ -1,0 +1,665 @@
+"""Async driver for the cleartext init exchange and KKpsk2 handshake."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
+from dataclasses import dataclass, field
+from typing import Final, Protocol, cast
+
+import orjson
+from aiohttp import WSMessage, WSMsgType
+from noise.exceptions import (
+    NoiseHandshakeError,
+    NoiseInvalidMessage,
+    NoiseValueError,
+)
+
+from conformance._vendor.aiosendspin.models.types import ServerErrorReason
+from conformance._vendor.aiosendspin.util import _peek_message_type
+
+from .constants import (
+    ERROR_TYPE_SERVER,
+    HANDSHAKE_TYPE,
+    INIT_TYPE_CLIENT,
+    PROTOCOL_VERSION,
+    SENTINEL_PSK,
+)
+from .keys import (
+    PEER_ID_SIZE,
+    X25519_KEY_SIZE,
+    Identity,
+    b64url_decode,
+    b64url_encode,
+    psk_id_for,
+)
+from .models import (
+    ClientInitMessage,
+    ClientInitPayload,
+    NoiseHandshakeMessage,
+    NoiseHandshakePayload,
+    NoiseMsg1Payload,
+    NoiseMsg2Payload,
+    ServerErrorMessage,
+    ServerErrorPayload,
+    ServerInitMessage,
+    ServerInitPayload,
+)
+from .session import NoiseCipherSuite, NoiseSession
+from .trust_store import PskCategory, ResolvedPsk
+from .wire import EncryptedWebSocket, RawWebSocket
+
+# Per-message timeout during cleartext init and Noise handshake.
+DEFAULT_HANDSHAKE_TIMEOUT_S: Final[float] = 30.0
+
+# Client callback: given a psk_id, return the matching PSK record, or None.
+PskResolver = Callable[[str, "PskCategory"], Awaitable[ResolvedPsk | None]]
+
+# Server callback: given a client_id, return a PSK to admit it, or None.
+PskProvider = Callable[[str], Awaitable[ResolvedPsk | None]]
+
+
+class HandshakeWebSocket(RawWebSocket, Protocol):
+    """WS surface needed by the handshake driver (extends ``RawWebSocket``)."""
+
+    async def send_str(self, data: str) -> None:
+        """Send a text WebSocket frame."""
+
+
+class HandshakeAbortedError(Exception):
+    """Raised when the Noise handshake cannot complete.
+
+    The caller is expected to close the underlying WebSocket without sending
+    any application-level error message.
+    """
+
+
+class InitRejectedError(HandshakeAbortedError):
+    """Raised when a ``client/init`` is rejected with ``server/error``.
+
+    The server raises it after sending ``server/error``; the client raises it on
+    receiving one. On the client, ``reason`` is ``None`` when the server sent a
+    reason this implementation does not know.
+    """
+
+    def __init__(self, reason: ServerErrorReason | None, detail: str) -> None:
+        """Initialize with the rejection reason and a human-readable detail."""
+        super().__init__(detail)
+        self.reason = reason
+
+
+class HandshakeNoncomplianceError(HandshakeAbortedError):
+    """Raised when a strict server rejects a client spec violation during the handshake."""
+
+
+@dataclass(frozen=True, slots=True)
+class HandshakeResult:
+    """Outcome of a successful Noise handshake."""
+
+    encrypted_ws: EncryptedWebSocket
+    """Transport-mode wrapper for all subsequent application I/O."""
+    peer_id: str
+    """``client_id`` on the server side, ``server_id`` on the client side."""
+    suite: NoiseCipherSuite
+    """The negotiated cipher suite."""
+    psk: ResolvedPsk
+    """The PSK that admitted the connection, with its trust metadata."""
+    handshake_hash: bytes
+    """The Noise handshake hash ``h`` for the completed handshake."""
+    credential_mismatch: bool = False
+    """Whether the peer could not use the PSK message 1 referenced, and the Sentinel
+    admitted the session instead. An authenticated signal, not grounds to drop a record."""
+    noncompliance: tuple[str, ...] = ()
+    """Client spec violations the server tolerated because it ran without ``strict``."""
+
+
+@dataclass(slots=True)
+class _ServerCompliance:
+    """Rejects a client spec violation under ``strict``, otherwise records it."""
+
+    strict: bool
+    tolerated: list[str] = field(default_factory=list)
+
+    def flag_noncompliance(self, reason: str) -> None:
+        if self.strict:
+            raise HandshakeNoncomplianceError(reason)
+        self.tolerated.append(reason)
+
+
+async def run_handshake_server(
+    ws: HandshakeWebSocket,
+    *,
+    local_identity: Identity,
+    psk_provider: PskProvider,
+    expected_client_id: str | None = None,
+    client_init_text: str | None = None,
+    timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
+    strict: bool = False,
+) -> HandshakeResult:
+    """Run the server-side (Noise initiator) handshake, rejecting spec violations if ``strict``."""
+    compliance = _ServerCompliance(strict)
+    if client_init_text is None:
+        client_init_text = await receive_client_init_frame(ws, timeout_s=timeout_s)
+    try:
+        client_id, suite, client_static_pub = _parse_client_init(client_init_text)
+    except InitRejectedError as exc:
+        if exc.reason is not None:
+            await _send_server_error(ws, exc.reason)
+        raise
+    if b64url_encode(client_static_pub) != client_id:
+        if strict:
+            await _send_server_error(ws, ServerErrorReason.MALFORMED)
+        compliance.flag_noncompliance("client/init client_id is not canonical base64url")
+    if expected_client_id is not None and client_id != expected_client_id:
+        raise HandshakeAbortedError(
+            f"client_id mismatch: expected {expected_client_id!r}, got {client_id!r}",
+        )
+
+    # Resolve the PSK and build message 1 *before* sending anything, so
+    # server/init and noise/handshake go out back-to-back, and so a client
+    # we won't admit is rejected without ever seeing server/init.
+    resolved = await psk_provider(client_id)
+    if resolved is None:
+        raise HandshakeAbortedError(f"no PSK admits client_id={client_id!r}")
+
+    server_init_text = ServerInitMessage(
+        payload=ServerInitPayload(
+            server_id=local_identity.peer_id,
+            version=PROTOCOL_VERSION,
+        ),
+    ).to_json()
+    prologue = client_init_text.encode("utf-8") + server_init_text.encode("utf-8")
+    session = NoiseSession.as_initiator(
+        suite=suite,
+        local_static_priv=local_identity.private_bytes,
+        remote_static_pub=client_static_pub,
+        prologue=prologue,
+        psk=resolved.psk,
+    )
+    # server/init immediately followed by Noise message 1 (spec: no client
+    # message is awaited in between).
+    await ws.send_str(server_init_text)
+    session, credential_mismatch = await _exchange_as_initiator(
+        ws,
+        session=session,
+        psk=resolved,
+        compliance=compliance,
+        timeout_s=timeout_s,
+        allow_sentinel_fallback=True,
+    )
+    if credential_mismatch:
+        # The client answered under the Sentinel, so that is what keys this session.
+        resolved = _sentinel_psk()
+
+    return HandshakeResult(
+        encrypted_ws=EncryptedWebSocket(ws, session),
+        peer_id=client_id,
+        suite=suite,
+        psk=resolved,
+        handshake_hash=session.handshake_hash,
+        credential_mismatch=credential_mismatch,
+        noncompliance=tuple(compliance.tolerated),
+    )
+
+
+async def run_handshake_client(
+    ws: HandshakeWebSocket,
+    *,
+    local_identity: Identity,
+    suite: NoiseCipherSuite,
+    psk_resolver: PskResolver,
+    expected_server_id: str | None = None,
+    timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
+) -> HandshakeResult:
+    """Run the client-side (Noise responder) handshake."""
+    client_init_text = ClientInitMessage(
+        payload=ClientInitPayload(
+            client_id=local_identity.peer_id,
+            version=PROTOCOL_VERSION,
+            suite=suite.value,
+        ),
+    ).to_json()
+    await ws.send_str(client_init_text)
+
+    server_init_text = await receive_text_frame(ws, what="server/init", timeout_s=timeout_s)
+    server_init = _parse_server_init(server_init_text)
+    server_id = server_init.payload.server_id
+    if expected_server_id is not None and server_id != expected_server_id:
+        raise HandshakeAbortedError(
+            f"server_id mismatch: expected {expected_server_id!r}, got {server_id!r}",
+        )
+    server_static_pub = _peer_pub_bytes(server_id, "server_id")
+
+    prologue = client_init_text.encode("utf-8") + server_init_text.encode("utf-8")
+    session = NoiseSession.as_responder(
+        suite=suite,
+        local_static_priv=local_identity.private_bytes,
+        remote_static_pub=server_static_pub,
+        prologue=prologue,
+    )
+
+    resolved, credential_mismatch = await _exchange_as_responder(
+        ws,
+        session=session,
+        psk_resolver=psk_resolver,
+        expected_peer_id=server_id,
+        timeout_s=timeout_s,
+        allow_sentinel_fallback=True,
+    )
+
+    return HandshakeResult(
+        encrypted_ws=EncryptedWebSocket(ws, session),
+        peer_id=server_id,
+        suite=suite,
+        psk=resolved,
+        handshake_hash=session.handshake_hash,
+        credential_mismatch=credential_mismatch,
+    )
+
+
+async def run_rehandshake_server(
+    enc_ws: EncryptedWebSocket,
+    *,
+    local_identity: Identity,
+    client_id: str,
+    suite: NoiseCipherSuite,
+    prologue: bytes,
+    psk: ResolvedPsk,
+    timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
+    strict: bool = False,
+) -> HandshakeResult:
+    """Re-run the handshake as initiator over ``enc_ws`` and swap to ``psk``."""
+    compliance = _ServerCompliance(strict)
+    client_static_pub = _peer_pub_bytes(client_id, "client_id")
+    session = NoiseSession.as_initiator(
+        suite=suite,
+        local_static_priv=local_identity.private_bytes,
+        remote_static_pub=client_static_pub,
+        prologue=prologue,
+        psk=psk.psk,
+    )
+    session, _ = await _exchange_as_initiator(
+        enc_ws,
+        session=session,
+        psk=psk,
+        compliance=compliance,
+        timeout_s=timeout_s,
+        discard_old_key_messages=True,
+    )
+    enc_ws.swap_session(session)
+    return HandshakeResult(
+        encrypted_ws=enc_ws,
+        peer_id=client_id,
+        suite=suite,
+        psk=psk,
+        handshake_hash=session.handshake_hash,
+        noncompliance=tuple(compliance.tolerated),
+    )
+
+
+async def run_rehandshake_client(
+    enc_ws: EncryptedWebSocket,
+    *,
+    local_identity: Identity,
+    server_id: str,
+    suite: NoiseCipherSuite,
+    prologue: bytes,
+    psk_resolver: PskResolver,
+    hs1_text: str | None = None,
+    timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
+) -> HandshakeResult:
+    """Re-run the handshake as responder over ``enc_ws`` and swap to the resolved PSK."""
+    server_static_pub = _peer_pub_bytes(server_id, "server_id")
+    session = NoiseSession.as_responder(
+        suite=suite,
+        local_static_priv=local_identity.private_bytes,
+        remote_static_pub=server_static_pub,
+        prologue=prologue,
+    )
+    resolved, _ = await _exchange_as_responder(
+        enc_ws,
+        session=session,
+        psk_resolver=psk_resolver,
+        expected_peer_id=server_id,
+        timeout_s=timeout_s,
+        hs1_text=hs1_text,
+    )
+    enc_ws.swap_session(session)
+    return HandshakeResult(
+        encrypted_ws=enc_ws,
+        peer_id=server_id,
+        suite=suite,
+        psk=resolved,
+        handshake_hash=session.handshake_hash,
+    )
+
+
+# --- private helpers -----------------------------------------------------
+
+
+async def receive_text_frame(
+    ws: HandshakeWebSocket,
+    *,
+    what: str,
+    timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
+) -> str:
+    """Receive one TEXT frame within ``timeout_s``, or abort the handshake."""
+    msg = await _receive_frame(ws, what=what, timeout_s=timeout_s)
+    if msg.type is not WSMsgType.TEXT:
+        raise HandshakeAbortedError(f"expected {what} (TEXT), got {msg.type.name}")
+    return cast("str", msg.data)
+
+
+async def receive_client_init_frame(
+    ws: HandshakeWebSocket,
+    *,
+    timeout_s: float = DEFAULT_HANDSHAKE_TIMEOUT_S,
+) -> str:
+    """Receive the ``client/init`` TEXT frame, answering a BINARY one with ``server/error``."""
+    msg = await _receive_frame(ws, what="client/init", timeout_s=timeout_s)
+    if msg.type is WSMsgType.BINARY:
+        await _send_server_error(ws, ServerErrorReason.MALFORMED)
+        raise InitRejectedError(ServerErrorReason.MALFORMED, "malformed client/init: BINARY frame")
+    if msg.type is not WSMsgType.TEXT:
+        raise HandshakeAbortedError(f"expected client/init (TEXT), got {msg.type.name}")
+    return cast("str", msg.data)
+
+
+async def _receive_frame(ws: HandshakeWebSocket, *, what: str, timeout_s: float) -> WSMessage:
+    try:
+        async with asyncio.timeout(timeout_s):
+            return await ws.receive()
+    except TimeoutError as exc:
+        raise HandshakeAbortedError(f"timed out awaiting {what}") from exc
+
+
+async def _receive_handshake_discarding_application(
+    ws: HandshakeWebSocket,
+    *,
+    what: str,
+    timeout_s: float,
+) -> str:
+    """Receive the next ``noise/handshake`` TEXT frame within ``timeout_s``, or abort.
+
+    BINARY frames and application TEXT messages before it are discarded; a TEXT frame
+    that is not a typed JSON object aborts, as does any other frame type.
+    """
+    try:
+        async with asyncio.timeout(timeout_s):
+            while True:
+                msg = await ws.receive()
+                if msg.type is WSMsgType.BINARY:
+                    continue
+                if msg.type is not WSMsgType.TEXT:
+                    raise HandshakeAbortedError(f"expected {what} (TEXT), got {msg.type.name}")
+                text = cast("str", msg.data)
+                message_type = _peek_message_type(text)
+                if message_type is None:
+                    raise HandshakeAbortedError(f"malformed message while awaiting {what}")
+                if message_type == HANDSHAKE_TYPE:
+                    return text
+    except TimeoutError as exc:
+        raise HandshakeAbortedError(f"timed out awaiting {what}") from exc
+
+
+async def _exchange_as_initiator(
+    transport: HandshakeWebSocket,
+    *,
+    session: NoiseSession,
+    psk: ResolvedPsk,
+    compliance: _ServerCompliance,
+    timeout_s: float,
+    allow_sentinel_fallback: bool = False,
+    discard_old_key_messages: bool = False,
+) -> tuple[NoiseSession, bool]:
+    """Exchange the two ``noise/handshake`` messages as the initiator (server).
+
+    Returns the session that verified message 2 and whether the Sentinel admitted it
+    after the referenced PSK failed. That session may be a fork of the one passed in,
+    which is spent once its read fails and must not be reused.
+
+    With ``discard_old_key_messages``, application messages the peer sent before it
+    received message 1 are dropped while awaiting message 2.
+    """
+    msg1 = NoiseMsg1Payload(psk_id=psk.psk_id, psk_category=psk.category.code)
+    msg1_pt = msg1.to_json().encode("utf-8")
+    msg1_ct = session.write_message(msg1_pt)
+    await transport.send_str(_pack_handshake(msg1_ct))
+    if discard_old_key_messages:
+        hs2_text = await _receive_handshake_discarding_application(
+            transport, what="Noise message 2", timeout_s=timeout_s
+        )
+    else:
+        hs2_text = await receive_text_frame(transport, what="Noise message 2", timeout_s=timeout_s)
+    sentinel_admitted = False
+    try:
+        msg2_pt = _read_handshake_message(session, hs2_text, "Noise message 2", compliance)
+    except _HandshakeAuthenticationError:
+        if not allow_sentinel_fallback or psk.category is PskCategory.SENTINEL:
+            raise
+        # The peer could not use the PSK we referenced. A message 2 that verifies under
+        # the Sentinel is authenticated, so it tells us the holder of that static key
+        # lost the credential rather than that anyone forged one.
+        session = session.fork_at_message_2(SENTINEL_PSK)
+        msg2_pt = _read_handshake_message(session, hs2_text, "Noise message 2")
+        sentinel_admitted = True
+    _validate_msg2_payload(msg2_pt, compliance)
+    return session, sentinel_admitted
+
+
+async def _exchange_as_responder(
+    transport: HandshakeWebSocket,
+    *,
+    session: NoiseSession,
+    psk_resolver: PskResolver,
+    expected_peer_id: str,
+    timeout_s: float,
+    hs1_text: str | None = None,
+    allow_sentinel_fallback: bool = False,
+) -> tuple[ResolvedPsk, bool]:
+    """Exchange the two ``noise/handshake`` messages as the responder (client).
+
+    Returns the PSK that keyed the session and whether it is the Sentinel standing in
+    for a credential this client could not resolve.
+    """
+    hs1_text = (
+        hs1_text
+        if hs1_text is not None
+        else await receive_text_frame(transport, what="Noise message 1", timeout_s=timeout_s)
+    )
+    msg1_pt = _read_handshake_message(session, hs1_text, "Noise message 1")
+    msg1_obj = _parse_msg1_payload(msg1_pt)
+
+    declared = PskCategory.from_code(msg1_obj.psk_category)
+    if declared is None:
+        raise HandshakeAbortedError(
+            f"malformed Noise message 1 payload: unknown psk_category {msg1_obj.psk_category!r}",
+        )
+    credential_mismatch = False
+    resolved = await psk_resolver(msg1_obj.psk_id, declared)
+    if resolved is None:
+        if not allow_sentinel_fallback:
+            raise HandshakeAbortedError(f"no PSK matches psk_id={msg1_obj.psk_id!r}")
+        # The server referenced a credential this client cannot use — a lost record, an
+        # interrupted finalize, an eviction. Answer under the Sentinel so the session can
+        # carry a re-pairing instead of dying here.
+        resolved = _sentinel_psk()
+        credential_mismatch = True
+    # Stored-pubkey post-match check: the record's bound server_id must be the
+    # server we actually reached. A misbinding is not a miss, and never falls back.
+    if resolved.category is PskCategory.LONG_TERM and resolved.counterparty_id != expected_peer_id:
+        raise HandshakeAbortedError(
+            f"PSK bound to server_id {resolved.counterparty_id!r}, "
+            f"but connected to {expected_peer_id!r}",
+        )
+    session.mix_psk(resolved.psk)
+
+    msg2_pt = NoiseMsg2Payload().to_json().encode("utf-8")
+    msg2_ct = session.write_message(msg2_pt)
+    await transport.send_str(_pack_handshake(msg2_ct))
+    return resolved, credential_mismatch
+
+
+def _parse_client_init(text: str) -> tuple[str, NoiseCipherSuite, bytes]:
+    """Return ``client_id``, suite and client static key from a ``client/init``.
+
+    Checks run in spec order (envelope, version, suite, remaining fields) on the raw
+    JSON, so the first failure decides the ``InitRejectedError`` reason.
+    """
+    malformed = ServerErrorReason.MALFORMED
+    try:
+        decoded = orjson.loads(text)
+    except orjson.JSONDecodeError as exc:
+        raise InitRejectedError(malformed, f"malformed client/init: {exc}") from exc
+    payload = decoded.get("payload") if isinstance(decoded, dict) else None
+    if not isinstance(payload, dict) or decoded.get("type") != INIT_TYPE_CLIENT:
+        raise InitRejectedError(malformed, "malformed client/init: not a client/init envelope")
+    version = payload.get("version")
+    if type(version) is float:
+        # orjson turns integers beyond 64 bits into floats. Reparse with json for completeness,
+        # so even those versions get unsupported_version.
+        version = json.loads(text)["payload"]["version"]
+    # type() rather than isinstance(): a JSON true must not pass as version 1.
+    if type(version) is not int:
+        raise InitRejectedError(malformed, f"malformed client/init version {version!r}")
+    if version != PROTOCOL_VERSION:
+        raise InitRejectedError(
+            ServerErrorReason.UNSUPPORTED_VERSION, f"unsupported protocol version {version}"
+        )
+    suite_name = payload.get("suite")
+    if not isinstance(suite_name, str):
+        raise InitRejectedError(malformed, f"malformed client/init suite {suite_name!r}")
+    try:
+        suite = NoiseCipherSuite(suite_name)
+    except ValueError as exc:
+        raise InitRejectedError(
+            ServerErrorReason.UNSUPPORTED_SUITE, f"unsupported suite {suite_name!r}"
+        ) from exc
+    client_id = payload.get("client_id")
+    if not isinstance(client_id, str):
+        raise InitRejectedError(malformed, f"malformed client/init client_id {client_id!r}")
+    try:
+        client_static_pub = _peer_pub_bytes(client_id, "client_id")
+    except HandshakeAbortedError as exc:
+        raise InitRejectedError(malformed, str(exc)) from exc
+    return client_id, suite, client_static_pub
+
+
+def _parse_server_init(text: str) -> ServerInitMessage:
+    """Parse ``server/init``, raising ``InitRejectedError`` if ``server/error`` came instead."""
+    try:
+        decoded = orjson.loads(text)
+    except orjson.JSONDecodeError as exc:
+        raise HandshakeAbortedError(f"malformed server/init: {exc}") from exc
+    if isinstance(decoded, dict) and decoded.get("type") == ERROR_TYPE_SERVER:
+        raise _server_error_rejection(decoded.get("payload"))
+    try:
+        msg = ServerInitMessage.from_dict(decoded)
+    except Exception as exc:
+        raise HandshakeAbortedError(f"malformed server/init: {exc}") from exc
+    if msg.type != "server/init":
+        raise HandshakeAbortedError(f"expected server/init, got {msg.type!r}")
+    # The parsed model coerces the version, so check the raw value.
+    version = decoded["payload"]["version"]
+    if type(version) is not int:
+        raise HandshakeAbortedError(f"malformed server/init version {version!r}")
+    if version != PROTOCOL_VERSION:
+        raise HandshakeAbortedError(f"unsupported protocol version {version}")
+    return msg
+
+
+async def _send_server_error(ws: HandshakeWebSocket, reason: ServerErrorReason) -> None:
+    error = ServerErrorMessage(payload=ServerErrorPayload(reason=reason))
+    # A peer that already dropped must not mask the rejection.
+    with suppress(ConnectionError):
+        await ws.send_str(error.to_json())
+
+
+def _server_error_rejection(payload: object) -> InitRejectedError:
+    """Build the client-side rejection for a received ``server/error`` payload."""
+    raw_reason = payload.get("reason") if isinstance(payload, dict) else None
+    try:
+        reason: ServerErrorReason | None = ServerErrorReason(raw_reason)
+    except ValueError:
+        reason = None
+    return InitRejectedError(reason, f"server rejected client/init: {raw_reason!r}")
+
+
+def _read_handshake_message(
+    session: NoiseSession, text: str, what: str, compliance: _ServerCompliance | None = None
+) -> bytes:
+    """Parse a ``noise/handshake`` frame and decrypt it through ``session``."""
+    try:
+        hs = NoiseHandshakeMessage.from_json(text)
+    except Exception as exc:
+        raise HandshakeAbortedError(f"malformed noise/handshake ({what}): {exc}") from exc
+    if hs.type != "noise/handshake":
+        raise HandshakeAbortedError(f"expected noise/handshake, got {hs.type!r}")
+    try:
+        ciphertext = b64url_decode(hs.payload.data)  # binascii.Error subclasses ValueError
+    except ValueError as exc:
+        raise HandshakeAbortedError(f"malformed {what} payload encoding") from exc
+    if compliance is not None and b64url_encode(ciphertext) != hs.payload.data:
+        compliance.flag_noncompliance(f"{what} data is not canonical base64url")
+    try:
+        return session.read_message(ciphertext)
+    except (NoiseInvalidMessage, NoiseHandshakeError, NoiseValueError) as exc:
+        raise _HandshakeAuthenticationError(f"{what} failed Noise authentication") from exc
+
+
+class _HandshakeAuthenticationError(HandshakeAbortedError):
+    """A handshake message failed to authenticate under the PSK in use.
+
+    Separated from the malformed-frame aborts, which say nothing about the credential and
+    so must never reach the Sentinel fallback. Ciphertext that merely fails to decrypt is
+    indistinguishable from a wrong PSK and still costs one rebuild, which is bounded at
+    one per connection.
+    """
+
+
+def _sentinel_psk() -> ResolvedPsk:
+    """Return the Sentinel PSK as a resolved credential."""
+    return ResolvedPsk(psk_id_for(SENTINEL_PSK), SENTINEL_PSK, PskCategory.SENTINEL)
+
+
+def _parse_msg1_payload(plaintext: bytes) -> NoiseMsg1Payload:
+    """Parse the decrypted Noise-message-1 payload, wrapping malformed input."""
+    try:
+        return NoiseMsg1Payload.from_json(plaintext.decode("utf-8"))
+    except Exception as exc:
+        raise HandshakeAbortedError(f"malformed Noise message 1 payload: {exc}") from exc
+
+
+def _pack_handshake(noise_bytes: bytes) -> str:
+    return NoiseHandshakeMessage(
+        payload=NoiseHandshakePayload(data=b64url_encode(noise_bytes)),
+    ).to_json()
+
+
+def _peer_pub_bytes(peer_id: str, what: str) -> bytes:
+    if len(peer_id) != PEER_ID_SIZE:
+        raise HandshakeAbortedError(
+            f"invalid {what} length: {len(peer_id)} (expected {PEER_ID_SIZE})",
+        )
+    try:
+        decoded = b64url_decode(peer_id)
+    except Exception as exc:
+        raise HandshakeAbortedError(f"invalid {what} encoding") from exc
+    if len(decoded) != X25519_KEY_SIZE:
+        raise HandshakeAbortedError(
+            f"invalid {what}: decoded to {len(decoded)} bytes (expected {X25519_KEY_SIZE})",
+        )
+    return decoded
+
+
+def _validate_msg2_payload(payload: bytes, compliance: _ServerCompliance) -> None:
+    """Validate Noise message 2's plaintext payload (an empty object ``{}``)."""
+    try:
+        NoiseMsg2Payload.from_json(payload.decode("utf-8"))
+    except Exception as exc:
+        raise HandshakeAbortedError(f"malformed Noise message 2 payload: {exc}") from exc
+    # DEPRECATED(spec-pr-122): remove in aiosendspin <version>
+    if payload != b"{}":
+        compliance.flag_noncompliance("Noise message 2 payload is not the literal bytes {}")

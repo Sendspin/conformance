@@ -1,0 +1,27 @@
+"""Visualizer role - client and group level."""
+
+from conformance._vendor.aiosendspin.models.visualizer import ClientHelloVisualizerSupport
+from conformance._vendor.aiosendspin.server.roles.registry import (
+    RoleSupportSpec,
+    register_group_role,
+    register_role,
+    register_role_support_spec,
+)
+from conformance._vendor.aiosendspin.server.roles.visualizer.group import VisualizerGroupRole
+from conformance._vendor.aiosendspin.server.roles.visualizer.types import VisualizerRoleProtocol
+from conformance._vendor.aiosendspin.server.roles.visualizer.v1 import VisualizerV1Role
+
+register_group_role("visualizer", VisualizerGroupRole)
+register_role("visualizer@v1", lambda client: VisualizerV1Role(client=client))
+register_role_support_spec(
+    "visualizer",
+    RoleSupportSpec(
+        parse_support=ClientHelloVisualizerSupport.from_dict,
+    ),
+)
+
+__all__ = [
+    "VisualizerGroupRole",
+    "VisualizerRoleProtocol",
+    "VisualizerV1Role",
+]
