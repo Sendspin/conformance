@@ -37,7 +37,7 @@ def _row(
     status: str,
     scenario_id: str = "server-initiated-flac",
     server_impl: str = "aiosendspin",
-    client_impl: str = "sendspin-jvm",
+    client_impl: str = "sendspin-dotnet",
     scenario_revision: int | None = 1,
 ) -> dict[str, Any]:
     """Build one index.json result row, omitting the revision when it is None."""
@@ -175,11 +175,11 @@ class DetectRegressionsTest(unittest.TestCase):
     def test_a_stamped_baseline_still_protects_a_row_that_lost_its_revision(self) -> None:
         """A baseline that stamps revisions must not be disarmed by one unstamped row."""
         baseline = [
-            _row(client_impl="sendspin-jvm", status="passed", scenario_revision=None),
+            _row(client_impl="sendspin-dotnet", status="passed", scenario_revision=None),
             _row(client_impl="sendspin-rs", status="passed", scenario_revision=1),
         ]
         current = [
-            _row(client_impl="sendspin-jvm", status="failed", scenario_revision=1),
+            _row(client_impl="sendspin-dotnet", status="failed", scenario_revision=1),
             _row(client_impl="sendspin-rs", status="failed", scenario_revision=1),
         ]
         self.assertEqual(len(detect_regressions(baseline, current)), 2)
@@ -188,11 +188,11 @@ class DetectRegressionsTest(unittest.TestCase):
     def test_the_exemption_is_per_cell_within_a_scenario(self) -> None:
         """Cells are keyed by implementation pair, so one pair cannot mask another."""
         baseline = [
-            _row(client_impl="sendspin-jvm", status="passed", scenario_revision=1),
+            _row(client_impl="sendspin-dotnet", status="passed", scenario_revision=1),
             _row(client_impl="sendspin-rs", status="passed", scenario_revision=1),
         ]
         current = [
-            _row(client_impl="sendspin-jvm", status="failed", scenario_revision=2),
+            _row(client_impl="sendspin-dotnet", status="failed", scenario_revision=2),
             _row(client_impl="sendspin-rs", status="failed", scenario_revision=1),
         ]
         regressions = detect_regressions(baseline, current)
@@ -237,9 +237,9 @@ class ExemptCasesTest(unittest.TestCase):
 
     def test_the_summary_counts_cells_and_names_each_scenario(self) -> None:
         cells = [
-            ("server-initiated-flac", "sendspin-jvm"),
+            ("server-initiated-flac", "sendspin-dotnet"),
             ("server-initiated-flac", "sendspin-rs"),
-            ("server-initiated-pcm", "sendspin-jvm"),
+            ("server-initiated-pcm", "sendspin-dotnet"),
         ]
         exempt = exempt_cases(
             [
@@ -322,7 +322,7 @@ class ResultRowTest(unittest.TestCase):
             environment_name="macOS",
             scenario=scenario,
             server_impl="aiosendspin",
-            client_impl="sendspin-jvm",
+            client_impl="sendspin-dotnet",
             case_dir=Path("results/data/case"),
         )
         result = _case_result(context, status="failed", reason="synthetic")

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 from pathlib import Path
 
@@ -37,13 +36,3 @@ def find_go() -> str | None:
 def find_cmake() -> str | None:
     """Return a usable cmake executable path."""
     return shutil.which("cmake")
-
-
-def find_java() -> str | None:
-    """Return a usable java executable path."""
-    java_home = os.environ.get("JAVA_HOME")
-    if java_home:
-        candidate = Path(java_home) / "bin" / "java"
-        if candidate.exists():
-            return str(candidate)
-    return shutil.which("java")

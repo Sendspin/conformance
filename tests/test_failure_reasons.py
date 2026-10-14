@@ -222,10 +222,15 @@ class BuildFailureReasonTest(unittest.TestCase):
         )
 
     def test_falls_back_to_the_first_line_without_a_diagnostic(self) -> None:
-        detail = "Unable to locate a Java Runtime.\nPlease visit http://www.java.com\n"
+        detail = (
+            "xcode-select: note: No developer tools were found, requesting install.\n"
+            "If developer tools are located at a non-default location on disk, use "
+            "`sudo xcode-select --switch path`.\n"
+        )
         self.assertEqual(
             _build_failure_reason({"adapter": "x-client", "status": "failed", "detail": detail}),
-            "x-client build failed: Unable to locate a Java Runtime.",
+            "x-client build failed: xcode-select: note: No developer tools were found, "
+            "requesting install.",
         )
 
     def test_says_so_when_no_detail_was_recorded(self) -> None:

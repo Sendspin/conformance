@@ -105,9 +105,9 @@ class RepoOverrideTests(unittest.TestCase):
         self.assertNotIn("CONFORMANCE_REPO_SENDSPIN_CLI", message)
 
     def test_a_build_step_does_not_report_it_as_a_failed_build(self) -> None:
-        os.environ["CONFORMANCE_REPO_SENDSPIN_JVM"] = str(self.root / "missing" / "jvm")
+        os.environ["CONFORMANCE_REPO_SENDSPIN_DOTNET"] = str(self.root / "missing" / "dotnet")
         with self.assertRaises(RepoOverrideError):
-            build._gradle_build_result()
+            build._dotnet_build_result()
 
     def test_the_cli_stops_before_building_or_running(self) -> None:
         os.environ["CONFORMANCE_REPO_SPEC"] = str(self.missing)

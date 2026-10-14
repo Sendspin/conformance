@@ -72,12 +72,6 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
       - name: Show Swift version
         run: swift --version
 
@@ -96,7 +90,7 @@ jobs:
             --results-dir artifacts/results \
             --build-report-path artifacts/build-report.json \
             --from "aiosendspin,sendspin-server-cpp" \
-            --to "aiosendspin,sendspin-cpp,sendspin-dotnet,sendspin-js,sendspin-jvm,sendspin-rs,SendspinKit"
+            --to "aiosendspin,sendspin-cpp,sendspin-dotnet,sendspin-js,sendspin-rs,SendspinKit"
 
       - name: Record harness outcome
         if: always()
