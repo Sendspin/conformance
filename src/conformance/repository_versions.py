@@ -60,7 +60,7 @@ def _blob_url(remote_url: str | None, commit_sha: str | None, repo_path: str | N
 def _preferred_remote_url(key: str, remote_url: str | None) -> str | None:
     specification = IMPLEMENTATIONS.get(key)
     if specification is not None:
-        return f"https://github.com/Sendspin/{quote(specification.repo_dirname, safe='')}"
+        return _normalize_remote_url(specification.remote_url)
     return _normalize_remote_url(remote_url)
 
 
@@ -72,6 +72,7 @@ def _conformance_client_repo_path(key: str) -> str | None:
         "sendspin-js": "adapters/sendspin-js/client.mjs",
         "sendspin-rs": "adapters/sendspin-rs/client/src/main.rs",
         "sendspin-cpp": "adapters/sendspin-cpp/client/main.cpp",
+        "android": "adapters/android/client/src/main/kotlin/com/sendspin/conformance/android/Main.kt",
     }.get(key)
 
 
