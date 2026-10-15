@@ -125,7 +125,7 @@ def check_pairing_required(record: ConnectionRecord) -> list[Finding]:
     """
     if unpaired_access(record) is not False:
         return [_n_a("UNPAIRED-002", "the client/hello did not report unpaired access disabled")]
-    activation = _first_outbound_activation(record, lambda p: "playback" in _activities(p))
+    activation = _first_outbound_activation(record, lambda p: "playback" in activities(p))
     if activation is None:
         return [_n_a("UNPAIRED-002", "the validator did not declare playback")]
     return _judge_refusal(record, "UNPAIRED-002", activation, "pairing_required")
@@ -144,7 +144,7 @@ def check_unpaired_playback(record: ConnectionRecord) -> list[Finding]:
                 "the validator activated no roles, though unpaired access is enabled",
             )
         ]
-    response = _first_inbound(record, activation, {"client/state", *_REFUSALS})
+    response = first_inbound(record, activation, {"client/state", *_REFUSALS})
     if response is not None and response.type == "client/state":
         return [
             _finding(
@@ -160,7 +160,7 @@ def check_unpaired_playback(record: ConnectionRecord) -> list[Finding]:
             _finding(
                 "UNPAIRED-003",
                 Verdict.FAIL,
-                f"the client refused an admissible unpaired activation with {_describe(response)}",
+                f"the client refused an admissible unpaired activation with {describe(response)}",
                 activation,
                 response,
             )
@@ -188,7 +188,7 @@ def check_inadmissible_activation(record: ConnectionRecord) -> list[Finding]:
     only the method is wrong, so the client aborts with `method_not_supported` and
     keeps the connection.
     """
-    activation = _first_outbound_activation(record, lambda p: "pairing" in _activities(p))
+    activation = _first_outbound_activation(record, lambda p: "pairing" in activities(p))
     if activation is None:
         return [_n_a("UNPAIRED-004", "the validator sent no inadmissible activation")]
     match unpaired_access(record):
@@ -202,10 +202,10 @@ def check_inadmissible_activation(record: ConnectionRecord) -> list[Finding]:
 
 def check_pairing_rehandshake(record: ConnectionRecord, since: int) -> list[Finding]:
     """PAIR-PSK-003: the client completes the re-handshake onto its pairing PSK."""
-    message_1 = _first(record, since, lambda f: _out(f, "noise/handshake"))
+    message_1 = first_after(record, since, lambda f: is_out(f, "noise/handshake"))
     if message_1 is None:
         return [_n_a("PAIR-PSK-003", "the validator did not re-handshake to the pairing PSK")]
-    message_2 = _first(record, message_1.id, lambda f: _in(f, "noise/handshake"))
+    message_2 = first_after(record, message_1.id, lambda f: is_in(f, "noise/handshake"))
     if message_2 is None:
         if record.rejected:
             return [_not_reached("PAIR-PSK-003")]
@@ -247,7 +247,7 @@ def check_pair_init(record: ConnectionRecord, since: int) -> list[Finding]:
     activation = _pairing_activation(record, since)
     if activation is None:
         return [_n_a("PAIR-PSK-004", "the validator sent no pairing_psk activation")]
-    response = _first_inbound(
+    response = first_inbound(
         record, activation, {"client/pair-init", "client/pair-finalize", *_REFUSALS}
     )
     if response is None:
@@ -266,14 +266,14 @@ def check_pair_init(record: ConnectionRecord, since: int) -> list[Finding]:
             _finding(
                 "PAIR-PSK-004",
                 Verdict.FAIL,
-                f"the client answered the pairing activation with {_describe(response)}, "
+                f"the client answered the pairing activation with {describe(response)}, "
                 "not client/pair-init",
                 activation,
                 response,
             )
         ]
     payload = response.payload or {}
-    expected_index = _pairing_activations_since_handshake(record, activation)
+    expected_index = pairing_activations_since_handshake(record, activation)
     problems = []
     if payload.get("pairing_index") != expected_index or isinstance(
         payload.get("pairing_index"), bool
@@ -302,16 +302,16 @@ def check_pair_finalize(record: ConnectionRecord, since: int) -> list[Finding]:
     the key, so its 32-byte, 43-character encoding is judged by aiosendspin, which
     acknowledges it with server/pair-finalize only once the key decodes.
     """
-    pair_init = _first(record, since, lambda f: _in(f, "client/pair-init"))
+    pair_init = first_after(record, since, lambda f: is_in(f, "client/pair-init"))
     if pair_init is None:
         return [_n_a("PAIR-PSK-005", "the client sent no client/pair-init")]
-    finalize = _first_inbound(
+    finalize = first_inbound(
         record, pair_init, {"client/pair-finalize", *_PAIRING_MESSAGES, *_REFUSALS}
     )
     if finalize is None or finalize.type != "client/pair-finalize":
         if finalize is None and record.rejected:
             return [_not_reached("PAIR-PSK-005")]
-        after = f", but {_describe(finalize)}" if finalize is not None else ""
+        after = f", but {describe(finalize)}" if finalize is not None else ""
         return [
             _finding(
                 "PAIR-PSK-005",
@@ -329,7 +329,7 @@ def check_pair_finalize(record: ConnectionRecord, since: int) -> list[Finding]:
         problems.append("client/pair-finalize carries wrapped_psk, which only code flows send")
     if problems:
         return [_finding("PAIR-PSK-005", Verdict.FAIL, "; ".join(problems), pair_init, finalize)]
-    acknowledged = _first(record, finalize.id, lambda f: _out(f, "server/pair-finalize"))
+    acknowledged = first_after(record, finalize.id, lambda f: is_out(f, "server/pair-finalize"))
     if acknowledged is None:
         return [
             _finding(
@@ -354,11 +354,13 @@ def check_pair_finalize(record: ConnectionRecord, since: int) -> list[Finding]:
 
 def check_promotion(record: ConnectionRecord, since: int) -> list[Finding]:
     """PAIR-PSK-006: after server/pair-finalize, the client re-handshakes to the long-term PSK."""
-    acknowledged = _first(record, since, lambda f: _out(f, "server/pair-finalize"))
+    acknowledged = first_after(record, since, lambda f: is_out(f, "server/pair-finalize"))
     if acknowledged is None:
         return [_n_a("PAIR-PSK-006", "the pairing did not reach server/pair-finalize")]
-    message_1 = _first(record, acknowledged.id, lambda f: _out(f, "noise/handshake"))
-    message_2 = message_1 and _first(record, message_1.id, lambda f: _in(f, "noise/handshake"))
+    message_1 = first_after(record, acknowledged.id, lambda f: is_out(f, "noise/handshake"))
+    message_2 = message_1 and first_after(
+        record, message_1.id, lambda f: is_in(f, "noise/handshake")
+    )
     keyed = next(
         (
             e
@@ -405,20 +407,22 @@ def check_promotion(record: ConnectionRecord, since: int) -> list[Finding]:
 
 def check_paired_activation(record: ConnectionRecord, since: int) -> list[Finding]:
     """PAIR-PSK-007: the client accepts the activation that follows the long-term re-handshake."""
-    acknowledged = _first(record, since, lambda f: _out(f, "server/pair-finalize"))
-    message_2 = acknowledged and _first(
-        record, acknowledged.id, lambda f: _in(f, "noise/handshake")
+    acknowledged = first_after(record, since, lambda f: is_out(f, "server/pair-finalize"))
+    message_2 = acknowledged and first_after(
+        record, acknowledged.id, lambda f: is_in(f, "noise/handshake")
     )
-    activation = message_2 and _first(record, message_2.id, lambda f: _out(f, "server/activate"))
+    activation = message_2 and first_after(
+        record, message_2.id, lambda f: is_out(f, "server/activate")
+    )
     if activation is None:
         return [_n_a("PAIR-PSK-007", "no activation followed a long-term re-handshake")]
-    refusal = _first_inbound(record, activation, _REFUSALS)
+    refusal = first_inbound(record, activation, _REFUSALS)
     if refusal is not None:
         return [
             _finding(
                 "PAIR-PSK-007",
                 Verdict.FAIL,
-                f"the client refused the paired activation with {_describe(refusal)}",
+                f"the client refused the paired activation with {describe(refusal)}",
                 activation,
                 refusal,
             )
@@ -466,7 +470,7 @@ def check_forgotten_reconnect(record: ConnectionRecord) -> list[Finding]:
     The validator must activate no playback or roles.
     """
     declared = _first_outbound_activation(
-        record, lambda p: "playback" in _activities(p) or bool(p.get("active_roles"))
+        record, lambda p: "playback" in activities(p) or bool(p.get("active_roles"))
     )
     if declared is not None:
         return [
@@ -495,7 +499,7 @@ def check_unpair_goodbye(record: ConnectionRecord) -> list[Finding]:
     ]
     if not keyed or keyed[-1].psk_category != LONG_TERM:
         return [_n_a("POSTPAIR-003", "the session was not keyed by the long-term PSK")]
-    goodbye = _first_inbound(record, unpair, {"client/goodbye"})
+    goodbye = first_inbound(record, unpair, {"client/goodbye"})
     if goodbye is None:
         return [
             _finding(
@@ -609,6 +613,64 @@ def not_run(check_ids: Sequence[str], verdict: Verdict, message: str) -> list[Fi
     return [_finding(check_id, verdict, message) for check_id in check_ids]
 
 
+def activities(payload: dict[str, Any]) -> list[Any]:
+    """Return a server/activate payload's `activities`, or an empty list if it has none."""
+    listed = payload.get("activities")
+    return listed if isinstance(listed, list) else []
+
+
+def pairing_activations_since_handshake(record: ConnectionRecord, activation: RecordedFrame) -> int:
+    """Count the pairing activations sent since the last handshake, up to `activation`."""
+    count = 0
+    for frame in record.frames:
+        if frame.id > activation.id:
+            break
+        if not frame.inbound and frame.type == "noise/handshake":
+            count = 0
+        elif is_out(frame, "server/activate") and "pairing" in activities(frame.payload or {}):
+            count += 1
+    return count
+
+
+def first_after(
+    record: ConnectionRecord, since: int, holds: Callable[[RecordedFrame], bool]
+) -> RecordedFrame | None:
+    """Return the connection's first frame after frame `since` for which `holds` is true."""
+    return next((f for f in record.frames if f.id > since and holds(f)), None)
+
+
+def first_inbound(
+    record: ConnectionRecord, after: RecordedFrame, types: set[str] | frozenset[str] | None
+) -> RecordedFrame | None:
+    """Return the client's first transport frame after `after`, of one of `types` if given."""
+    return first_after(
+        record,
+        after.id,
+        lambda f: (
+            f.inbound
+            and f.phase == "transport"
+            and f.type not in {"client/time"}
+            and (types is None or f.type in types)
+        ),
+    )
+
+
+def is_in(frame: RecordedFrame, message_type: str) -> bool:
+    """Whether `frame` is a `message_type` the client sent over the encrypted transport."""
+    return frame.inbound and frame.phase == "transport" and frame.type == message_type
+
+
+def is_out(frame: RecordedFrame, message_type: str) -> bool:
+    """Whether `frame` is a `message_type` the validator sent over the encrypted transport."""
+    return not frame.inbound and frame.phase == "transport" and frame.type == message_type
+
+
+def describe(frame: RecordedFrame) -> str:
+    """Return `frame`'s type, with its `reason` when it has one, for a finding's message."""
+    reason = (frame.payload or {}).get("reason")
+    return f"{frame.type} {reason!r}" if reason is not None else str(frame.type)
+
+
 def _judge_keying(
     record: ConnectionRecord,
     check_id: str,
@@ -687,8 +749,8 @@ def _judge_refusal(
     record: ConnectionRecord, check_id: str, activation: RecordedFrame, reason: str
 ) -> list[Finding]:
     """Judge that `activation` was refused with client/goodbye `reason`."""
-    response = _first_inbound(record, activation, None)
-    goodbye = _first_inbound(record, activation, {"client/goodbye"})
+    response = first_inbound(record, activation, None)
+    goodbye = first_inbound(record, activation, {"client/goodbye"})
     if goodbye is not None:
         said = (goodbye.payload or {}).get("reason")
         if said == reason:
@@ -717,7 +779,7 @@ def _judge_refusal(
             _finding(
                 check_id,
                 Verdict.FAIL,
-                f"the client answered the activation with {_describe(response)}, not "
+                f"the client answered the activation with {describe(response)}, not "
                 f"client/goodbye {reason!r}",
                 activation,
                 response,
@@ -736,9 +798,9 @@ def _judge_refusal(
 
 def _judge_abort(record: ConnectionRecord, activation: RecordedFrame) -> list[Finding]:
     """UNPAIRED-004 with unpaired access on: pair/abort method_not_supported, connection kept."""
-    response = _first_inbound(record, activation, {"pair/abort", "client/goodbye"})
+    response = first_inbound(record, activation, {"pair/abort", "client/goodbye"})
     if response is None or response.type != "pair/abort":
-        what = _describe(response) if response is not None else "nothing"
+        what = describe(response) if response is not None else "nothing"
         return [
             _finding(
                 "UNPAIRED-004",
@@ -780,11 +842,6 @@ def _judge_abort(record: ConnectionRecord, activation: RecordedFrame) -> list[Fi
     ]
 
 
-def _activities(payload: dict[str, Any]) -> list[Any]:
-    activities = payload.get("activities")
-    return activities if isinstance(activities, list) else []
-
-
 def _first_outbound_activation(
     record: ConnectionRecord, holds: Callable[[dict[str, Any]], bool]
 ) -> RecordedFrame | None:
@@ -793,71 +850,21 @@ def _first_outbound_activation(
 
 def _pairing_activation(record: ConnectionRecord, since: int) -> RecordedFrame | None:
     """Return the first pairing_psk activation the validator sent after frame `since`."""
-    return _first(
+    return first_after(
         record,
         since,
         lambda f: (
-            _out(f, "server/activate")
-            and "pairing" in _activities(f.payload or {})
+            is_out(f, "server/activate")
+            and "pairing" in activities(f.payload or {})
             and ((f.payload or {}).get("pairing") or {}).get("method") == "pairing_psk"
         ),
     )
-
-
-def _pairing_activations_since_handshake(
-    record: ConnectionRecord, activation: RecordedFrame
-) -> int:
-    """Count the pairing activations sent since the last handshake, up to `activation`."""
-    count = 0
-    for frame in record.frames:
-        if frame.id > activation.id:
-            break
-        if not frame.inbound and frame.type == "noise/handshake":
-            count = 0
-        elif _out(frame, "server/activate") and "pairing" in _activities(frame.payload or {}):
-            count += 1
-    return count
-
-
-def _first(
-    record: ConnectionRecord, since: int, holds: Callable[[RecordedFrame], bool]
-) -> RecordedFrame | None:
-    return next((f for f in record.frames if f.id > since and holds(f)), None)
-
-
-def _first_inbound(
-    record: ConnectionRecord, after: RecordedFrame, types: set[str] | frozenset[str] | None
-) -> RecordedFrame | None:
-    """Return the client's first transport frame after `after`, of one of `types` if given."""
-    return _first(
-        record,
-        after.id,
-        lambda f: (
-            f.inbound
-            and f.phase == "transport"
-            and f.type not in {"client/time"}
-            and (types is None or f.type in types)
-        ),
-    )
-
-
-def _in(frame: RecordedFrame, message_type: str) -> bool:
-    return frame.inbound and frame.phase == "transport" and frame.type == message_type
-
-
-def _out(frame: RecordedFrame, message_type: str) -> bool:
-    return not frame.inbound and frame.phase == "transport" and frame.type == message_type
 
 
 def _output_delay(frame: RecordedFrame) -> int | None:
     player = (frame.payload or {}).get("player")
     delay = player.get("output_delay_ms") if isinstance(player, dict) else None
     return delay if isinstance(delay, int) and not isinstance(delay, bool) else None
-
-
-def _describe(frame: RecordedFrame) -> str:
-    reason = (frame.payload or {}).get("reason")
-    return f"{frame.type} {reason!r}" if reason is not None else str(frame.type)
 
 
 def _finding(check_id: str, verdict: Verdict, message: str, *frames: RecordedFrame) -> Finding:

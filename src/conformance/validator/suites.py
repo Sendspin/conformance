@@ -1,5 +1,5 @@
 """
-The unpaired, pairing and post-pairing suites: steps U1–U4, P1 and R1–R5.
+The unpaired, pairing and post-pairing suites: steps U1–U4, P1–P4 and R1–R5.
 
 Each step tells the user what happens next and waits until they are ready, drives
 the client through the validator's server, then judges the connection it ran on
@@ -9,6 +9,7 @@ with the checks in `suite_checks`, printing each verdict as it resolves.
 from __future__ import annotations
 
 import asyncio
+import random
 import secrets
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -20,20 +21,23 @@ from conformance._vendor.aiosendspin.models.core import (
     ServerActivateMessage,
     ServerActivatePayload,
 )
-from conformance._vendor.aiosendspin.models.types import Activity, ConnectionReason, PairMethod
+from conformance._vendor.aiosendspin.models.types import (
+    Activity,
+    ConnectionReason,
+    PairingCodeFormat,
+    PairMethod,
+)
 from conformance._vendor.aiosendspin.noise import (
-    HandshakeAbortedError,
-    PairingError,
     b64url_encode,
     decode_psk_token,
 )
 from conformance._vendor.aiosendspin.noise.pairing import PairingAttempt
 from conformance._vendor.aiosendspin.server import SendspinServer
-from conformance._vendor.aiosendspin.server.compliance import ClientComplianceError
 from conformance._vendor.aiosendspin.server.connection import SendspinConnection
 
-from . import suite_checks
+from . import code_pairing, code_pairing_checks, suite_checks
 from .checks import ConnectionRecord
+from .code_pairing import CodePairing
 from .findings import Evidence, Finding, Verdict
 from .prompter import Prompter, Reply
 from .recorder import EventKind, Recorder
@@ -63,6 +67,7 @@ STEP_CHECKS: dict[str, tuple[str, ...]] = {
     "U3": ("UNPAIRED-003",),
     "U4": ("UNPAIRED-004",),
     "P1": tuple(f"PAIR-PSK-00{n}" for n in range(1, 8)),
+    **code_pairing.STEP_CHECKS,
     "R1": ("POSTPAIR-001",),
     "R3": ("POSTPAIR-002",),
     "R4": ("POSTPAIR-003", "POSTPAIR-004"),
@@ -90,10 +95,16 @@ def parse_suites(text: str) -> frozenset[Suite]:
 
 @dataclass(frozen=True, slots=True)
 class SuiteOptions:
-    """Which suites to run; `fault_injection` allows steps that send what no client may accept."""
+    """
+    Which suites to run, and how.
+
+    `fault_injection` allows steps that send what no client may accept. `seed` drives
+    every randomized challenge, so a run can be replayed.
+    """
 
     suites: frozenset[Suite]
     fault_injection: bool
+    seed: int = 0
 
 
 class Link:
@@ -173,6 +184,17 @@ class Link:
         """Return the id of the last frame recorded on connection `number`, or 0."""
         frames = self.record(number).frames
         return frames[-1].id if frames else 0
+
+    def note_keying(self, number: int) -> None:
+        """Record which PSK keys connection `number` now, after a re-handshake."""
+        connection = self.connection(number)
+        if connection is not None and connection.psk_category is not None:
+            self._recorder.observe_event(
+                number,
+                self.client_id,
+                EventKind.KEYED,
+                psk_category=connection.psk_category.value,
+            )
 
     async def until(
         self, number: int, condition: Callable[[ConnectionRecord], bool], timeout_s: float
@@ -302,6 +324,7 @@ class SuiteRunner:
         self._link = link
         self._options = options
         self._findings: list[Finding] = []
+        self._codes = CodePairing(server, prompter, recorder, link, random.Random(options.seed))
 
     async def run(self) -> list[Finding]:
         """Run every selected suite in order and return the findings, as reported."""
@@ -319,9 +342,13 @@ class SuiteRunner:
         instruction: str,
         run: Callable[[], Awaitable[list[Finding]]],
         *,
-        evidence: Evidence = Evidence.MACHINE,
+        evidence: Evidence | None = None,
     ) -> None:
-        """Show `step`, wait until the user is ready, run it and report its findings."""
+        """
+        Show `step`, wait until the user is ready, run it and report its findings.
+
+        `evidence` replaces what each finding rests on, when the whole step rests on it.
+        """
         while True:
             self._prompter.instruct(f"\n[{step}] {instruction}")
             answer = await self._prompter.confirm("Ready?")
@@ -330,10 +357,8 @@ class SuiteRunner:
         if answer.reply is Reply.ANSWERED and answer.value:
             findings = await run()
         else:
-            findings = suite_checks.not_run(
-                STEP_CHECKS[step], Verdict.SKIPPED, f"the user skipped {step}"
-            )
-        self._report([replace(f, evidence=evidence) for f in findings])
+            findings = _not_run(step, Verdict.SKIPPED, f"the user skipped {step}")
+        self._report([replace(f, evidence=evidence) if evidence else f for f in findings])
 
     def _report(self, findings: Sequence[Finding]) -> None:
         for finding in findings:
@@ -420,16 +445,56 @@ class SuiteRunner:
         return suite_checks.check_unpaired_playback(self._link.record(number))
 
     async def _pairing(self) -> None:
+        """Run each pairing method the client offers: QR code, pairing_psk, then its code."""
         number = self._link.current
-        methods = _pair_methods(self._link.record(number)) if number is not None else {}
-        if "pairing_psk" not in methods:
+        if number is None:
             self._report(
-                _not_reached("P1", "the client's hello does not offer pairing_psk")
-                if number is not None
-                else _not_reached("P1", "no connection of the client completed its handshake")
+                [
+                    finding
+                    for step in ("P2 QR", "P1", "P2", "P3", "P4 cancel", "P4 timeout", "P3 lockout")
+                    for finding in _not_reached(
+                        step, "no connection of the client completed its handshake"
+                    )
+                ]
             )
             return
-        await self._step("P1", _P1, self._p1)
+        methods = _pair_methods(self._link.record(number))
+        dynamic = methods.get("dynamic_pairing_code")
+        dynamic = dynamic if isinstance(dynamic, dict) else {}
+        formats = dynamic.get("formats") if isinstance(dynamic.get("formats"), list) else []
+        codes = self._codes
+        await self._offered(
+            "P2 QR",
+            "qr_code" in formats,
+            "dynamic_pairing_code in the qr_code format",
+            lambda: codes.dynamic(PairingCodeFormat.QR_CODE, dynamic),
+        )
+        await self._offered("P1", "pairing_psk" in methods, "pairing_psk", self._p1)
+        await self._offered(
+            "P2",
+            "digits" in formats,
+            "dynamic_pairing_code in the digits format",
+            lambda: codes.dynamic(PairingCodeFormat.DIGITS, dynamic),
+        )
+        static = "static_pairing_code" in methods
+        await self._offered("P3", static, "static_pairing_code", codes.static)
+        coded = bool(formats) or static
+        await self._offered(
+            "P4 cancel", coded, "a pairing-code method", lambda: codes.cancel(methods)
+        )
+        await self._offered(
+            "P4 timeout", coded, "a pairing-code method", lambda: codes.timeout(methods)
+        )
+        await self._offered("P3 lockout", static, "static_pairing_code", codes.lockout)
+
+    async def _offered(
+        self, step: str, offered: bool, method: str, run: Callable[[], Awaitable[list[Finding]]]
+    ) -> None:
+        """Run `step` if the client's hello offers `method`, or report its checks N/A."""
+        if offered:
+            await self._step(step, _INSTRUCTIONS[step], run)
+        else:
+            self._report(_not_reached(step, f"the client's hello does not offer {method}"))
 
     async def _p1(self) -> list[Finding]:
         token = await self._ask_token()
@@ -450,16 +515,10 @@ class SuiteRunner:
         )
         try:
             await self._server.initiate_pairing(self._link.client_id, attempt)
-        except (
-            PairingError,
-            HandshakeAbortedError,
-            ClientComplianceError,
-            ConnectionError,
-            ValueError,
-        ) as err:
+        except code_pairing.ATTEMPT_ERRORS as err:
             self._prompter.instruct(f"Pairing did not complete: {err or type(err).__name__}")
         else:
-            self._note_keying(number)
+            self._link.note_keying(number)
         await self._link.until(number, lambda r: r.closed, _SETTLE_S)
         record = self._link.record(number)
         return [
@@ -629,17 +688,6 @@ class SuiteRunner:
         )
         return delay if echoed else None
 
-    def _note_keying(self, number: int) -> None:
-        """Record which PSK keys connection `number` now, after a re-handshake."""
-        connection = self._link.connection(number)
-        if connection is not None and connection.psk_category is not None:
-            self._recorder.observe_event(
-                number,
-                self._link.client_id,
-                EventKind.KEYED,
-                psk_category=connection.psk_category.value,
-            )
-
 
 _U1 = (
     "The validator checks that your app connected on the Sentinel PSK, as it must to a "
@@ -663,6 +711,37 @@ _P1 = (
     "Pair your app using its pairing token. The validator re-handshakes onto the token's "
     "pairing PSK, receives the long-term PSK and re-handshakes onto it."
 )
+_INSTRUCTIONS = {
+    "P1": _P1,
+    "P2 QR": (
+        "The validator starts pairing with a dynamic code in the QR format. Scan the QR your "
+        "app shows and paste its text. The validator enters a wrong code first, which your "
+        "app must reject, then the right one."
+    ),
+    "P2": (
+        "The validator starts pairing with a dynamic code. Your app shows (or speaks) a "
+        "6-digit code: you type it, then a wrong code on purpose, which your app must "
+        "reject, then the right code again."
+    ),
+    "P3": (
+        "Make sure your device's pairing window is CLOSED: do not open it yet. The validator "
+        "starts pairing with the static code, which your app must hold back until you open "
+        "the window."
+    ),
+    "P4 cancel": (
+        "The validator starts pairing with your app's code method, then cancels it. Your app "
+        "may show a code briefly; it must drop the attempt and stay connected."
+    ),
+    "P4 timeout": (
+        "Opt-in, slow: the validator starts pairing and enters no code, so your app must give "
+        "up after its attempt timeout, about 2 minutes. Answer n to leave this step out."
+    ),
+    "P3 lockout": (
+        "Opt-in, changes your device's state: the validator makes five attempts with wrong "
+        "static codes, which must close your device's pairing window, then checks a sixth is "
+        "held back. Answer n to leave this step out."
+    ),
+}
 _R1 = "The validator reconnects; your app must match the long-term PSK from pairing."
 _R3 = (
     "The validator forgets its pairing with your app but keeps its own identity, then "
@@ -681,9 +760,13 @@ _R4 = (
 
 def _not_reached(step: str, why: str, *, skip: int = 0) -> list[Finding]:
     """Return N/A findings for `step`'s checks after the first `skip`, which already ran."""
-    return suite_checks.not_run(
-        STEP_CHECKS[step][skip:], Verdict.NOT_APPLICABLE, f"not reached: {why}"
-    )
+    return _not_run(step, Verdict.NOT_APPLICABLE, f"not reached: {why}", skip=skip)
+
+
+def _not_run(step: str, verdict: Verdict, message: str, *, skip: int = 0) -> list[Finding]:
+    """Return `verdict` findings for `step`'s checks after the first `skip`."""
+    checks = code_pairing_checks if step in code_pairing.STEP_CHECKS else suite_checks
+    return checks.not_run(STEP_CHECKS[step][skip:], verdict, message)
 
 
 def _ended_or_said(types: set[str]) -> Callable[[ConnectionRecord], bool]:

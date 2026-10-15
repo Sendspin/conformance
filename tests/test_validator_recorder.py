@@ -12,7 +12,7 @@ from conformance._vendor.aiosendspin.server import (
     ObservedFrame,
     ObservedNoncompliance,
 )
-from conformance.validator.recorder import REDACTED, EventKind, Recorder
+from conformance.validator.recorder import REDACTED, EventKind, Recorder, redacted_length
 
 SECRETS = {
     "long_term_psk": "LTPSK-secret-value",
@@ -81,10 +81,21 @@ class RedactionTests(unittest.TestCase):
     def test_secret_fields_are_redacted_when_recorded(self) -> None:
         payload = self.recorder.frames[0].payload
         assert payload is not None
-        for key in SECRETS:
-            self.assertEqual(payload[key], REDACTED, key)
-        self.assertEqual(payload["nested"], [{"pake_msg_3": REDACTED}])
+        for key, value in SECRETS.items():
+            self.assertEqual(payload[key], f"<redacted:{len(value)}>", key)
+            self.assertEqual(redacted_length(payload[key]), len(value), key)
+        self.assertEqual(payload["nested"], [{"pake_msg_3": "<redacted:16>"}])
         self.assertEqual(payload["pairing_index"], 1)
+
+    def test_a_secret_field_without_a_string_keeps_no_length(self) -> None:
+        self.recorder.observe_frame(
+            json_frame({"type": "client/pair-confirm", "payload": {"client_kc": 5}})
+        )
+        payload = self.recorder.frames[-1].payload
+        assert payload is not None
+        self.assertEqual(payload["client_kc"], REDACTED)
+        self.assertIsNone(redacted_length(payload["client_kc"]))
+        self.assertIsNone(redacted_length("<redacted:43> and more"))
 
     def test_registered_secrets_are_redacted_anywhere(self) -> None:
         payload = self.recorder.frames[0].payload
@@ -93,7 +104,14 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(self.recorder.noncompliance[0].reason, f"bad {REDACTED}")
 
     def test_no_secret_reaches_any_output(self) -> None:
-        recorded = repr(self.recorder.frames) + repr(self.recorder.noncompliance)
+        self.recorder.observe_event(
+            1, "client", EventKind.PAIRING_FAILED, detail=f"code {TOKEN} not bound"
+        )
+        recorded = (
+            repr(self.recorder.frames)
+            + repr(self.recorder.noncompliance)
+            + repr(self.recorder.events)
+        )
         for secret in [*SECRETS.values(), "PAKE-three-value", TOKEN]:
             with self.subTest(secret=secret):
                 self.assertNotIn(secret, recorded)
@@ -147,6 +165,13 @@ class DecodeTests(unittest.TestCase):
         self.assertEqual((keyed.after_frame, keyed.psk_category), (1, "long_term"))
         self.assertEqual((closed.after_frame, closed.psk_category), (None, None))
         self.assertIn("c1 keyed long_term", verbose.getvalue())
+
+    def test_pairing_failures_carry_their_reason(self) -> None:
+        verbose = io.StringIO()
+        recorder = Recorder(verbose=verbose)
+        recorder.observe_event(1, "client", EventKind.PAIRING_FAILED, detail="bad commit")
+        self.assertEqual(recorder.events[0].detail, "bad commit")
+        self.assertIn("c1 pairing_failed bad commit", verbose.getvalue())
 
     def test_a_recorder_failure_is_kept_not_raised(self) -> None:
         frame = observed(b"\x00{}")

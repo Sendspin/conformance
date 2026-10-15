@@ -77,10 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also run steps that send what no client may accept, such as U4",
     )
-    # For CI only: answers every question with the answer the session expects.
+    # For CI only: answers every question with the answer the session expects, and
+    # reads from stdin a secret it cannot know, such as a pairing token or code.
     parser.add_argument("--auto-answer", action="store_true", help=argparse.SUPPRESS)
-    # For CI only: the pairing token --auto-answer pastes, which only the test knows.
-    parser.add_argument("--auto-answer-token", help=argparse.SUPPRESS)
     return parser
 
 
@@ -92,21 +91,16 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
-    prompter: Prompter = (
-        AutoAnswerPrompter(secret_answer=args.auto_answer_token)
-        if args.auto_answer
-        else TerminalPrompter()
-    )
+    prompter: Prompter = AutoAnswerPrompter() if args.auto_answer else TerminalPrompter()
     prompter.instruct(f"Sendspin Validator {tool_version().split()[-1]} — spec {SPEC_TAG}")
     recorder = Recorder(verbose=sys.stderr if args.verbose else None)
-    if args.auto_answer_token:
-        recorder.add_secret(args.auto_answer_token)
     options = SessionOptions(
         port=args.port,
         connect_url=args.connect,
         connect_timeout_s=args.timeout,
         suites=args.suite,
         fault_injection=args.fault_injection,
+        seed=secrets.randbelow(2**32),
     )
     try:
         result = asyncio.run(_session(prompter, recorder, options, fresh=args.fresh))
@@ -118,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_NO_REPORT
     if result is None:
         return EXIT_NO_REPORT
-    return _report(prompter, recorder, result, args.output_dir)
+    return _report(prompter, recorder, result, args.output_dir, seed=options.seed)
 
 
 async def _session(
@@ -128,7 +122,9 @@ async def _session(
     return await run_session(prompter, recorder, identity, pairing_store, options)
 
 
-def _report(prompter: Prompter, recorder: Recorder, result: SessionResult, output_dir: Path) -> int:
+def _report(
+    prompter: Prompter, recorder: Recorder, result: SessionResult, output_dir: Path, *, seed: int
+) -> int:
     """Judge the observed connection, write the run directory, and return the exit status."""
     opening = judge_session(
         recorder.frames,
@@ -154,7 +150,7 @@ def _report(prompter: Prompter, recorder: Recorder, result: SessionResult, outpu
     report = build_report(
         client=client,
         connection_mode=result.mode.value,
-        seed=secrets.randbelow(2**32),
+        seed=seed,
         findings=findings,
     )
     directory = run_directory(output_dir, client.name, datetime.now())

@@ -1,5 +1,6 @@
 """The validator's prompters read answers, skips and retries the way the spec describes."""
 
+import asyncio
 import io
 import unittest
 from collections.abc import Iterator
@@ -70,6 +71,33 @@ class TerminalPrompterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(printable("Kitchen\nSpeaker"), "Kitchen\nSpeaker")
 
 
+class CancelledQuestionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_the_next_question_takes_over_a_cancelled_read(self) -> None:
+        lines: asyncio.Queue[str] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        reads = 0
+
+        def read_line(_prompt: str) -> str:
+            nonlocal reads
+            reads += 1
+            return asyncio.run_coroutine_threadsafe(lines.get(), loop).result()
+
+        output = io.StringIO()
+        prompter = TerminalPrompter(read_line=read_line, output=output)
+        question = asyncio.create_task(prompter.ask_text("Code?"))
+        await asyncio.sleep(0.05)
+        question.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await question
+
+        answer = asyncio.create_task(prompter.confirm("Ready?"))
+        await asyncio.sleep(0.05)
+        await lines.put("y")
+        self.assertEqual(await answer, Answer(Reply.ANSWERED, True))
+        self.assertEqual(reads, 1)
+        self.assertIn("Ready? [y/n]", output.getvalue())
+
+
 class AutoAnswerPrompterTests(unittest.IsolatedAsyncioTestCase):
     async def test_gives_the_expected_answer_or_the_default(self) -> None:
         prompter = AutoAnswerPrompter(output=io.StringIO())
@@ -86,12 +114,21 @@ class AutoAnswerPrompterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await prompter.confirm("Heard it?"), Answer(Reply.ANSWERED, True))
 
-    async def test_answers_a_secret_without_echoing_it(self) -> None:
+    async def test_reads_a_secret_it_cannot_know_without_echoing_it(self) -> None:
         output = io.StringIO()
-        prompter = AutoAnswerPrompter(secret_answer="SP:0SECRET", output=output)
+        prompter = AutoAnswerPrompter(read_line=lambda _prompt: " SP:0SECRET\n", output=output)
         answer = await prompter.ask_text("Paste the token", secret=True)
         self.assertEqual(answer, Answer(Reply.ANSWERED, "SP:0SECRET"))
+        self.assertIn("Paste the token [auto-answered, hidden]\n", output.getvalue())
         self.assertNotIn("SECRET", output.getvalue())
+
+    async def test_gives_a_known_secret_without_reading_input(self) -> None:
+        def unread(_prompt: str) -> str:
+            raise AssertionError("read input for a known answer")
+
+        prompter = AutoAnswerPrompter(read_line=unread, output=io.StringIO())
+        answer = await prompter.ask_text("Wrong code", expected="123456", secret=True)
+        self.assertEqual(answer, Answer(Reply.ANSWERED, "123456"))
 
 
 class HumanVerdictTests(unittest.TestCase):

@@ -104,6 +104,7 @@ class TerminalPrompter:
     ) -> None:
         self._read_line = read_line
         self._output = output
+        self._reading: asyncio.Future[str] | None = None
 
     def instruct(self, text: str) -> None:
         """Print `text`."""
@@ -156,12 +157,33 @@ class TerminalPrompter:
     async def _ask[T](self, prompt: str, parse: Callable[[str], T | None]) -> Answer[T]:
         controls = {"s": Reply.SKIP, "r": Reply.RETRY, "?": Reply.NOT_SURE}
         while True:
-            line = (await asyncio.to_thread(self._read_line, printable(prompt))).strip()
+            line = (await self._read(prompt)).strip()
             if (reply := controls.get(line.lower())) is not None:
                 return Answer(reply)
             if (value := parse(line)) is not None:
                 return Answer(Reply.ANSWERED, value)
             self._write(f"Please answer, or {_CONTROLS_HINT}.")
+
+    async def _read(self, prompt: str) -> str:
+        """
+        Show `prompt` and return the next line of input.
+
+        A question cancelled while it waits, such as a code prompt the client's attempt
+        timeout ends, leaves its read blocked on the worker thread. The next question takes
+        that read over instead of starting a second one, which would lose a line to it.
+        """
+        if self._reading is None or self._reading.done():
+            if self._reading is not None and not self._reading.cancelled():
+                # A line typed for a question that no longer exists is dropped.
+                self._reading.exception()
+            self._reading = asyncio.ensure_future(
+                asyncio.to_thread(self._read_line, printable(prompt))
+            )
+        else:
+            print(printable(prompt), end="", file=self._output, flush=True)
+        line = await asyncio.shield(self._reading)
+        self._reading = None
+        return line
 
     def _write(self, text: str) -> None:
         print(printable(text), file=self._output, flush=True)
@@ -173,27 +195,21 @@ class AutoAnswerPrompter(TerminalPrompter):
 
     It gives the expected answer when the validator knows one, and otherwise the
     first choice, yes, or empty text. A secret question the validator cannot know the
-    answer to, the pairing token, is answered with `secret_answer`. It prints what it
-    answered, except a secret.
+    answer to, such as a pairing token or a code the client shows, is answered with
+    the next line of input, which the CI driver supplies. It prints what it answered,
+    except a secret.
     """
-
-    def __init__(
-        self,
-        *,
-        secret_answer: str | None = None,
-        read_line: Callable[[str], str] = input,
-        output: TextIO = sys.stdout,
-    ) -> None:
-        super().__init__(read_line=read_line, output=output)
-        self._secret_answer = secret_answer
 
     async def ask_text(
         self, question: str, *, expected: str | None = None, secret: bool = False
     ) -> Answer[str]:
-        """Answer with `expected`, with `secret_answer` for a secret, or with empty text."""
+        """Answer with `expected`, a secret with the next line of input, or empty text."""
         if secret:
             self._write(f"{question} [auto-answered, hidden]")
-            return Answer(Reply.ANSWERED, expected or self._secret_answer or "")
+            if expected is not None:
+                return Answer(Reply.ANSWERED, expected)
+            line = await self._read("")
+            return Answer(Reply.ANSWERED, line.strip())
         return self._answered(question, expected or "")
 
     async def ask_choice(

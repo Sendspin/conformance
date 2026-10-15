@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -24,6 +25,8 @@ from conformance._vendor.aiosendspin.server import (
 from .prompter import printable
 
 REDACTED = "<redacted>"
+# A redacted secret field keeps its length, which the spec fixes and checks judge.
+_REDACTED_FIELD = re.compile(r"<redacted:(\d+)>")
 # Pairing secrets the spec carries on the wire, by field name.
 _SECRET_FIELDS = frozenset({"long_term_psk", "wrapped_psk", "wrapped_nonce_B"})
 # Transport type byte of a JSON message.
@@ -117,6 +120,8 @@ class EventKind(StrEnum):
     """The client answered under the Sentinel PSK, unable to use the long-term PSK referenced."""
     CLOSED = "closed"
     """The connection ended."""
+    PAIRING_FAILED = "pairing_failed"
+    """A pairing attempt ended without pairing; the event's `detail` says why."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,8 +130,8 @@ class RecordedEvent:
     A connection event the server reported, which the encrypted frames cannot show.
 
     `psk_category` is aiosendspin's `PskCategory` value for a KEYED event, and None
-    otherwise. `after_frame` is the id of the last frame recorded on the connection
-    before it.
+    otherwise. `detail` is aiosendspin's reason for a PAIRING_FAILED event, redacted.
+    `after_frame` is the id of the last frame recorded on the connection before it.
     """
 
     connection: int
@@ -134,6 +139,7 @@ class RecordedEvent:
     kind: EventKind
     after_frame: int | None
     psk_category: str | None = None
+    detail: str | None = None
 
 
 class Recorder:
@@ -211,21 +217,22 @@ class Recorder:
         kind: EventKind,
         *,
         psk_category: str | None = None,
+        detail: str | None = None,
     ) -> None:
         """Record one connection event the server reported."""
         self._changed.set()
-        self.events.append(
-            RecordedEvent(
-                connection=connection,
-                client_id=client_id,
-                kind=kind,
-                after_frame=self._last_frame(connection),
-                psk_category=psk_category,
-            )
+        event = RecordedEvent(
+            connection=connection,
+            client_id=client_id,
+            kind=kind,
+            after_frame=self._last_frame(connection),
+            psk_category=psk_category,
+            detail=self._redact_text(detail) if detail is not None else None,
         )
+        self.events.append(event)
         if self._verbose is not None:
-            detail = f" {psk_category}" if psk_category is not None else ""
-            print(f"~ c{connection} {kind}{detail}", file=self._verbose, flush=True)
+            extra = "".join(f" {v}" for v in (event.psk_category, event.detail) if v is not None)
+            print(printable(f"~ c{connection} {kind}{extra}"), file=self._verbose, flush=True)
 
     def write_log(self, path: Path) -> None:
         """Write every recorded frame to `path` as JSON lines, in recording order."""
@@ -266,7 +273,7 @@ class Recorder:
     def _redact(self, value: Any) -> Any:
         if isinstance(value, dict):
             return {
-                key: REDACTED if _is_secret_field(key) else self._redact(item)
+                key: _redact_field(item) if _is_secret_field(key) else self._redact(item)
                 for key, item in value.items()
             }
         if isinstance(value, list):
@@ -276,13 +283,25 @@ class Recorder:
         return value
 
     def _redact_text(self, text: str) -> str:
-        for secret in self._secrets:
+        # Longest first, so a secret containing another is redacted whole.
+        for secret in sorted(self._secrets, key=len, reverse=True):
             text = text.replace(secret, REDACTED)
         return text
 
 
+def redacted_length(value: Any) -> int | None:
+    """Return the length of the string a secret field carried, or None if it held no string."""
+    match = _REDACTED_FIELD.fullmatch(value) if isinstance(value, str) else None
+    return int(match.group(1)) if match else None
+
+
 def _is_secret_field(key: str) -> bool:
     return key in _SECRET_FIELDS or key.startswith("pake_msg_") or key.endswith("_kc")
+
+
+def _redact_field(value: Any) -> str:
+    """Return the redacted form of a secret field: its length if it is a string."""
+    return f"<redacted:{len(value)}>" if isinstance(value, str) else REDACTED
 
 
 def _describe(frame: RecordedFrame) -> str:
