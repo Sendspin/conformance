@@ -27,6 +27,7 @@ from conformance._vendor.aiosendspin.server import (
 )
 
 from .checks import ConnectionRecord
+from .code_pairing import spoken_language
 from .discovery import DiscoveredClient, discover_clients
 from .findings import Finding
 from .prompter import Prompter, Reply
@@ -62,7 +63,8 @@ class SessionOptions:
     `port` is listened on in client-initiated mode. `connect_url` skips mDNS and dials
     that client. `connect_timeout_s` bounds the wait for a client to connect, and for
     it to reconnect during a suite. `suites` run after the opening exchange;
-    `fault_injection` allows their steps that send what no client may accept.
+    `fault_injection` allows their steps that send what no client may accept. `seed`
+    drives every randomized challenge, among them the language server/hello names.
     """
 
     port: int
@@ -70,6 +72,7 @@ class SessionOptions:
     connect_timeout_s: float
     suites: frozenset[Suite] = frozenset()
     fault_injection: bool = False
+    seed: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +112,8 @@ async def run_session(
         loop=asyncio.get_running_loop(),
         identity=identity,
         server_name=SERVER_NAME,
+        # Not English, so a client that speaks the pairing code shows it follows the server.
+        languages=[spoken_language(options.seed)],
         pairing_store=pairing_store,
         allow_noncompliant_clients=False,
         frame_observer=recorder.observe_frame,
@@ -150,7 +155,9 @@ async def _run_suites(
         url=result.url,
         timeout_s=options.connect_timeout_s,
     )
-    suite_options = SuiteOptions(suites=options.suites, fault_injection=options.fault_injection)
+    suite_options = SuiteOptions(
+        suites=options.suites, fault_injection=options.fault_injection, seed=options.seed
+    )
     findings = await SuiteRunner(
         server, prompter, recorder, pairing_store, link, suite_options
     ).run()

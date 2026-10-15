@@ -169,19 +169,33 @@ It then walks you through the suites `--suite` names, in this order (default: al
 - `unpaired`: U1 the Sentinel handshake; U2 refusing playback with unpaired access
   off (`pairing_required`); U3 accepting it with unpaired access on. U4, an activation
   no client may accept, runs only with `--fault-injection`.
-- `pairing`: P1, pairing with the token (`SP:…`) you paste from your app or leaflet,
-  through both re-handshakes.
+- `pairing`: each method your app's `client/hello` offers, in this order, with the
+  checks of a method it does not offer reported `N/A`:
+  - P2 in the QR format: you paste the text of the QR your app shows.
+  - P1, pairing with the token (`SP:…`) you paste from your app or leaflet, through
+    both re-handshakes.
+  - P2 in the digits format: you type the 6-digit code your app shows or speaks, then
+    a wrong one on purpose, which your app must reject, then the right one again. The
+    validator names a random non-English language in `server/hello`, and asks which
+    language a speaking app used.
+  - P3, the static code: the validator first asks with the pairing window closed, then
+    you open it and type the 8-digit code.
+  - P4: the validator cancels an attempt, which your app must drop cleanly. Then, if
+    you opt in at its prompt, it leaves one idle until your app times it out, which
+    takes about two minutes.
+  - P3 lockout, if you opt in at its prompt: five wrong static codes, which must close
+    your device's pairing window, then a sixth attempt your app must hold back.
 - `post-pairing`: R1 reconnecting paired; R3 accepting the Sentinel once the validator
   forgets the pairing; R5 keeping the pairing and output delay across a full restart;
   R4 `server/unpair`, then checking the app really dropped the pairing.
 
 Every step waits for you, and every question accepts `s` (skip), `r` (retry) and `?`
-(not sure). The hidden `--auto-answer` and `--auto-answer-token` flags are for the CI
-self-test only.
+(not sure). The hidden `--auto-answer` flag is for the CI self-test only.
 
 The run writes `report.json`, a self-contained `report.html` and `protocol.log.jsonl`
 to `./sendspin-validate-<client-name>-<timestamp>/`. Pairing secrets are redacted as
-frames are recorded. The exit status is 1 when any check is `FAIL` or `TOOL_ERROR`.
+frames are recorded, and so is every code you enter. The exit status is 1 when any
+check is `FAIL` or `TOOL_ERROR`.
 
 ## Report site
 
