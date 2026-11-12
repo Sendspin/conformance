@@ -270,7 +270,7 @@ class ScreenTests(unittest.IsolatedAsyncioTestCase):
             prompter=AutoAnswerPrompter(output=output),
             recorder=Recorder(verbose=io.StringIO()),
             store=None,  # type: ignore[arg-type]
-            link=None,  # type: ignore[arg-type]
+            link=types.SimpleNamespace(client_id="client"),  # type: ignore[arg-type]
             options=SuiteOptions(suites=frozenset(Suite), fault_injection=False),
         )
 
