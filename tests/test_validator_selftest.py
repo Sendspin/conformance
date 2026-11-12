@@ -299,12 +299,19 @@ class ValidatorSelfTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_pairing_wins_a_client_another_server_holds_idle(self) -> None:
-        """
-        A step's first server/activate carries its own priority, so it displaces an idle server.
+        """Each pairing step's first server/activate declares pairing, which outranks idle."""
+        await self._run(None, "--connect", await self._held_idle(), "--suite", "pairing")
+        self.assertIn("concurrent_attempt", self.transcript)
+        self.assertLessEqual(PAIRING_CHECKS, self._passed(), self.transcript)
 
-        Pairing outranks an idle connection; U2's playback activation is inadmissible
-        unpaired, so the client must answer it with pairing_required, not arbitrate it.
-        """
+    async def test_u2_is_judged_while_another_server_holds_the_client_idle(self) -> None:
+        """U2's playback activation is inadmissible unpaired: the client must not arbitrate it."""
+        await self._run(None, "--connect", await self._held_idle(), "--suite", "unpaired")
+        self.assertIn("concurrent_attempt", self.transcript)
+        self.assertIn("UNPAIRED-002", self._passed(), self.transcript)
+
+    async def _held_idle(self) -> str:
+        """Return the client's URL once an idle server holds it, with unpaired access off."""
         await self.client.set_unpaired_access(enabled=False)
         url = await self._listen()
         idle = SendspinServer(
@@ -318,12 +325,10 @@ class ValidatorSelfTest(unittest.IsolatedAsyncioTestCase):
             await idle.connect_to_client_and_wait(url)
             while idle.get_client(self.identity.peer_id) is None:
                 await asyncio.sleep(0.05)
+        return url
 
-        await self._run(None, "--connect", url, "--suite", "unpaired,pairing")
-        report = self._read_report()
-        passed = {f["id"] for f in report["findings"] if f["verdict"] == "PASS"}
-        self.assertIn("concurrent_attempt", self.transcript)
-        self.assertLessEqual({"UNPAIRED-002", *PAIRING_CHECKS}, passed, self.transcript)
+    def _passed(self) -> set[str]:
+        return {f["id"] for f in self._read_report()["findings"] if f["verdict"] == "PASS"}
 
     async def test_client_that_never_answers_a_wrong_code_fails(self) -> None:
         """P2's negative step fails a client that neither retries nor aborts a wrong code."""
