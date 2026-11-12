@@ -9,6 +9,7 @@ with the checks in `suite_checks`, printing each verdict as it resolves.
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import secrets
 from collections.abc import Awaitable, Callable, Sequence
@@ -60,6 +61,8 @@ class Suite(StrEnum):
     PAIRING = "pairing"
     POST_PAIRING = "post-pairing"
 
+
+logger = logging.getLogger(__name__)
 
 STEP_CHECKS: dict[str, tuple[str, ...]] = {
     "U1": ("UNPAIRED-001",),
@@ -355,7 +358,15 @@ class SuiteRunner:
             if answer.reply is not Reply.RETRY:
                 break
         if answer.reply is Reply.ANSWERED and answer.value:
-            findings = await run()
+            try:
+                findings = await run()
+            except Exception as error:  # noqa: BLE001 - one broken step must not lose the session
+                logger.exception("step %s raised", step)
+                findings = _not_run(
+                    step,
+                    Verdict.TOOL_ERROR,
+                    f"the validator hit an internal error: {type(error).__name__}: {error}",
+                )
         else:
             findings = _not_run(step, Verdict.SKIPPED, f"the user skipped {step}")
         self._report([replace(f, evidence=evidence) if evidence else f for f in findings])
@@ -766,7 +777,7 @@ def _not_reached(step: str, why: str, *, skip: int = 0) -> list[Finding]:
 def _not_run(step: str, verdict: Verdict, message: str, *, skip: int = 0) -> list[Finding]:
     """Return `verdict` findings for `step`'s checks after the first `skip`."""
     checks = code_pairing_checks if step in code_pairing.STEP_CHECKS else suite_checks
-    return checks.not_run(STEP_CHECKS[step][skip:], verdict, message)
+    return checks.not_run(STEP_CHECKS.get(step, ())[skip:], verdict, message)
 
 
 def _ended_or_said(types: set[str]) -> Callable[[ConnectionRecord], bool]:

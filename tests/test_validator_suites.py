@@ -1,5 +1,6 @@
 """The suite runner parses `--suite` and keeps a pasted pairing token out of every record."""
 
+import asyncio
 import io
 import json
 import random
@@ -10,9 +11,16 @@ from typing import Any
 from conformance._vendor.aiosendspin.noise import b64url_encode, decode_psk_token
 from conformance._vendor.aiosendspin.server import FrameDirection, FramePhase, ObservedFrame
 from conformance.validator.code_pairing import CodePairing
-from conformance.validator.prompter import Answer, Reply, TerminalPrompter
+from conformance.validator.findings import Finding, Verdict
+from conformance.validator.prompter import Answer, AutoAnswerPrompter, Reply, TerminalPrompter
 from conformance.validator.recorder import REDACTED, Recorder
-from conformance.validator.suites import Suite, SuiteOptions, SuiteRunner, parse_suites
+from conformance.validator.suites import (
+    STEP_CHECKS,
+    Suite,
+    SuiteOptions,
+    SuiteRunner,
+    parse_suites,
+)
 
 VECTOR_QR_TOKEN = "SP:14DQ6FY7E4XTOP9HJ5LV6Z3PO57YPD4XT6T97N5Y"
 VECTOR_TOKEN = (
@@ -139,6 +147,50 @@ class CodeEntryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await codes.ask_token(), "SP:0NOTAQRCODE")
         payload = self.record(recorder, "SP:0NOTAQRCODE")
         self.assertEqual(payload, {"message": REDACTED})
+
+
+
+class StepErrorTests(unittest.IsolatedAsyncioTestCase):
+    """A step that raises is reported as a tool error, and the session goes on."""
+
+    def runner(self) -> SuiteRunner:
+        return SuiteRunner(
+            server=None,  # type: ignore[arg-type]
+            prompter=AutoAnswerPrompter(output=io.StringIO()),
+            recorder=Recorder(verbose=io.StringIO()),
+            store=None,  # type: ignore[arg-type]
+            link=None,  # type: ignore[arg-type]
+            options=SuiteOptions(suites=frozenset(Suite), fault_injection=False),
+        )
+
+    async def test_a_raising_step_reports_tool_errors_and_the_next_step_runs(self) -> None:
+        runner = self.runner()
+        ran: list[str] = []
+
+        async def broken() -> list[Finding]:
+            raise ValueError("zip() argument 2 is longer than argument 1")
+
+        async def fine() -> list[Finding]:
+            ran.append("R1")
+            return []
+
+        with self.assertLogs("conformance.validator.suites", "ERROR") as logs:
+            await runner._step("P2", "x", broken)  # noqa: SLF001 - the step loop is the behaviour
+        await runner._step("R1", "y", fine)  # noqa: SLF001
+
+        findings = runner._findings  # noqa: SLF001
+        self.assertEqual([f.id for f in findings], list(STEP_CHECKS["P2"]))
+        self.assertEqual({f.verdict for f in findings}, {Verdict.TOOL_ERROR})
+        self.assertIn("ValueError: zip() argument 2", findings[0].message)
+        self.assertIn("Traceback", logs.output[0])
+        self.assertEqual(ran, ["R1"])
+
+    async def test_cancellation_still_propagates(self) -> None:
+        async def cancelled() -> list[Finding]:
+            raise asyncio.CancelledError
+
+        with self.assertRaises(asyncio.CancelledError):
+            await self.runner()._step("R1", "y", cancelled)  # noqa: SLF001
 
 
 if __name__ == "__main__":
