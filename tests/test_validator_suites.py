@@ -150,6 +150,20 @@ class CodeEntryTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+def goodbye(recorder: Recorder, reason: str) -> None:
+    """Record a client/goodbye with `reason`, as the server's frame observer would."""
+    message = {"type": "client/goodbye", "payload": {"reason": reason}}
+    recorder.observe_frame(
+        ObservedFrame(
+            connection=2,
+            client_id="client",
+            direction=FrameDirection.IN,
+            phase=FramePhase.TRANSPORT,
+            data=b"\x00" + json.dumps(message).encode(),
+            monotonic_us=1,
+        )
+    )
+
 class StepErrorTests(unittest.IsolatedAsyncioTestCase):
     """A step that raises is reported as a tool error, and the session goes on."""
 
@@ -184,6 +198,40 @@ class StepErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ValueError: zip() argument 2", findings[0].message)
         self.assertIn("Traceback", logs.output[0])
         self.assertEqual(ran, ["R1"])
+
+    async def test_a_client_busy_with_another_server_is_a_tool_error_not_a_fail(self) -> None:
+        runner = self.runner()
+        recorder = runner._recorder  # noqa: SLF001
+        output = runner._prompter._output  # type: ignore[attr-defined] # noqa: SLF001
+
+        async def turned_away() -> list[Finding]:
+            goodbye(recorder, "concurrent_attempt")
+            return [
+                Finding("UNPAIRED-002", Verdict.FAIL, "ref", "wrong goodbye"),
+                Finding("UNPAIRED-001", Verdict.PASS, "ref", "fine"),
+            ]
+
+        await runner._step("U2", "x", turned_away)  # noqa: SLF001
+        await runner._step("U3", "y", turned_away)  # noqa: SLF001
+
+        busy, kept, *_ = runner._findings  # noqa: SLF001
+        self.assertIs(busy.verdict, Verdict.TOOL_ERROR)
+        self.assertIn("concurrent_attempt", busy.message)
+        self.assertIn("was FAIL: wrong goodbye", busy.message)
+        self.assertEqual(busy.frames, (recorder.frames[0].id,))
+        self.assertIs(kept.verdict, Verdict.PASS)
+        self.assertEqual(output.getvalue().count("another server is connected"), 1)
+
+    async def test_a_goodbye_from_an_earlier_step_does_not_taint_the_next(self) -> None:
+        runner = self.runner()
+        failed = Finding("UNPAIRED-001", Verdict.FAIL, "ref", "real failure")
+
+        async def fails() -> list[Finding]:
+            return [failed]
+
+        goodbye(runner._recorder, "concurrent_attempt")  # noqa: SLF001
+        await runner._step("U1", "x", fails)  # noqa: SLF001
+        self.assertEqual(runner._findings, [failed])  # noqa: SLF001
 
     async def test_cancellation_still_propagates(self) -> None:
         async def cancelled() -> list[Finding]:

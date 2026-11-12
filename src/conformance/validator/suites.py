@@ -25,6 +25,7 @@ from conformance._vendor.aiosendspin.models.core import (
 from conformance._vendor.aiosendspin.models.types import (
     Activity,
     ConnectionReason,
+    GoodbyeReason,
     PairingCodeFormat,
     PairMethod,
 )
@@ -41,7 +42,7 @@ from .checks import ConnectionRecord
 from .code_pairing import CodePairing
 from .findings import Evidence, Finding, Verdict
 from .prompter import Prompter, Reply
-from .recorder import EventKind, Recorder
+from .recorder import EventKind, RecordedFrame, Recorder
 from .storage import AdmitUnpairedStore
 
 # How long the client gets to answer something the validator sent.
@@ -327,6 +328,7 @@ class SuiteRunner:
         self._link = link
         self._options = options
         self._findings: list[Finding] = []
+        self._warned_busy = False
         self._codes = CodePairing(server, prompter, recorder, link, random.Random(options.seed))
 
     async def run(self) -> list[Finding]:
@@ -352,6 +354,7 @@ class SuiteRunner:
 
         `evidence` replaces what each finding rests on, when the whole step rests on it.
         """
+        mark = len(self._recorder.frames)
         while True:
             self._prompter.instruct(f"\n[{step}] {instruction}")
             answer = await self._prompter.confirm("Ready?")
@@ -369,6 +372,12 @@ class SuiteRunner:
                 )
         else:
             findings = _not_run(step, Verdict.SKIPPED, f"the user skipped {step}")
+        turned_away = _turned_away(self._recorder.frames[mark:])
+        if turned_away is not None:
+            if not self._warned_busy:
+                self._warned_busy = True
+                self._prompter.instruct(_BUSY_HINT)
+            findings = [_busy(f, turned_away) for f in findings]
         self._report([replace(f, evidence=evidence) if evidence else f for f in findings])
 
     def _report(self, findings: Sequence[Finding]) -> None:
@@ -778,6 +787,44 @@ def _not_run(step: str, verdict: Verdict, message: str, *, skip: int = 0) -> lis
     """Return `verdict` findings for `step`'s checks after the first `skip`."""
     checks = code_pairing_checks if step in code_pairing.STEP_CHECKS else suite_checks
     return checks.not_run(STEP_CHECKS.get(step, ())[skip:], verdict, message)
+
+
+_BUSY_HINT = (
+    "\nThe client turned the validator away with client/goodbye 'concurrent_attempt': "
+    "another server is connected to it. Results that depend on this connection are "
+    "reported as TOOL_ERROR. Stop every other Sendspin server that can reach the client, "
+    "or have the client connect to the validator instead of advertising over mDNS, then "
+    "restart the client and run again."
+)
+
+
+def _turned_away(frames: Sequence[RecordedFrame]) -> RecordedFrame | None:
+    """Return the first client/goodbye 'concurrent_attempt' among `frames`, if any."""
+    return next(
+        (
+            f
+            for f in frames
+            if f.inbound
+            and f.type == "client/goodbye"
+            and (f.payload or {}).get("reason") == GoodbyeReason.CONCURRENT_ATTEMPT.value
+        ),
+        None,
+    )
+
+
+def _busy(finding: Finding, goodbye: RecordedFrame) -> Finding:
+    """Turn a FAIL or WARN into a TOOL_ERROR: the client was busy with another server."""
+    if finding.verdict not in {Verdict.FAIL, Verdict.WARN}:
+        return finding
+    return replace(
+        finding,
+        verdict=Verdict.TOOL_ERROR,
+        message=(
+            "the client was connected to another server and turned the validator away with "
+            f"client/goodbye 'concurrent_attempt' (was {finding.verdict}: {finding.message})"
+        ),
+        frames=tuple(dict.fromkeys((*finding.frames, goodbye.id))),
+    )
 
 
 def _ended_or_said(types: set[str]) -> Callable[[ConnectionRecord], bool]:
