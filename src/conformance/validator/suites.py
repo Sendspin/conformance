@@ -400,7 +400,7 @@ class SuiteRunner:
                 )
         else:
             findings = _not_run(step, Verdict.SKIPPED, f"the user skipped {step}")
-        turned_away = _turned_away(self._recorder.frames[mark:], self._link.client_id)
+        turned_away = _turned_away(self._recorder.frames, mark, self._link.client_id)
         if turned_away is not None:
             if not self._warned_busy:
                 self._warned_busy = self._busy_hint_pending = True
@@ -852,19 +852,40 @@ _BUSY_HINT = (
 )
 
 
-def _turned_away(frames: Sequence[RecordedFrame], client_id: str) -> RecordedFrame | None:
-    """Return `client_id`'s first client/goodbye 'concurrent_attempt' among `frames`, if any."""
-    return next(
-        (
-            f
-            for f in frames
-            if f.client_id == client_id
-            and f.inbound
-            and f.type == "client/goodbye"
-            and (f.payload or {}).get("reason") == GoodbyeReason.CONCURRENT_ATTEMPT.value
-        ),
-        None,
-    )
+def _turned_away(
+    frames: Sequence[RecordedFrame], mark: int, client_id: str
+) -> RecordedFrame | None:
+    """
+    Return the first client/goodbye 'concurrent_attempt' from `client_id` after `frames[:mark]`
+    that lost admission on the validator's own lowest priority, if any.
+
+    Only a connection whose first server/activate declared no activities, or that saw none,
+    can lose to an idle server. A goodbye to the step's own activation is the client's
+    verdict on it: an inadmissible one must not be arbitrated, and a pairing one is
+    refused with pair/abort (connection.md, "Multiple servers (server-initiated)").
+    """
+    for goodbye in frames[mark:]:
+        if not (
+            goodbye.client_id == client_id
+            and goodbye.inbound
+            and goodbye.type == "client/goodbye"
+            and (goodbye.payload or {}).get("reason") == GoodbyeReason.CONCURRENT_ATTEMPT.value
+        ):
+            continue
+        first = next(
+            (
+                f
+                for f in frames
+                if f.connection == goodbye.connection
+                and f.id < goodbye.id
+                and not f.inbound
+                and f.type == "server/activate"
+            ),
+            None,
+        )
+        if first is None or not (first.payload or {}).get("activities"):
+            return goodbye
+    return None
 
 
 def _busy(finding: Finding, goodbye: RecordedFrame) -> Finding:

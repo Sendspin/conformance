@@ -192,9 +192,10 @@ It then walks you through the suites `--suite` names, in this order (default: al
 Another server may already hold your app idle, such as a Music Assistant that found
 it over mDNS. In server-initiated mode, each pairing step, U2 and U4 open a connection
 whose first `server/activate` is the step's own, so the app admits it over the idle
-server. If the app still turns the validator away with `client/goodbye`
-`concurrent_attempt`, that step's failures are reported as `TOOL_ERROR`, and the
-validator says how to keep other servers away.
+server. Other steps open with an activation that declares nothing. If the app turns
+one of those away with `client/goodbye` `concurrent_attempt`, that step's failures
+are reported as `TOOL_ERROR`, and the validator says how to keep other servers away.
+If the app answers a step's own first activation that way, the failure stands.
 
 Every step waits for you, and every question accepts `s` (skip), `r` (retry) and `?`
 (not sure). The hidden `--auto-answer` flag is for the CI self-test only.

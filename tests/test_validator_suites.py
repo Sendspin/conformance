@@ -168,6 +168,22 @@ def goodbye(recorder: Recorder, reason: str, *, client_id: str = "client") -> No
         )
     )
 
+
+def activate(recorder: Recorder, activities: list[str]) -> None:
+    """Record the validator's server/activate declaring `activities`."""
+    message = {"type": "server/activate", "payload": {"activities": activities}}
+    recorder.observe_frame(
+        ObservedFrame(
+            connection=2,
+            client_id="client",
+            direction=FrameDirection.OUT,
+            phase=FramePhase.TRANSPORT,
+            data=b"\x00" + json.dumps(message).encode(),
+            monotonic_us=1,
+        )
+    )
+
+
 class StepErrorTests(unittest.IsolatedAsyncioTestCase):
     """A step that raises is reported as a tool error, and the session goes on."""
 
@@ -225,6 +241,25 @@ class StepErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(busy.frames, (recorder.frames[0].id,))
         self.assertIs(kept.verdict, Verdict.PASS)
         self.assertEqual(output.getvalue().count("another server is connected"), 1)
+
+    async def test_only_a_goodbye_to_the_lowest_priority_means_busy(self) -> None:
+        """A goodbye to the step's own activation is the client's verdict on it."""
+        for activities, verdict in (
+            ([], Verdict.TOOL_ERROR),
+            (["playback"], Verdict.FAIL),
+            (["pairing"], Verdict.FAIL),
+        ):
+            with self.subTest(activities=activities):
+                runner = self.runner()
+                recorder = runner._recorder  # noqa: SLF001
+
+                async def answered(activities: list[str] = activities) -> list[Finding]:
+                    activate(recorder, activities)
+                    goodbye(recorder, "concurrent_attempt")
+                    return [Finding("UNPAIRED-002", Verdict.FAIL, "ref", "wrong goodbye")]
+
+                await runner._step("U2", "x", answered)  # noqa: SLF001
+                self.assertIs(runner._findings[0].verdict, verdict)  # noqa: SLF001
 
     async def test_another_clients_goodbye_leaves_the_findings_alone(self) -> None:
         runner = self.runner()
