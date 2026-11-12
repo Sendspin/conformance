@@ -241,5 +241,58 @@ class StepErrorTests(unittest.IsolatedAsyncioTestCase):
             await self.runner()._step("R1", "y", cancelled)  # noqa: SLF001
 
 
+
+class Terminal(io.StringIO):
+    """Output that reports itself as a terminal."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+class ScreenTests(unittest.IsolatedAsyncioTestCase):
+    """Each step starts on a cleared terminal that still shows the last step's results."""
+
+    def runner(self, output: io.StringIO) -> SuiteRunner:
+        return SuiteRunner(
+            server=None,  # type: ignore[arg-type]
+            prompter=AutoAnswerPrompter(output=output),
+            recorder=Recorder(verbose=io.StringIO()),
+            store=None,  # type: ignore[arg-type]
+            link=None,  # type: ignore[arg-type]
+            options=SuiteOptions(suites=frozenset(Suite), fault_injection=False),
+        )
+
+    async def test_a_step_clears_the_terminal_and_recaps_the_last_step(self) -> None:
+        output = Terminal()
+        runner = self.runner(output)
+
+        async def passes() -> list[Finding]:
+            return [Finding("UNPAIRED-001", Verdict.PASS, "ref", "sentinel handshake")]
+
+        await runner._step("U1", "first", passes)  # noqa: SLF001
+        await runner._step("U2", "second", passes)  # noqa: SLF001
+
+        screens = output.getvalue().split("\x1b[H\x1b[2J")
+        self.assertEqual(len(screens), 3)
+        self.assertNotIn("sentinel handshake", screens[1].split("[U1]")[0])
+        self.assertIn("Since the last step:", screens[2])
+        self.assertLess(
+            screens[2].index("sentinel handshake"), screens[2].index("[U2] second")
+        )
+
+    async def test_piped_output_is_never_cleared_or_repeated(self) -> None:
+        output = io.StringIO()
+        runner = self.runner(output)
+
+        async def passes() -> list[Finding]:
+            return [Finding("UNPAIRED-001", Verdict.PASS, "ref", "sentinel handshake")]
+
+        await runner._step("U1", "first", passes)  # noqa: SLF001
+        await runner._step("U2", "second", passes)  # noqa: SLF001
+
+        self.assertNotIn("\x1b", output.getvalue())
+        self.assertEqual(output.getvalue().count("sentinel handshake"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

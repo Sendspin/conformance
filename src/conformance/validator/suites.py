@@ -341,6 +341,8 @@ class SuiteRunner:
         self._options = options
         self._findings: list[Finding] = []
         self._warned_busy = False
+        self._busy_hint_pending = False
+        self._screen_start = 0
         self._codes = CodePairing(server, prompter, recorder, link, random.Random(options.seed))
 
     async def run(self) -> list[Finding]:
@@ -367,6 +369,7 @@ class SuiteRunner:
         `evidence` replaces what each finding rests on, when the whole step rests on it.
         """
         mark = len(self._recorder.frames)
+        self._new_screen()
         while True:
             self._prompter.instruct(f"\n[{step}] {instruction}")
             answer = await self._prompter.confirm("Ready?")
@@ -387,10 +390,24 @@ class SuiteRunner:
         turned_away = _turned_away(self._recorder.frames[mark:])
         if turned_away is not None:
             if not self._warned_busy:
-                self._warned_busy = True
+                self._warned_busy = self._busy_hint_pending = True
                 self._prompter.instruct(_BUSY_HINT)
             findings = [_busy(f, turned_away) for f in findings]
         self._report([replace(f, evidence=evidence) if evidence else f for f in findings])
+
+    def _new_screen(self) -> None:
+        """Clear the screen for a step, keeping on it what was reported since the last one."""
+        recap = self._findings[self._screen_start :]
+        self._screen_start = len(self._findings)
+        if not self._prompter.clear():
+            return
+        if recap:
+            self._prompter.instruct("Since the last step:")
+            for finding in recap:
+                self._prompter.report_check(finding)
+        if self._busy_hint_pending:
+            self._busy_hint_pending = False
+            self._prompter.instruct(_BUSY_HINT)
 
     def _report(self, findings: Sequence[Finding]) -> None:
         for finding in findings:
