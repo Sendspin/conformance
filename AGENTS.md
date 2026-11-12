@@ -171,7 +171,7 @@ Build/setup failures are different: those can still be real workflow failures.
 
 Two workflows run on pull requests and pushes to `main`:
 
-- `publish.yml` builds every implementation, runs the full matrix on macOS and publishes Pages. Only changes that can alter the matrix or the site start it: `src/conformance/**`, `adapters/**`, `scripts/**`, `pyproject.toml`, `uv.lock` and the workflow itself. The client validator (`src/conformance/validator/**`), its vendored aiosendspin (`src/conformance/_vendor/**`) and `scripts/vendor_aiosendspin.py` are excluded, because the matrix never runs them. Changes to `tests/`, docs or other workflows do not start it either. The nightly schedule and manual dispatch always run it.
+- `publish.yml` builds every implementation, runs the full matrix on macOS and publishes Pages. Only changes that can alter the matrix or the site start it: `src/conformance/**`, `adapters/**`, `scripts/**`, `pyproject.toml`, `uv.lock` and the workflow itself. The client validator (`src/conformance/validator/**`), its vendored aiosendspin (`src/conformance/_vendor/**`), `scripts/vendor_aiosendspin.py`, `scripts/install-sendspin-validate.sh` and `scripts/sendspin-validate-constraints.txt` are excluded, because the matrix never runs them. Changes to `tests/`, docs or other workflows do not start it either. The nightly schedule and manual dispatch always run it.
 - `ci.yml` runs `scripts/vendor_aiosendspin.py --check` and `tests/` on Linux whenever `src/`, `tests/`, `scripts/`, `patches/`, `pyproject.toml`, `uv.lock` or the workflow itself changes. Checks that need no implementation clones or macOS toolchains belong here.
 
 A new path the matrix depends on must be added to `publish.yml`'s path filters, or changes to it will merge without a matrix run.
@@ -253,6 +253,7 @@ remote, so any such list goes stale on the next merge.
 - `scripts/run_all.py`: build + run + report orchestration
 - `scripts/merge_results.py`: merge multiple host result sets into one report
 - `scripts/vendor_aiosendspin.py`: rebuild `src/conformance/_vendor/` at an upstream ref, or `--check` it against the recorded commit
+- `scripts/install-sendspin-validate.sh`: the `curl … | sh` installer for `sendspin-validate`, which pins its dependencies with `scripts/sendspin-validate-constraints.txt`
 
 ### CI
 
@@ -269,7 +270,7 @@ python scripts/setup_workspace.py --clone
 . .venv/bin/activate
 ```
 
-`uv.lock` is committed. CI and `scripts/setup_workspace.py` install with `uv sync --locked`, which fails when the lock no longer matches `pyproject.toml`. Run `uv lock` after editing dependencies and commit the result. Run `uv lock --upgrade` to refresh every pin.
+`uv.lock` is committed. CI and `scripts/setup_workspace.py` install with `uv sync --locked`, which fails when the lock no longer matches `pyproject.toml`. Run `uv lock` after editing dependencies and commit the result. Run `uv lock --upgrade` to refresh every pin. After either, regenerate `scripts/sendspin-validate-constraints.txt` with the command in its header; a test fails until it matches `uv.lock`.
 
 Build adapters:
 

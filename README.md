@@ -138,8 +138,17 @@ python scripts/merge_results.py \
 `sendspin-validate` checks a Sendspin client app on its own, without an adapter. It
 is a strict Sendspin server, built on a bundled copy of aiosendspin, that your app
 connects to. It records every frame, checks what the client sends against spec
-`1.0.0-rc1`, and writes a report. The only prerequisite is
-[uv](https://docs.astral.sh/uv/):
+`1.0.0-rc1`, and writes a report. Install it on Linux or macOS with:
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/Sendspin/conformance/main/scripts/install-sendspin-validate.sh | sh
+```
+
+then run `sendspin-validate`. The installer needs nothing but `curl` (or `wget`): it
+installs [uv](https://docs.astral.sh/uv/) when it is missing, and uv fetches Python.
+Dependencies are pinned to the versions `uv.lock` records. Run the installer again to
+update, or set `SENDSPIN_VALIDATE_REF` to install a branch, tag or commit. With uv
+already installed, you can also run it once without installing:
 
 ```sh
 uvx --from git+https://github.com/Sendspin/conformance sendspin-validate
@@ -235,5 +244,6 @@ The generated site includes:
 - `scripts/setup_workspace.py`: bootstraps a local Python environment
 - `scripts/run_all.py`: build + run + report orchestration
 - `scripts/merge_results.py`: merges multiple host result directories into one report
+- `scripts/install-sendspin-validate.sh`: installs `sendspin-validate`, pinned by `scripts/sendspin-validate-constraints.txt`
 - `.github/workflows/publish.yml`: macOS GitHub Pages publishing
 - `.github/workflows/ci.yml`: Linux unit tests, including the validator self-test
