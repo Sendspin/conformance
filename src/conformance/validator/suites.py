@@ -387,7 +387,7 @@ class SuiteRunner:
                 )
         else:
             findings = _not_run(step, Verdict.SKIPPED, f"the user skipped {step}")
-        turned_away = _turned_away(self._recorder.frames[mark:])
+        turned_away = _turned_away(self._recorder.frames[mark:], self._link.client_id)
         if turned_away is not None:
             if not self._warned_busy:
                 self._warned_busy = self._busy_hint_pending = True
@@ -839,13 +839,14 @@ _BUSY_HINT = (
 )
 
 
-def _turned_away(frames: Sequence[RecordedFrame]) -> RecordedFrame | None:
-    """Return the first client/goodbye 'concurrent_attempt' among `frames`, if any."""
+def _turned_away(frames: Sequence[RecordedFrame], client_id: str) -> RecordedFrame | None:
+    """Return `client_id`'s first client/goodbye 'concurrent_attempt' among `frames`, if any."""
     return next(
         (
             f
             for f in frames
-            if f.inbound
+            if f.client_id == client_id
+            and f.inbound
             and f.type == "client/goodbye"
             and (f.payload or {}).get("reason") == GoodbyeReason.CONCURRENT_ATTEMPT.value
         ),

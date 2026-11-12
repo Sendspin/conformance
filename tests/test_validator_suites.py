@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import random
+import types
 import unittest
 from collections.abc import Sequence
 from typing import Any
@@ -150,13 +151,13 @@ class CodeEntryTests(unittest.IsolatedAsyncioTestCase):
 
 
 
-def goodbye(recorder: Recorder, reason: str) -> None:
+def goodbye(recorder: Recorder, reason: str, *, client_id: str = "client") -> None:
     """Record a client/goodbye with `reason`, as the server's frame observer would."""
     message = {"type": "client/goodbye", "payload": {"reason": reason}}
     recorder.observe_frame(
         ObservedFrame(
             connection=2,
-            client_id="client",
+            client_id=client_id,
             direction=FrameDirection.IN,
             phase=FramePhase.TRANSPORT,
             data=b"\x00" + json.dumps(message).encode(),
@@ -173,7 +174,7 @@ class StepErrorTests(unittest.IsolatedAsyncioTestCase):
             prompter=AutoAnswerPrompter(output=io.StringIO()),
             recorder=Recorder(verbose=io.StringIO()),
             store=None,  # type: ignore[arg-type]
-            link=None,  # type: ignore[arg-type]
+            link=types.SimpleNamespace(client_id="client"),  # type: ignore[arg-type]
             options=SuiteOptions(suites=frozenset(Suite), fault_injection=False),
         )
 
@@ -221,6 +222,17 @@ class StepErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(busy.frames, (recorder.frames[0].id,))
         self.assertIs(kept.verdict, Verdict.PASS)
         self.assertEqual(output.getvalue().count("another server is connected"), 1)
+
+    async def test_another_clients_goodbye_leaves_the_findings_alone(self) -> None:
+        runner = self.runner()
+        failed = Finding("UNPAIRED-001", Verdict.FAIL, "ref", "real failure")
+
+        async def fails() -> list[Finding]:
+            goodbye(runner._recorder, "concurrent_attempt", client_id="other")  # noqa: SLF001
+            return [failed]
+
+        await runner._step("U1", "x", fails)  # noqa: SLF001
+        self.assertEqual(runner._findings, [failed])  # noqa: SLF001
 
     async def test_a_goodbye_from_an_earlier_step_does_not_taint_the_next(self) -> None:
         runner = self.runner()
