@@ -8,15 +8,18 @@ import types
 import unittest
 from collections.abc import Sequence
 from typing import Any
+from unittest import mock
 
 from conformance._vendor.aiosendspin.noise import b64url_encode, decode_psk_token
 from conformance._vendor.aiosendspin.server import FrameDirection, FramePhase, ObservedFrame
+from conformance.validator import first_activation
 from conformance.validator.code_pairing import CodePairing
 from conformance.validator.findings import Finding, Verdict
 from conformance.validator.prompter import Answer, AutoAnswerPrompter, Reply, TerminalPrompter
 from conformance.validator.recorder import REDACTED, Recorder
 from conformance.validator.suites import (
     STEP_CHECKS,
+    Link,
     Suite,
     SuiteOptions,
     SuiteRunner,
@@ -165,6 +168,22 @@ def goodbye(recorder: Recorder, reason: str, *, client_id: str = "client") -> No
         )
     )
 
+
+def activate(recorder: Recorder, activities: list[str]) -> None:
+    """Record the validator's server/activate declaring `activities`."""
+    message = {"type": "server/activate", "payload": {"activities": activities}}
+    recorder.observe_frame(
+        ObservedFrame(
+            connection=2,
+            client_id="client",
+            direction=FrameDirection.OUT,
+            phase=FramePhase.TRANSPORT,
+            data=b"\x00" + json.dumps(message).encode(),
+            monotonic_us=1,
+        )
+    )
+
+
 class StepErrorTests(unittest.IsolatedAsyncioTestCase):
     """A step that raises is reported as a tool error, and the session goes on."""
 
@@ -223,6 +242,25 @@ class StepErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(kept.verdict, Verdict.PASS)
         self.assertEqual(output.getvalue().count("another server is connected"), 1)
 
+    async def test_only_a_goodbye_to_the_lowest_priority_means_busy(self) -> None:
+        """A goodbye to the step's own activation is the client's verdict on it."""
+        for activities, verdict in (
+            ([], Verdict.TOOL_ERROR),
+            (["playback"], Verdict.FAIL),
+            (["pairing"], Verdict.FAIL),
+        ):
+            with self.subTest(activities=activities):
+                runner = self.runner()
+                recorder = runner._recorder  # noqa: SLF001
+
+                async def answered(activities: list[str] = activities) -> list[Finding]:
+                    activate(recorder, activities)
+                    goodbye(recorder, "concurrent_attempt")
+                    return [Finding("UNPAIRED-002", Verdict.FAIL, "ref", "wrong goodbye")]
+
+                await runner._step("U2", "x", answered)  # noqa: SLF001
+                self.assertIs(runner._findings[0].verdict, verdict)  # noqa: SLF001
+
     async def test_another_clients_goodbye_leaves_the_findings_alone(self) -> None:
         runner = self.runner()
         failed = Finding("UNPAIRED-001", Verdict.FAIL, "ref", "real failure")
@@ -251,6 +289,88 @@ class StepErrorTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(asyncio.CancelledError):
             await self.runner()._step("R1", "y", cancelled)  # noqa: SLF001
+
+
+
+class Terminal(io.StringIO):
+    """Output that reports itself as a terminal."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+class ScreenTests(unittest.IsolatedAsyncioTestCase):
+    """Each step starts on a cleared terminal that still shows the last step's results."""
+
+    def runner(self, output: io.StringIO) -> SuiteRunner:
+        return SuiteRunner(
+            server=None,  # type: ignore[arg-type]
+            prompter=AutoAnswerPrompter(output=output),
+            recorder=Recorder(verbose=io.StringIO()),
+            store=None,  # type: ignore[arg-type]
+            link=types.SimpleNamespace(client_id="client"),  # type: ignore[arg-type]
+            options=SuiteOptions(suites=frozenset(Suite), fault_injection=False),
+        )
+
+    async def test_a_step_clears_the_terminal_and_recaps_the_last_step(self) -> None:
+        output = Terminal()
+        runner = self.runner(output)
+
+        async def passes() -> list[Finding]:
+            return [Finding("UNPAIRED-001", Verdict.PASS, "ref", "sentinel handshake")]
+
+        await runner._step("U1", "first", passes)  # noqa: SLF001
+        await runner._step("U2", "second", passes)  # noqa: SLF001
+
+        screens = output.getvalue().split("\x1b[H\x1b[2J")
+        self.assertEqual(len(screens), 3)
+        self.assertNotIn("sentinel handshake", screens[1].split("[U1]")[0])
+        self.assertIn("Since the last step:", screens[2])
+        self.assertLess(
+            screens[2].index("sentinel handshake"), screens[2].index("[U2] second")
+        )
+
+    async def test_piped_output_is_never_cleared_or_repeated(self) -> None:
+        output = io.StringIO()
+        runner = self.runner(output)
+
+        async def passes() -> list[Finding]:
+            return [Finding("UNPAIRED-001", Verdict.PASS, "ref", "sentinel handshake")]
+
+        await runner._step("U1", "first", passes)  # noqa: SLF001
+        await runner._step("U2", "second", passes)  # noqa: SLF001
+
+        self.assertNotIn("\x1b", output.getvalue())
+        self.assertEqual(output.getvalue().count("sentinel handshake"), 2)
+
+
+
+class HeldReuseTests(unittest.IsolatedAsyncioTestCase):
+    """A connection an earlier step held and abandoned is activated before it is reused."""
+
+    async def reuse(self, *, hold: bool) -> mock.AsyncMock:
+        link = Link(
+            None,  # type: ignore[arg-type]
+            AutoAnswerPrompter(output=io.StringIO()),
+            Recorder(verbose=io.StringIO()),
+            client_id="client",
+            url="ws://client",
+            timeout_s=1,
+        )
+        held = types.SimpleNamespace()
+        with (
+            mock.patch.object(Link, "connection", return_value=held),
+            mock.patch.object(first_activation, "is_held", return_value=True),
+            mock.patch.object(first_activation, "release", new=mock.AsyncMock()) as release,
+        ):
+            self.assertEqual(await link._reuse(3, hold=hold), 3)  # noqa: SLF001
+        return release
+
+    async def test_a_step_that_does_not_hold_releases_the_hold(self) -> None:
+        (await self.reuse(hold=False)).assert_awaited_once()
+
+    async def test_a_step_that_holds_keeps_it(self) -> None:
+        (await self.reuse(hold=True)).assert_not_awaited()
 
 
 if __name__ == "__main__":

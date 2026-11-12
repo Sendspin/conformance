@@ -17,6 +17,7 @@ from typing import Protocol, TextIO
 
 from .findings import Finding, Verdict
 
+_CLEAR_SCREEN = "\x1b[H\x1b[2J"
 _CONTROLS_HINT = "s=skip, r=retry, ?=not sure"
 _SYMBOLS = {
     Verdict.PASS: "✓",
@@ -74,6 +75,9 @@ class Prompter(Protocol):
     def instruct(self, text: str) -> None:
         """Tell the user something, such as what to do in their app next."""
 
+    def clear(self) -> bool:
+        """Start a fresh screen for the next step; False where the display cannot."""
+
     def report_check(self, finding: Finding) -> None:
         """Show a check's verdict as it resolves."""
 
@@ -109,6 +113,14 @@ class TerminalPrompter:
     def instruct(self, text: str) -> None:
         """Print `text`."""
         self._write(text)
+
+    def clear(self) -> bool:
+        """Clear a terminal; piped output, such as a CI log, is left alone."""
+        isatty = getattr(self._output, "isatty", None)
+        if isatty is None or not isatty():
+            return False
+        print(_CLEAR_SCREEN, end="", file=self._output, flush=True)
+        return True
 
     def report_check(self, finding: Finding) -> None:
         """Print one line for `finding`, with its spec reference and frames unless it passed."""

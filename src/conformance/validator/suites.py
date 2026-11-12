@@ -37,7 +37,7 @@ from conformance._vendor.aiosendspin.noise.pairing import PairingAttempt
 from conformance._vendor.aiosendspin.server import SendspinServer
 from conformance._vendor.aiosendspin.server.connection import SendspinConnection
 
-from . import code_pairing, code_pairing_checks, suite_checks
+from . import code_pairing, code_pairing_checks, first_activation, suite_checks
 from .checks import ConnectionRecord
 from .code_pairing import CodePairing
 from .findings import Evidence, Finding, Verdict
@@ -136,6 +136,7 @@ class Link:
         self._recorder = recorder
         self._url = url
         self._timeout_s = timeout_s
+        first_activation.install()
 
     @property
     def current(self) -> int | None:
@@ -211,16 +212,40 @@ class Link:
             return False
         return True
 
-    async def open_connection(self) -> int | None:
-        """Return the current connection if it is open, or else a new one."""
-        if self.is_open(self.current):
-            return self.current
-        return await self.reconnect()
+    async def open_connection(self, *, hold: bool = False) -> int | None:
+        """
+        Return the current connection if it is open, or else a new one.
 
-    async def reconnect(self) -> int | None:
+        With `hold`, a new connection the validator dials sends no server/activate until
+        the step sends its own, so the client admits it on the step's priority.
+        """
+        current = self.current
+        if current is not None and self.is_open(current):
+            return await self._reuse(current, hold=hold)
+        return await self.reconnect(hold=hold)
+
+    async def _reuse(self, number: int, *, hold: bool) -> int:
+        """
+        Return open connection `number` for a step to use again.
+
+        A connection an earlier step held and then abandoned gets aiosendspin's own first
+        activation, unless this step holds it too.
+        """
+        connection = self.connection(number)
+        if not hold and connection is not None and first_activation.is_held(connection):
+            await first_activation.release(connection)
+        return number
+
+    async def reconnect(self, *, hold: bool = False) -> int | None:
         """Close the current connection, then return the client's next one, or None."""
         await self._close()
-        return await self._next(self._watermark(), self._timeout_s)
+        if hold and self._url is not None:
+            first_activation.hold_next(self._url, self._recorder.notify)
+        try:
+            return await self._next(self._watermark(), self._timeout_s)
+        finally:
+            if self._url is not None:
+                first_activation.forget(self._url)
 
     async def await_reconnect(self, previous: int) -> int | None:
         """
@@ -234,7 +259,7 @@ class Link:
         return await self._next(previous, self._timeout_s)
 
     async def connect_matching(
-        self, holds: Callable[[ConnectionRecord], bool], mismatch: str
+        self, holds: Callable[[ConnectionRecord], bool], mismatch: str, *, hold: bool = False
     ) -> int | None:
         """
         Return an open connection whose record satisfies `holds`, or None.
@@ -247,7 +272,7 @@ class Link:
         number = self.current
         for attempt in range(_MATCH_ATTEMPTS):
             if self.is_open(number) and holds(self.record(number)):
-                return number
+                return await self._reuse(number, hold=hold)
             if attempt:
                 self._prompter.instruct(mismatch)
                 answer = await self._prompter.confirm("Try again?")
@@ -255,7 +280,7 @@ class Link:
                     answer.reply is Reply.ANSWERED and answer.value
                 ):
                     return None
-            number = await self.reconnect()
+            number = await self.reconnect(hold=hold)
             if number is None:
                 return None
         return number if self.is_open(number) and holds(self.record(number)) else None
@@ -329,6 +354,8 @@ class SuiteRunner:
         self._options = options
         self._findings: list[Finding] = []
         self._warned_busy = False
+        self._busy_hint_pending = False
+        self._screen_start = 0
         self._codes = CodePairing(server, prompter, recorder, link, random.Random(options.seed))
 
     async def run(self) -> list[Finding]:
@@ -355,6 +382,7 @@ class SuiteRunner:
         `evidence` replaces what each finding rests on, when the whole step rests on it.
         """
         mark = len(self._recorder.frames)
+        self._new_screen()
         while True:
             self._prompter.instruct(f"\n[{step}] {instruction}")
             answer = await self._prompter.confirm("Ready?")
@@ -372,13 +400,27 @@ class SuiteRunner:
                 )
         else:
             findings = _not_run(step, Verdict.SKIPPED, f"the user skipped {step}")
-        turned_away = _turned_away(self._recorder.frames[mark:], self._link.client_id)
+        turned_away = _turned_away(self._recorder.frames, mark, self._link.client_id)
         if turned_away is not None:
             if not self._warned_busy:
-                self._warned_busy = True
+                self._warned_busy = self._busy_hint_pending = True
                 self._prompter.instruct(_BUSY_HINT)
             findings = [_busy(f, turned_away) for f in findings]
         self._report([replace(f, evidence=evidence) if evidence else f for f in findings])
+
+    def _new_screen(self) -> None:
+        """Clear the screen for a step, keeping on it what was reported since the last one."""
+        recap = self._findings[self._screen_start :]
+        self._screen_start = len(self._findings)
+        if not self._prompter.clear():
+            return
+        if recap:
+            self._prompter.instruct("Since the last step:")
+            for finding in recap:
+                self._prompter.report_check(finding)
+        if self._busy_hint_pending:
+            self._busy_hint_pending = False
+            self._prompter.instruct(_BUSY_HINT)
 
     def _report(self, findings: Sequence[Finding]) -> None:
         for finding in findings:
@@ -423,6 +465,7 @@ class SuiteRunner:
         number = await self._link.connect_matching(
             lambda record: suite_checks.unpaired_access(record) is False,
             "Your app still reports unpaired access on. Turn it off, then try again.",
+            hold=True,
         )
         if number is None:
             return _not_reached("U2", "no connection reported unpaired access off in time")
@@ -437,6 +480,7 @@ class SuiteRunner:
         number = await self._link.connect_matching(
             lambda record: suite_checks.unpaired_access(record) is False,
             "Your app reports unpaired access on. Turn it off for this step, then try again.",
+            hold=True,
         )
         if number is None:
             return _not_reached("U4", "no connection reported unpaired access off in time")
@@ -526,7 +570,7 @@ class SuiteRunner:
         if any(f.verdict is not Verdict.PASS for f in findings):
             return findings + _not_reached("P1", "no usable pairing token", skip=2)
         pairing_psk = decode_psk_token(token).pairing_psk
-        number = await self._link.open_connection()
+        number = await self._link.open_connection(hold=True)
         if number is None:
             return findings + _not_reached("P1", "your app did not reconnect in time", skip=2)
         since = self._link.last_frame(number)
@@ -665,17 +709,27 @@ class SuiteRunner:
         """
         Send `payload` as a server/activate aiosendspin would not send itself.
 
-        It goes out after aiosendspin's own initial activation. False if the
-        connection ended before it went out.
+        On a connection held for it, `payload` is the first activation. Otherwise it goes
+        out after aiosendspin's own. False if the connection ended before it went out.
         """
+
+        def held() -> bool:
+            connection = self._link.connection(number)
+            return connection is not None and first_activation.is_held(connection)
+
         initial = await self._link.until(
-            number, lambda r: r.closed or bool(r.outbound("server/activate")), _RESPONSE_S
+            number,
+            lambda r: r.closed or bool(r.outbound("server/activate")) or held(),
+            _RESPONSE_S,
         )
         connection = self._link.connection(number)
         if not initial or connection is None or not self._link.is_open(number):
             return False
         before = len(self._link.record(number).outbound("server/activate"))
-        connection.send_priority_message(ServerActivateMessage(payload=payload))
+        if first_activation.is_held(connection):
+            await first_activation.release(connection, payload)
+        else:
+            connection.send_priority_message(ServerActivateMessage(payload=payload))
         await self._link.until(
             number, lambda r: r.closed or len(r.outbound("server/activate")) > before, _RESPONSE_S
         )
@@ -798,19 +852,40 @@ _BUSY_HINT = (
 )
 
 
-def _turned_away(frames: Sequence[RecordedFrame], client_id: str) -> RecordedFrame | None:
-    """Return `client_id`'s first client/goodbye 'concurrent_attempt' among `frames`, if any."""
-    return next(
-        (
-            f
-            for f in frames
-            if f.client_id == client_id
-            and f.inbound
-            and f.type == "client/goodbye"
-            and (f.payload or {}).get("reason") == GoodbyeReason.CONCURRENT_ATTEMPT.value
-        ),
-        None,
-    )
+def _turned_away(
+    frames: Sequence[RecordedFrame], mark: int, client_id: str
+) -> RecordedFrame | None:
+    """
+    Return the first client/goodbye 'concurrent_attempt' from `client_id` after `frames[:mark]`
+    that lost admission on the validator's own lowest priority, if any.
+
+    Only a connection whose first server/activate declared no activities, or that saw none,
+    can lose to an idle server. A goodbye to the step's own activation is the client's
+    verdict on it: an inadmissible one must not be arbitrated, and a pairing one is
+    refused with pair/abort (connection.md, "Multiple servers (server-initiated)").
+    """
+    for goodbye in frames[mark:]:
+        if not (
+            goodbye.client_id == client_id
+            and goodbye.inbound
+            and goodbye.type == "client/goodbye"
+            and (goodbye.payload or {}).get("reason") == GoodbyeReason.CONCURRENT_ATTEMPT.value
+        ):
+            continue
+        first = next(
+            (
+                f
+                for f in frames
+                if f.connection == goodbye.connection
+                and f.id < goodbye.id
+                and not f.inbound
+                and f.type == "server/activate"
+            ),
+            None,
+        )
+        if first is None or not (first.payload or {}).get("activities"):
+            return goodbye
+    return None
 
 
 def _busy(finding: Finding, goodbye: RecordedFrame) -> Finding:
