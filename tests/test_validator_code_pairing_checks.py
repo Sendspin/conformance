@@ -153,6 +153,13 @@ class DynamicTests(unittest.TestCase):
         finding = only(checks.check_commit(connection.record(), 0, checks.DYNAMIC_QR))
         self.assertEqual((finding.id, finding.verdict), ("PAIR-DYN-QR-001", Verdict.FAIL))
 
+    def test_no_pairing_activation_is_unanswered_not_a_crash(self) -> None:
+        connection = Connection()
+        connection.came("client/hello", {})
+        finding = only(checks.check_pairing_index(connection.record(), 0, "PAIR-DYN-002"))
+        self.assertEqual(finding.id, "PAIR-DYN-002")
+        self.assertIsNot(finding.verdict, Verdict.PASS)
+
     def test_a_pairing_index_must_count_activations_since_the_handshake(self) -> None:
         connection = Connection()
         connection.out("server/activate", DYNAMIC_ACTIVATION)

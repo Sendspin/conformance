@@ -156,6 +156,8 @@ def check_pairing_index(record: ConnectionRecord, since: int, check_id: str) -> 
     leftover the server discards; it fails only when no answer carries the right one.
     """
     activations = _pairing_activations(record, since)
+    if not activations:
+        return [_unanswered(record, check_id, "client/pair-init or client/pair-pending")]
     judged: list[RecordedFrame] = []
     for activation, end in zip(activations, [*(a.id for a in activations[1:]), None], strict=True):
         answers = [
