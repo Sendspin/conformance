@@ -37,7 +37,7 @@ from conformance._vendor.aiosendspin.noise.pairing import PairingAttempt
 from conformance._vendor.aiosendspin.server import SendspinServer
 from conformance._vendor.aiosendspin.server.connection import SendspinConnection
 
-from . import code_pairing, code_pairing_checks, suite_checks
+from . import code_pairing, code_pairing_checks, first_activation, suite_checks
 from .checks import ConnectionRecord
 from .code_pairing import CodePairing
 from .findings import Evidence, Finding, Verdict
@@ -136,6 +136,7 @@ class Link:
         self._recorder = recorder
         self._url = url
         self._timeout_s = timeout_s
+        first_activation.install()
 
     @property
     def current(self) -> int | None:
@@ -211,16 +212,27 @@ class Link:
             return False
         return True
 
-    async def open_connection(self) -> int | None:
-        """Return the current connection if it is open, or else a new one."""
+    async def open_connection(self, *, hold: bool = False) -> int | None:
+        """
+        Return the current connection if it is open, or else a new one.
+
+        With `hold`, a new connection the validator dials sends no server/activate until
+        the step sends its own, so the client admits it on the step's priority.
+        """
         if self.is_open(self.current):
             return self.current
-        return await self.reconnect()
+        return await self.reconnect(hold=hold)
 
-    async def reconnect(self) -> int | None:
+    async def reconnect(self, *, hold: bool = False) -> int | None:
         """Close the current connection, then return the client's next one, or None."""
         await self._close()
-        return await self._next(self._watermark(), self._timeout_s)
+        if hold and self._url is not None:
+            first_activation.hold_next(self._url, self._recorder.notify)
+        try:
+            return await self._next(self._watermark(), self._timeout_s)
+        finally:
+            if self._url is not None:
+                first_activation.forget(self._url)
 
     async def await_reconnect(self, previous: int) -> int | None:
         """
@@ -234,7 +246,7 @@ class Link:
         return await self._next(previous, self._timeout_s)
 
     async def connect_matching(
-        self, holds: Callable[[ConnectionRecord], bool], mismatch: str
+        self, holds: Callable[[ConnectionRecord], bool], mismatch: str, *, hold: bool = False
     ) -> int | None:
         """
         Return an open connection whose record satisfies `holds`, or None.
@@ -255,7 +267,7 @@ class Link:
                     answer.reply is Reply.ANSWERED and answer.value
                 ):
                     return None
-            number = await self.reconnect()
+            number = await self.reconnect(hold=hold)
             if number is None:
                 return None
         return number if self.is_open(number) and holds(self.record(number)) else None
@@ -423,6 +435,7 @@ class SuiteRunner:
         number = await self._link.connect_matching(
             lambda record: suite_checks.unpaired_access(record) is False,
             "Your app still reports unpaired access on. Turn it off, then try again.",
+            hold=True,
         )
         if number is None:
             return _not_reached("U2", "no connection reported unpaired access off in time")
@@ -437,6 +450,7 @@ class SuiteRunner:
         number = await self._link.connect_matching(
             lambda record: suite_checks.unpaired_access(record) is False,
             "Your app reports unpaired access on. Turn it off for this step, then try again.",
+            hold=True,
         )
         if number is None:
             return _not_reached("U4", "no connection reported unpaired access off in time")
@@ -526,7 +540,7 @@ class SuiteRunner:
         if any(f.verdict is not Verdict.PASS for f in findings):
             return findings + _not_reached("P1", "no usable pairing token", skip=2)
         pairing_psk = decode_psk_token(token).pairing_psk
-        number = await self._link.open_connection()
+        number = await self._link.open_connection(hold=True)
         if number is None:
             return findings + _not_reached("P1", "your app did not reconnect in time", skip=2)
         since = self._link.last_frame(number)
@@ -665,17 +679,27 @@ class SuiteRunner:
         """
         Send `payload` as a server/activate aiosendspin would not send itself.
 
-        It goes out after aiosendspin's own initial activation. False if the
-        connection ended before it went out.
+        On a connection held for it, `payload` is the first activation. Otherwise it goes
+        out after aiosendspin's own. False if the connection ended before it went out.
         """
+
+        def held() -> bool:
+            connection = self._link.connection(number)
+            return connection is not None and first_activation.is_held(connection)
+
         initial = await self._link.until(
-            number, lambda r: r.closed or bool(r.outbound("server/activate")), _RESPONSE_S
+            number,
+            lambda r: r.closed or bool(r.outbound("server/activate")) or held(),
+            _RESPONSE_S,
         )
         connection = self._link.connection(number)
         if not initial or connection is None or not self._link.is_open(number):
             return False
         before = len(self._link.record(number).outbound("server/activate"))
-        connection.send_priority_message(ServerActivateMessage(payload=payload))
+        if first_activation.is_held(connection):
+            await first_activation.release(connection, payload)
+        else:
+            connection.send_priority_message(ServerActivateMessage(payload=payload))
         await self._link.until(
             number, lambda r: r.closed or len(r.outbound("server/activate")) > before, _RESPONSE_S
         )

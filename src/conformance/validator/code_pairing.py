@@ -117,7 +117,7 @@ class CodePairing:
         """
         digits = pairing_format is PairingCodeFormat.DIGITS
         step, prefix = ("P2", DYNAMIC) if digits else ("P2 QR", DYNAMIC_QR)
-        number = await self._link.open_connection()
+        number = await self._link.open_connection(hold=True)
         if number is None:
             return _not_reached(step, "your app did not reconnect in time")
         since = self._link.last_frame(number)
@@ -193,7 +193,7 @@ class CodePairing:
 
     async def static(self) -> list[Finding]:
         """P3: pair with the static code, first activating with the pairing window closed."""
-        number = await self._link.open_connection()
+        number = await self._link.open_connection(hold=True)
         if number is None:
             return _not_reached("P3", "your app did not reconnect in time")
         since = self._link.last_frame(number)
@@ -238,7 +238,7 @@ class CodePairing:
     async def cancel(self, methods: dict[str, Any]) -> list[Finding]:
         """P4 cancel: start an attempt, then abort it with `user_cancelled` and a new activation."""
         attempt = self._idle_attempt(methods, None)
-        number = await self._link.open_connection()
+        number = await self._link.open_connection(hold=True)
         if attempt is None or number is None:
             why = "the client offers no pairing-code method" if attempt is None else "no connection"
             return _not_reached("P4 cancel", why)
@@ -260,7 +260,7 @@ class CodePairing:
             "[P4 timeout window] Open the pairing window on your device (button or gesture), "
             "then leave your device alone.",
         )
-        number = await self._link.open_connection()
+        number = await self._link.open_connection(hold=True)
         if attempt is None or number is None:
             why = "the client offers no pairing-code method" if attempt is None else "no connection"
             return _not_reached("P4 timeout", why)
@@ -275,7 +275,7 @@ class CodePairing:
 
     async def lockout(self) -> list[Finding]:
         """P3 lockout: five wrong static codes, then a sixth attempt the client must hold back."""
-        number = await self._link.open_connection()
+        number = await self._link.open_connection(hold=True)
         if number is None:
             return _not_reached("P3 lockout", "your app did not reconnect in time")
         since = self._link.last_frame(number)
