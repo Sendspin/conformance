@@ -14,6 +14,9 @@ ref="${SENDSPIN_VALIDATE_REF:-main}"
 source_url="https://github.com/Sendspin/conformance/archive/$ref.tar.gz"
 constraints_url="https://raw.githubusercontent.com/Sendspin/conformance/$ref/scripts/sendspin-validate-constraints.txt"
 
+# What the user's shell will search, before this script adds uv's directory for itself.
+user_path="$PATH"
+
 say() { printf '%s\n' "$*"; }
 fail() {
     say "error: $*" >&2
@@ -39,14 +42,15 @@ say "Installing sendspin-validate from $ref..."
 uv tool install --force --constraints "$constraints_url" "sendspin-conformance @ $source_url"
 
 bin_dir="$(uv tool dir --bin)"
-case ":$PATH:" in
+case ":$user_path:" in
     *":$bin_dir:"*)
         say ""
         say "Done. Run: sendspin-validate"
         ;;
     *)
         say ""
-        say "Done. $bin_dir is not on your PATH yet: run 'uv tool update-shell', open a new"
-        say "terminal, then run: sendspin-validate"
+        uv tool update-shell >/dev/null 2>&1 || true
+        say "Done. Open a new terminal, then run: sendspin-validate"
+        say "(or now: $bin_dir/sendspin-validate)"
         ;;
 esac
