@@ -8,15 +8,18 @@ import types
 import unittest
 from collections.abc import Sequence
 from typing import Any
+from unittest import mock
 
 from conformance._vendor.aiosendspin.noise import b64url_encode, decode_psk_token
 from conformance._vendor.aiosendspin.server import FrameDirection, FramePhase, ObservedFrame
+from conformance.validator import first_activation
 from conformance.validator.code_pairing import CodePairing
 from conformance.validator.findings import Finding, Verdict
 from conformance.validator.prompter import Answer, AutoAnswerPrompter, Reply, TerminalPrompter
 from conformance.validator.recorder import REDACTED, Recorder
 from conformance.validator.suites import (
     STEP_CHECKS,
+    Link,
     Suite,
     SuiteOptions,
     SuiteRunner,
@@ -304,6 +307,35 @@ class ScreenTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("\x1b", output.getvalue())
         self.assertEqual(output.getvalue().count("sentinel handshake"), 2)
+
+
+
+class HeldReuseTests(unittest.IsolatedAsyncioTestCase):
+    """A connection an earlier step held and abandoned is activated before it is reused."""
+
+    async def reuse(self, *, hold: bool) -> mock.AsyncMock:
+        link = Link(
+            None,  # type: ignore[arg-type]
+            AutoAnswerPrompter(output=io.StringIO()),
+            Recorder(verbose=io.StringIO()),
+            client_id="client",
+            url="ws://client",
+            timeout_s=1,
+        )
+        held = types.SimpleNamespace()
+        with (
+            mock.patch.object(Link, "connection", return_value=held),
+            mock.patch.object(first_activation, "is_held", return_value=True),
+            mock.patch.object(first_activation, "release", new=mock.AsyncMock()) as release,
+        ):
+            self.assertEqual(await link._reuse(3, hold=hold), 3)  # noqa: SLF001
+        return release
+
+    async def test_a_step_that_does_not_hold_releases_the_hold(self) -> None:
+        (await self.reuse(hold=False)).assert_awaited_once()
+
+    async def test_a_step_that_holds_keeps_it(self) -> None:
+        (await self.reuse(hold=True)).assert_not_awaited()
 
 
 if __name__ == "__main__":

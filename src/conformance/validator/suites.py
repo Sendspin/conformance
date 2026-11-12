@@ -219,9 +219,22 @@ class Link:
         With `hold`, a new connection the validator dials sends no server/activate until
         the step sends its own, so the client admits it on the step's priority.
         """
-        if self.is_open(self.current):
-            return self.current
+        current = self.current
+        if current is not None and self.is_open(current):
+            return await self._reuse(current, hold=hold)
         return await self.reconnect(hold=hold)
+
+    async def _reuse(self, number: int, *, hold: bool) -> int:
+        """
+        Return open connection `number` for a step to use again.
+
+        A connection an earlier step held and then abandoned gets aiosendspin's own first
+        activation, unless this step holds it too.
+        """
+        connection = self.connection(number)
+        if not hold and connection is not None and first_activation.is_held(connection):
+            await first_activation.release(connection)
+        return number
 
     async def reconnect(self, *, hold: bool = False) -> int | None:
         """Close the current connection, then return the client's next one, or None."""
@@ -259,7 +272,7 @@ class Link:
         number = self.current
         for attempt in range(_MATCH_ATTEMPTS):
             if self.is_open(number) and holds(self.record(number)):
-                return number
+                return await self._reuse(number, hold=hold)
             if attempt:
                 self._prompter.instruct(mismatch)
                 answer = await self._prompter.confirm("Try again?")
