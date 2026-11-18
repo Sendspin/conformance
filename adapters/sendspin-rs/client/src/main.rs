@@ -1,22 +1,18 @@
 use clap::Parser;
-use futures_util::{SinkExt, StreamExt};
-use sendspin::protocol::client::{ArtworkChunk, AudioChunk, BinaryFrame};
+use sendspin::audio::{AudioBuffer, OutputError, PlayerEvent, PlayerOutput};
 use sendspin::protocol::messages::{
-    ArtworkChannel, ArtworkSource, ArtworkV1Support, AudioFormatSpec, ClientCommand, ClientHello,
-    ClientState, ClientSyncState, ClientTime, ConnectionReason, ControllerCommand,
-    ControllerCommandType, ControllerState, DeviceInfo, ImageFormat, Message, MetadataState,
-    PlayerState, PlayerV1Support, ServerHello, StreamPlayerConfig,
+    ArtworkChannel, ArtworkSource, ArtworkV1Support, AudioFormatSpec, ClientCommand,
+    ControllerCommand, ControllerCommandType, ControllerState, ImageFormat, Message,
+    MetadataState, PlayerState, PlayerV1Support, StreamPlayerConfig,
 };
-use sendspin::ProtocolClientBuilder;
+use sendspin::roles::{ArtworkEvent, ArtworkOutput};
+use sendspin::{MemoryStore, ProtocolClient, ProtocolClientBuilder};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpListener;
 use tokio::time::sleep;
-use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::{accept_async, WebSocketStream};
 
 #[derive(Parser, Debug, Clone)]
 struct Args {
@@ -163,38 +159,8 @@ fn register_endpoint(registry_path: &Path, client_name: &str, url: &str) -> Resu
     write_json(registry_path, &payload)
 }
 
-fn current_micros() -> i64 {
-    static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let start = PROCESS_START.get_or_init(Instant::now);
-    start.elapsed().as_micros() as i64
-}
-
-fn is_player_scenario(scenario_id: &str) -> bool {
-    matches!(
-        scenario_id,
-        "client-initiated-pcm"
-            | "server-initiated-pcm"
-            | "server-initiated-pcm-24bit"
-            | "server-initiated-flac"
-            | "server-initiated-audio-chunk-framing"
-    )
-}
-
 fn is_chunk_framing_scenario(scenario_id: &str) -> bool {
     scenario_id == "server-initiated-audio-chunk-framing"
-}
-
-// Spans the RC1 audio chunk header, so the prefix shows every header field. A
-// frame with a shorter header yields that many bytes of audio past it; the rest
-// of the payload is never recorded.
-const FRAME_PREFIX_BYTES: usize = 13;
-
-fn frame_record(frame: &[u8]) -> serde_json::Value {
-    serde_json::json!({
-        "byte_count": frame.len(),
-        "leading_hex": hex_lower(&frame[..frame.len().min(FRAME_PREFIX_BYTES)]),
-        "payload_byte_count": null,
-    })
 }
 
 fn is_metadata_scenario(scenario_id: &str) -> bool {
@@ -241,105 +207,6 @@ async fn wait_for_server_url(
     Err(format!("Timed out waiting for server {server_name:?}"))
 }
 
-fn build_client_hello(args: &Args) -> ClientHello {
-    let (supported_roles, player_v1_support, artwork_v1_support) =
-        if is_metadata_scenario(&args.scenario_id) {
-            (vec!["metadata@v1".to_string()], None, None)
-        } else if is_controller_scenario(&args.scenario_id) {
-            (vec!["controller@v1".to_string()], None, None)
-        } else if is_artwork_scenario(&args.scenario_id) {
-            (
-                vec!["artwork@v1".to_string()],
-                None,
-                Some(ArtworkV1Support {
-                    channels: vec![ArtworkChannel {
-                        source: ArtworkSource::Album,
-                        format: match args.artwork_format.as_str() {
-                            "png" => ImageFormat::Png,
-                            "bmp" => ImageFormat::Bmp,
-                            _ => ImageFormat::Jpeg,
-                        },
-                        media_width: args.artwork_width,
-                        media_height: args.artwork_height,
-                    }],
-                }),
-            )
-        } else {
-            (
-                vec!["player@v1".to_string()],
-                Some(PlayerV1Support {
-                    supported_formats: if args.preferred_codec == "pcm" {
-                        let bit_depth = if args.scenario_id == "server-initiated-pcm-24bit" {
-                            24
-                        } else {
-                            16
-                        };
-                        vec![AudioFormatSpec {
-                            codec: "pcm".to_string(),
-                            channels: 1,
-                            sample_rate: 8000,
-                            bit_depth,
-                        }]
-                    } else {
-                        vec![
-                            AudioFormatSpec {
-                                codec: "flac".to_string(),
-                                channels: 1,
-                                sample_rate: 8000,
-                                bit_depth: 16,
-                            },
-                            AudioFormatSpec {
-                                codec: "pcm".to_string(),
-                                channels: 1,
-                                sample_rate: 8000,
-                                bit_depth: 16,
-                            },
-                        ]
-                    },
-                    buffer_capacity: 2_000_000,
-                    supported_commands: vec!["volume".to_string(), "mute".to_string()],
-                }),
-                None,
-            )
-        };
-
-    ClientHello {
-        client_id: args.client_id.clone(),
-        name: args.client_name.clone(),
-        version: 1,
-        supported_roles,
-        device_info: Some(DeviceInfo {
-            product_name: Some("sendspin-rs Conformance Client".to_string()),
-            manufacturer: Some("Sendspin Conformance".to_string()),
-            software_version: Some("0.1.0".to_string()),
-            mac_address: None,
-        }),
-        player_v1_support,
-        artwork_v1_support,
-        visualizer_v1_support: None,
-    }
-}
-
-fn build_protocol_client_builder(args: &Args) -> ProtocolClientBuilder {
-    ProtocolClientBuilder::builder()
-        .client_id(args.client_id.clone())
-        .name(args.client_name.clone())
-        .product_name(Some("sendspin-rs Conformance Client".to_string()))
-        .manufacturer(Some("Sendspin Conformance".to_string()))
-        .software_version(Some("0.1.0".to_string()))
-        .player_v1_support(PlayerV1Support {
-            supported_formats: vec![AudioFormatSpec {
-                codec: "pcm".to_string(),
-                channels: 1,
-                sample_rate: 8000,
-                bit_depth: 16,
-            }],
-            buffer_capacity: 2_000_000,
-            supported_commands: vec!["volume".to_string(), "mute".to_string()],
-        })
-        .build()
-}
-
 fn normalize_metadata(metadata: &MetadataState) -> serde_json::Value {
     serde_json::json!({
         "title": metadata.title,
@@ -367,90 +234,6 @@ fn normalize_controller(controller: &ControllerState) -> serde_json::Value {
     })
 }
 
-fn build_summary(
-    args: &Args,
-    status: &str,
-    reason: Option<&str>,
-    peer_hello: Option<serde_json::Value>,
-    server_hello: Option<&ServerHello>,
-    current_stream: Option<&StreamPlayerConfig>,
-    audio_chunk_count: usize,
-    received_encoded_sha256: Option<String>,
-    received_pcm_sha256: Option<String>,
-    received_sample_count: usize,
-    metadata_update_count: usize,
-    received_metadata: Option<serde_json::Value>,
-    received_controller_state: Option<serde_json::Value>,
-    sent_controller_command: Option<serde_json::Value>,
-    artwork_stream: Option<serde_json::Value>,
-    artwork_channel: Option<u8>,
-    artwork_count: usize,
-    artwork_sha256: Option<String>,
-    artwork_byte_count: usize,
-) -> serde_json::Value {
-    let mut summary = serde_json::json!({
-        "status": status,
-        "reason": reason,
-        "implementation": "sendspin-rs",
-        "role": "client",
-        "scenario_id": args.scenario_id,
-        "initiator_role": args.initiator_role,
-        "preferred_codec": args.preferred_codec,
-        "client_name": args.client_name,
-        "client_id": args.client_id,
-        "peer_hello": peer_hello,
-        "server": server_hello.map(|hello| {
-            serde_json::json!({
-                "server_id": hello.server_id,
-                "name": hello.name,
-                "version": hello.version,
-                "active_roles": hello.active_roles,
-                "connection_reason": hello.connection_reason,
-            })
-        }).or_else(|| peer_hello.as_ref().and_then(|hello| hello.get("payload")).cloned()),
-    });
-
-    if is_metadata_scenario(&args.scenario_id) {
-        summary["metadata"] = serde_json::json!({
-            "update_count": metadata_update_count,
-            "received": received_metadata,
-        });
-    } else if is_controller_scenario(&args.scenario_id) {
-        summary["controller"] = serde_json::json!({
-            "received_state": received_controller_state,
-            "sent_command": sent_controller_command,
-        });
-    } else if is_artwork_scenario(&args.scenario_id) {
-        summary["stream"] = artwork_stream.unwrap_or(serde_json::Value::Null);
-        summary["artwork"] = serde_json::json!({
-            "channel": artwork_channel,
-            "received_count": artwork_count,
-            "received_sha256": artwork_sha256,
-            "byte_count": artwork_byte_count,
-        });
-    } else {
-        summary["stream"] = current_stream
-            .map(|stream| {
-                serde_json::json!({
-                    "codec": stream.codec,
-                    "sample_rate": stream.sample_rate,
-                    "channels": stream.channels,
-                    "bit_depth": stream.bit_depth,
-                    "codec_header": stream.codec_header,
-                })
-            })
-            .unwrap_or(serde_json::Value::Null);
-        summary["audio"] = serde_json::json!({
-            "audio_chunk_count": audio_chunk_count,
-            "received_encoded_sha256": received_encoded_sha256,
-            "received_pcm_sha256": received_pcm_sha256,
-            "received_sample_count": received_sample_count,
-        });
-    }
-
-    summary
-}
-
 fn build_ready(args: &Args, url: Option<&str>) -> serde_json::Value {
     let mut value = serde_json::json!({
         "status": "ready",
@@ -463,597 +246,352 @@ fn build_ready(args: &Args, url: Option<&str>) -> serde_json::Value {
     value
 }
 
-fn build_error_summary(args: &Args, reason: &str) -> serde_json::Value {
-    build_summary(
-        args,
-        "error",
-        Some(reason),
-        None,
-        None,
-        None,
-        0,
-        None,
-        None,
-        0,
-        0,
-        None,
-        None,
-        None,
-        None,
-        None,
-        0,
-        None,
-        0,
-    )
+
+struct NullOutput;
+
+impl PlayerOutput for NullOutput {
+    fn commit(&self, _: AudioBuffer) -> Result<(), OutputError> {
+        Ok(())
+    }
+    fn clear(&self) -> Result<(), OutputError> {
+        Ok(())
+    }
+    fn set_volume(&self, _: u8) -> Result<(), OutputError> {
+        Ok(())
+    }
+    fn set_mute(&self, _: bool) -> Result<(), OutputError> {
+        Ok(())
+    }
+    fn set_static_delay(&self, _: u16) -> Result<(), OutputError> {
+        Ok(())
+    }
 }
 
-async fn run_connected_session<S>(args: &Args, ws_stream: WebSocketStream<S>) -> serde_json::Value
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let (mut write, mut read) = ws_stream.split();
-
-    let hello = Message::ClientHello(build_client_hello(args));
-    let hello_json = match serde_json::to_string(&hello) {
-        Ok(value) => value,
-        Err(err) => return build_error_summary(args, &err.to_string()),
-    };
-    if let Err(err) = write.send(WsMessage::Text(hello_json.into())).await {
-        return build_error_summary(args, &err.to_string());
+impl ArtworkOutput for NullOutput {
+    type Prepared = ();
+    fn commit(&self, _: u8, _: ()) -> Result<(), OutputError> {
+        Ok(())
     }
+    fn end(&self) -> Result<(), OutputError> {
+        Ok(())
+    }
+}
 
-    let mut peer_hello: Option<serde_json::Value> = None;
-    let mut server_hello_payload: Option<ServerHello> = None;
-    let mut current_stream: Option<StreamPlayerConfig> = None;
-    let mut received_hasher = FloatPcmHasher::default();
-    let mut encoded_hasher = Sha256::new();
-    let mut audio_chunk_count = 0usize;
-    let mut encoded_byte_count = 0usize;
-    let mut received_frames: Vec<serde_json::Value> = Vec::new();
-    let mut metadata_update_count = 0usize;
-    let mut received_metadata: Option<serde_json::Value> = None;
-    let mut received_controller_state: Option<serde_json::Value> = None;
-    let mut sent_controller_command: Option<serde_json::Value> = None;
-    let mut artwork_stream: Option<serde_json::Value> = None;
-    let mut artwork_channel: Option<u8> = None;
-    let mut artwork_count = 0usize;
-    let mut artwork_hasher = Sha256::new();
-    let mut artwork_byte_count = 0usize;
-    let timeout = Duration::from_secs_f64(args.timeout_seconds);
+fn build_protocol_client_builder(args: &Args) -> ProtocolClientBuilder {
+    let builder = ProtocolClientBuilder::builder()
+        .persistence(Arc::new(MemoryStore::new()))
+        .unpaired_access(true)
+        .name(args.client_name.clone())
+        .product_name(Some("sendspin-rs Conformance Client".to_string()))
+        .manufacturer(Some("Sendspin Conformance".to_string()))
+        .software_version(Some("0.1.0".to_string()));
+    if is_metadata_scenario(&args.scenario_id) {
+        return builder.metadata().build();
+    }
+    if is_controller_scenario(&args.scenario_id) {
+        return builder.controller().build();
+    }
+    if is_artwork_scenario(&args.scenario_id) {
+        return builder
+            .artwork_v1_support(ArtworkV1Support {
+                channels: vec![ArtworkChannel {
+                    source: ArtworkSource::Album,
+                    format: match args.artwork_format.as_str() {
+                        "png" => ImageFormat::Png,
+                        "bmp" => ImageFormat::Bmp,
+                        _ => ImageFormat::Jpeg,
+                    },
+                    media_width: args.artwork_width,
+                    media_height: args.artwork_height,
+                }],
+            })
+            .build();
+    }
+    let pcm = |bit_depth| AudioFormatSpec {
+        codec: "pcm".to_string(),
+        channels: 1,
+        sample_rate: 8000,
+        bit_depth,
+    };
+    let supported_formats = if args.preferred_codec == "pcm" {
+        let bit_depth = if args.scenario_id == "server-initiated-pcm-24bit" {
+            24
+        } else {
+            16
+        };
+        vec![pcm(bit_depth)]
+    } else {
+        vec![
+            AudioFormatSpec {
+                codec: "flac".to_string(),
+                channels: 1,
+                sample_rate: 8000,
+                bit_depth: 16,
+            },
+            pcm(16),
+        ]
+    };
+    builder
+        .player_v1_support(PlayerV1Support {
+            supported_formats,
+            buffer_capacity: 2_000_000,
+            supported_commands: vec!["volume".to_string(), "mute".to_string()],
+        })
+        .initial_player_state(PlayerState {
+            volume: Some(100),
+            muted: Some(false),
+            static_delay_ms: None,
+            min_buffer_ms: None,
+            required_lead_time_ms: None,
+            supported_commands: None,
+        })
+        .build()
+}
 
-    let read_result = tokio::time::timeout(timeout, async {
-        loop {
-            let Some(frame) = read.next().await else {
-                break;
-            };
+#[derive(Default)]
+struct PlayerObservation {
+    stream: Option<StreamPlayerConfig>,
+    chunk_count: usize,
+    encoded: Sha256,
+    pcm: FloatPcmHasher,
+}
 
-            match frame.map_err(|err| err.to_string())? {
-                WsMessage::Text(text) => {
-                    let raw_value = serde_json::from_str::<serde_json::Value>(&text)
-                        .map_err(|err| err.to_string())?;
-                    let message_type = raw_value
-                        .get("type")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default();
-                    if is_artwork_scenario(&args.scenario_id) && message_type == "stream/start" {
-                        artwork_stream = raw_value
-                            .get("payload")
-                            .and_then(|payload| payload.get("artwork"))
-                            .cloned();
-                        continue;
+#[derive(Default)]
+struct ArtworkObservation {
+    stream: Option<serde_json::Value>,
+    channel: Option<u8>,
+    count: usize,
+    bytes: Sha256,
+    byte_count: usize,
+}
+
+#[derive(Default)]
+struct MessageObservation {
+    server: Option<serde_json::Value>,
+    metadata_update_count: usize,
+    metadata: Option<serde_json::Value>,
+    controller_state: Option<serde_json::Value>,
+    sent_command: Option<serde_json::Value>,
+}
+
+async fn run_session(args: &Args, client: ProtocolClient) -> serde_json::Value {
+    let server = serde_json::json!({
+        "server_id": client.server_id(),
+        "name": client.server_hello().name,
+        "activation": client.activation(),
+    });
+    let conn = client.split();
+    let mut messages = conn.messages;
+    let sender = conn.sender;
+    let mut player = conn.player.attach(NullOutput);
+    let mut artwork = conn.artwork.attach(NullOutput);
+    let _guard = conn.guard;
+
+    let player_task = async {
+        let mut observed = PlayerObservation::default();
+        while let Some(event) = player.recv().await {
+            match event {
+                PlayerEvent::Start(config) => observed.stream = Some(config),
+                PlayerEvent::Audio(work) => {
+                    let stream = observed
+                        .stream
+                        .as_ref()
+                        .ok_or_else(|| "Received audio before stream/start".to_string())?;
+                    observed.encoded.update(work.data());
+                    if stream.codec == "pcm" {
+                        observed
+                            .pcm
+                            .update_from_pcm_bytes(work.data(), stream.bit_depth)?;
                     }
-                    if message_type == "stream/end" {
-                        continue;
-                    }
-                    let message =
-                        serde_json::from_str::<Message>(&text).map_err(|err| err.to_string())?;
-                    match message {
-                        Message::ServerHello(server_hello) => {
-                            peer_hello = Some(raw_value);
-                            server_hello_payload = Some(server_hello);
-                            if is_player_scenario(&args.scenario_id) {
-                                let state = Message::ClientState(ClientState {
-                                    state: Some(ClientSyncState::Synchronized),
-                                    player: Some(PlayerState {
-                                        volume: Some(100),
-                                        muted: Some(false),
-                                        static_delay_ms: None,
-                                        min_buffer_ms: None,
-                                        required_lead_time_ms: None,
-                                        supported_commands: None,
-                                    }),
-                                });
-                                let state_json =
-                                    serde_json::to_string(&state).map_err(|err| err.to_string())?;
-                                write
-                                    .send(WsMessage::Text(state_json.into()))
-                                    .await
-                                    .map_err(|err| err.to_string())?;
-                                let time_sync = Message::ClientTime(ClientTime {
-                                    client_transmitted: current_micros(),
-                                });
-                                let time_json = serde_json::to_string(&time_sync)
-                                    .map_err(|err| err.to_string())?;
-                                write
-                                    .send(WsMessage::Text(time_json.into()))
-                                    .await
-                                    .map_err(|err| err.to_string())?;
-                            }
-                        }
-                        Message::ServerState(server_state) => {
-                            if let Some(metadata) = server_state.metadata.as_ref() {
-                                metadata_update_count += 1;
-                                received_metadata = Some(normalize_metadata(metadata));
-                            }
-                            if let Some(controller) = server_state.controller.as_ref() {
-                                received_controller_state = Some(normalize_controller(controller));
-                                if is_controller_scenario(&args.scenario_id)
-                                    && sent_controller_command.is_none()
-                                    && controller
-                                        .supported_commands
-                                        .contains(&args.controller_command)
-                                {
-                                    let command_type: ControllerCommandType =
-                                        serde_json::from_value(serde_json::Value::String(
-                                            args.controller_command.clone(),
-                                        ))
-                                        .map_err(|err| err.to_string())?;
-                                    let command = Message::ClientCommand(ClientCommand {
-                                        controller: Some(ControllerCommand {
-                                            command: command_type,
-                                            volume: None,
-                                            mute: None,
-                                            position_ms: None,
-                                            offset_ms: None,
-                                        }),
-                                    });
-                                    let command_json = serde_json::to_string(&command)
-                                        .map_err(|err| err.to_string())?;
-                                    write
-                                        .send(WsMessage::Text(command_json.into()))
-                                        .await
-                                        .map_err(|err| err.to_string())?;
-                                    sent_controller_command = Some(serde_json::json!({
-                                        "command": args.controller_command,
-                                    }));
-                                }
-                            }
-                        }
-                        Message::StreamStart(stream_start) => {
-                            current_stream = stream_start.player;
-                        }
-                        Message::ServerTime(_)
-                        | Message::GroupUpdate(_)
-                        | Message::ServerCommand(_)
-                        | Message::StreamClear(_) => {}
-                        other => {
-                            return Err(format!("Unexpected server message: {other:?}"));
-                        }
-                    }
+                    observed.chunk_count += 1;
                 }
-                WsMessage::Binary(data) => {
-                    // Recorded as received, before the SDK parses a header off it.
-                    if is_chunk_framing_scenario(&args.scenario_id) {
-                        received_frames.push(frame_record(&data));
-                    }
-                    match BinaryFrame::from_bytes(&data).map_err(|err| err.to_string())? {
-                        BinaryFrame::Audio(AudioChunk { data, .. }) => {
-                            if !is_player_scenario(&args.scenario_id) {
-                                continue;
-                            }
-                            let stream = current_stream
-                                .as_ref()
-                                .ok_or_else(|| "Received audio before stream/start".to_string())?;
-                            if stream.codec != "pcm" && stream.codec != "flac" {
-                                return Err(format!(
-                                    "Unsupported codec for current scenario: {}",
-                                    stream.codec
-                                ));
-                            }
-                            encoded_hasher.update(&*data);
-                            encoded_byte_count += data.len();
-                            // The frame recorded just above is the one this audio came off.
-                            if let Some(record) = received_frames.last_mut() {
-                                record["payload_byte_count"] = serde_json::json!(data.len());
-                            }
-                            if stream.codec == "pcm" {
-                                received_hasher
-                                    .update_from_pcm_bytes(&data, stream.bit_depth)
-                                    .map_err(|err| err.to_string())?;
-                            }
-                            audio_chunk_count += 1;
-                        }
-                        BinaryFrame::Artwork(ArtworkChunk { channel, data, .. }) => {
-                            if !is_artwork_scenario(&args.scenario_id) {
-                                continue;
-                            }
-                            artwork_channel = Some(channel);
-                            artwork_count += 1;
-                            artwork_byte_count += data.len();
-                            artwork_hasher.update(&*data);
-                        }
-                        BinaryFrame::Visualizer(_) | BinaryFrame::Unknown { .. } => {}
-                    }
-                }
-                WsMessage::Ping(payload) => {
-                    write
-                        .send(WsMessage::Pong(payload))
-                        .await
-                        .map_err(|err| err.to_string())?;
-                }
-                WsMessage::Close(_) => break,
                 _ => {}
             }
         }
-        Ok::<(), String>(())
+        Ok::<_, String>(observed)
+    };
+    let artwork_task = async {
+        let mut observed = ArtworkObservation::default();
+        while let Some(event) = artwork.recv().await {
+            match event {
+                ArtworkEvent::Start(config) => {
+                    observed.stream = Some(serde_json::to_value(config).unwrap())
+                }
+                ArtworkEvent::Data(work) => {
+                    observed.channel = Some(work.channel());
+                    observed.count += 1;
+                    observed.byte_count += work.data().len();
+                    observed.bytes.update(work.data());
+                }
+                ArtworkEvent::End => {}
+            }
+        }
+        observed
+    };
+    let message_task = async {
+        let mut observed = MessageObservation {
+            server: Some(server),
+            ..MessageObservation::default()
+        };
+        while let Some(message) = messages.recv().await {
+            let Message::ServerState(state) = message else {
+                continue;
+            };
+            if let Some(metadata) = state.metadata.as_ref() {
+                observed.metadata_update_count += 1;
+                observed.metadata = Some(normalize_metadata(metadata));
+            }
+            let Some(controller) = state.controller.as_ref() else {
+                continue;
+            };
+            observed.controller_state = Some(normalize_controller(controller));
+            if is_controller_scenario(&args.scenario_id)
+                && observed.sent_command.is_none()
+                && controller.supported_commands.contains(&args.controller_command)
+            {
+                let command: ControllerCommandType = serde_json::from_value(
+                    serde_json::Value::String(args.controller_command.clone()),
+                )
+                .map_err(|err| err.to_string())?;
+                sender
+                    .send_message(Message::ClientCommand(ClientCommand {
+                        controller: Some(ControllerCommand {
+                            command,
+                            volume: None,
+                            mute: None,
+                            position_ms: None,
+                            offset_ms: None,
+                        }),
+                    }))
+                    .await
+                    .map_err(|err| err.to_string())?;
+                observed.sent_command = Some(serde_json::json!({
+                    "command": args.controller_command,
+                }));
+            }
+        }
+        Ok::<_, String>(observed)
+    };
+
+    let timeout = Duration::from_secs_f64(args.timeout_seconds);
+    let joined = tokio::time::timeout(timeout, async {
+        tokio::join!(player_task, artwork_task, message_task)
     })
     .await;
-
-    let received_encoded_sha256 = if audio_chunk_count > 0 {
-        Some(hex_lower(&encoded_hasher.clone().finalize()))
+    let (player, artwork, messages) = match joined {
+        Err(_) => return build_error_summary(args, "Timed out waiting for server disconnect"),
+        Ok((Err(reason), _, _)) | Ok((_, _, Err(reason))) => {
+            return build_error_summary(args, &reason)
+        }
+        Ok((Ok(player), artwork, Ok(messages))) => (player, artwork, messages),
+    };
+    let mut summary = base_summary(args, "ok", None);
+    summary["server"] = messages.server.unwrap_or(serde_json::Value::Null);
+    if is_metadata_scenario(&args.scenario_id) {
+        summary["metadata"] = serde_json::json!({
+            "update_count": messages.metadata_update_count,
+            "received": messages.metadata,
+        });
+    } else if is_controller_scenario(&args.scenario_id) {
+        summary["controller"] = serde_json::json!({
+            "received_state": messages.controller_state,
+            "sent_command": messages.sent_command,
+        });
+    } else if is_artwork_scenario(&args.scenario_id) {
+        summary["stream"] = artwork.stream.unwrap_or(serde_json::Value::Null);
+        summary["artwork"] = serde_json::json!({
+            "channel": artwork.channel,
+            "received_count": artwork.count,
+            "received_sha256": (artwork.count > 0).then(|| hex_lower(&artwork.bytes.finalize())),
+            "byte_count": artwork.byte_count,
+        });
     } else {
-        None
-    };
-    let received_pcm_sha256 = if received_hasher.sample_count > 0 {
-        Some(received_hasher.hexdigest())
-    } else {
-        None
-    };
-    let artwork_sha256 = if artwork_count > 0 {
-        Some(hex_lower(&artwork_hasher.clone().finalize()))
-    } else {
-        None
-    };
-
-    let mut summary = match read_result {
-        Err(_) => build_summary(
-            args,
-            "error",
-            Some("Timed out waiting for server disconnect"),
-            peer_hello,
-            server_hello_payload.as_ref(),
-            current_stream.as_ref(),
-            audio_chunk_count,
-            received_encoded_sha256,
-            received_pcm_sha256,
-            received_hasher.sample_count,
-            metadata_update_count,
-            received_metadata,
-            received_controller_state,
-            sent_controller_command,
-            artwork_stream,
-            artwork_channel,
-            artwork_count,
-            artwork_sha256,
-            artwork_byte_count,
-        ),
-        Ok(Err(reason)) => build_summary(
-            args,
-            "error",
-            Some(&reason),
-            peer_hello,
-            server_hello_payload.as_ref(),
-            current_stream.as_ref(),
-            audio_chunk_count,
-            received_encoded_sha256,
-            received_pcm_sha256,
-            received_hasher.sample_count,
-            metadata_update_count,
-            received_metadata,
-            received_controller_state,
-            sent_controller_command,
-            artwork_stream,
-            artwork_channel,
-            artwork_count,
-            artwork_sha256,
-            artwork_byte_count,
-        ),
-        Ok(Ok(())) if peer_hello.is_none() => build_summary(
-            args,
-            "error",
-            Some("Connection closed before handshake completed"),
-            peer_hello,
-            server_hello_payload.as_ref(),
-            current_stream.as_ref(),
-            audio_chunk_count,
-            received_encoded_sha256,
-            received_pcm_sha256,
-            received_hasher.sample_count,
-            metadata_update_count,
-            received_metadata,
-            received_controller_state,
-            sent_controller_command,
-            artwork_stream,
-            artwork_channel,
-            artwork_count,
-            artwork_sha256,
-            artwork_byte_count,
-        ),
-        Ok(Ok(())) => build_summary(
-            args,
-            "ok",
-            None,
-            peer_hello,
-            server_hello_payload.as_ref(),
-            current_stream.as_ref(),
-            audio_chunk_count,
-            received_encoded_sha256,
-            received_pcm_sha256,
-            received_hasher.sample_count,
-            metadata_update_count,
-            received_metadata,
-            received_controller_state,
-            sent_controller_command,
-            artwork_stream,
-            artwork_channel,
-            artwork_count,
-            artwork_sha256,
-            artwork_byte_count,
-        ),
-    };
-    if is_chunk_framing_scenario(&args.scenario_id) {
-        summary["audio"]["received_encoded_byte_count"] = serde_json::json!(encoded_byte_count);
-        summary["audio"]["received_chunk_frames"] = serde_json::json!(received_frames);
+        if player.chunk_count == 0 {
+            summary = base_summary(
+                args,
+                "error",
+                Some("Connection closed before any audio chunks were received"),
+            );
+        }
+        summary["stream"] = player
+            .stream
+            .map(|stream| {
+                serde_json::json!({
+                    "codec": stream.codec,
+                    "sample_rate": stream.sample_rate,
+                    "channels": stream.channels,
+                    "bit_depth": stream.bit_depth,
+                    "codec_header": stream.codec_header,
+                })
+            })
+            .unwrap_or(serde_json::Value::Null);
+        summary["audio"] = serde_json::json!({
+            "audio_chunk_count": player.chunk_count,
+            "received_encoded_sha256": (player.chunk_count > 0)
+                .then(|| hex_lower(&player.encoded.finalize())),
+            "received_pcm_sha256": (player.pcm.sample_count > 0).then(|| player.pcm.hexdigest()),
+            "received_sample_count": player.pcm.sample_count,
+        });
     }
     summary
 }
 
-async fn run_outbound_protocol_client(args: &Args, server_url: &str) -> serde_json::Value {
-    let builder = build_protocol_client_builder(args);
-    let client = match builder.connect(server_url).await {
-        Ok(client) => client,
-        Err(err) => {
-            return build_error_summary(args, &format!("Failed to connect to {server_url}: {err}"));
-        }
-    };
-
-    let conn = client.split();
-    let mut message_rx = conn.messages;
-    let mut audio_rx = conn.audio;
-    let _artwork_rx = conn.artwork;
-    let _visualizer_rx = conn.visualizer;
-    let _clock_sync = conn.clock_sync;
-    let ws_tx = conn.sender;
-    let _guard = conn.guard;
-
-    if let Err(err) = ws_tx
-        .send_message(Message::ClientState(ClientState {
-            state: Some(ClientSyncState::Synchronized),
-            player: Some(PlayerState {
-                volume: Some(100),
-                muted: Some(false),
-                static_delay_ms: None,
-                min_buffer_ms: None,
-                required_lead_time_ms: None,
-                supported_commands: None,
-            }),
-        }))
-        .await
-    {
-        return build_error_summary(args, &err.to_string());
-    }
-
-    let mut current_stream: Option<StreamPlayerConfig> = None;
-    let mut received_hasher = FloatPcmHasher::default();
-    let mut encoded_hasher = Sha256::new();
-    let mut audio_chunk_count = 0usize;
-    // The SDK forwards stream/start (text) and audio (binary) on separate
-    // channels, and tokio::select! randomizes branch order, so audio can be
-    // polled before an already-buffered stream/start. Buffer early audio and
-    // flush it once stream/start has been observed.
-    let mut pending_audio: Vec<AudioChunk> = Vec::new();
-    let timeout = Duration::from_secs_f64(args.timeout_seconds);
-
-    let read_result = tokio::time::timeout(timeout, async {
-        loop {
-            tokio::select! {
-                maybe_message = message_rx.recv() => {
-                    let Some(message) = maybe_message else {
-                        break;
-                    };
-                    match message {
-                        Message::StreamStart(stream_start) => {
-                            current_stream = stream_start.player;
-                            if let Some(stream) = current_stream.as_ref() {
-                                if stream.codec != "pcm" {
-                                    return Err(format!(
-                                        "Unsupported codec for current scenario: {}",
-                                        stream.codec
-                                    ));
-                                }
-                                for chunk in pending_audio.drain(..) {
-                                    encoded_hasher.update(&chunk.data);
-                                    received_hasher
-                                        .update_from_pcm_bytes(&chunk.data, stream.bit_depth)
-                                        .map_err(|err| err.to_string())?;
-                                    audio_chunk_count += 1;
-                                }
-                            }
-                        }
-                        Message::StreamEnd(_)
-                        | Message::StreamClear(_)
-                        | Message::ServerState(_)
-                        | Message::GroupUpdate(_)
-                        | Message::ServerCommand(_) => {}
-                        other => {
-                            return Err(format!("Unexpected server message: {other:?}"));
-                        }
-                    }
-                }
-                maybe_audio = audio_rx.recv() => {
-                    let Some(chunk) = maybe_audio else {
-                        break;
-                    };
-                    let Some(stream) = current_stream.as_ref() else {
-                        pending_audio.push(chunk);
-                        continue;
-                    };
-                    if stream.codec != "pcm" {
-                        return Err(format!("Unsupported codec for current scenario: {}", stream.codec));
-                    }
-                    encoded_hasher.update(&*chunk.data);
-                    received_hasher
-                        .update_from_pcm_bytes(&chunk.data, stream.bit_depth)
-                        .map_err(|err| err.to_string())?;
-                    audio_chunk_count += 1;
-                }
-            }
-        }
-        Ok::<(), String>(())
+fn base_summary(args: &Args, status: &str, reason: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "status": status,
+        "reason": reason,
+        "implementation": "sendspin-rs",
+        "role": "client",
+        "scenario_id": args.scenario_id,
+        "initiator_role": args.initiator_role,
+        "preferred_codec": args.preferred_codec,
+        "client_name": args.client_name,
+        "client_id": args.client_id,
     })
-    .await;
+}
 
-    let peer = ServerHello {
-        server_id: args.server_id.clone(),
-        name: args.server_name.clone(),
-        version: 1,
-        active_roles: vec!["player@v1".to_string()],
-        connection_reason: ConnectionReason::Playback,
-    };
+fn build_error_summary(args: &Args, reason: &str) -> serde_json::Value {
+    base_summary(args, "error", Some(reason))
+}
 
-    let received_encoded_sha256 = if audio_chunk_count > 0 {
-        Some(hex_lower(&encoded_hasher.clone().finalize()))
-    } else {
-        None
-    };
-    let received_pcm_sha256 = if received_hasher.sample_count > 0 {
-        Some(received_hasher.hexdigest())
-    } else {
-        None
-    };
-
-    match read_result {
-        Err(_) => build_summary(
-            args,
-            "error",
-            Some("Timed out waiting for server disconnect"),
-            None,
-            Some(&peer),
-            current_stream.as_ref(),
-            audio_chunk_count,
-            received_encoded_sha256,
-            received_pcm_sha256,
-            received_hasher.sample_count,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            0,
-            None,
-            0,
-        ),
-        Ok(Err(reason)) => build_summary(
-            args,
-            "error",
-            Some(&reason),
-            None,
-            Some(&peer),
-            current_stream.as_ref(),
-            audio_chunk_count,
-            received_encoded_sha256,
-            received_pcm_sha256,
-            received_hasher.sample_count,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            0,
-            None,
-            0,
-        ),
-        Ok(Ok(())) if audio_chunk_count == 0 => build_summary(
-            args,
-            "error",
-            Some("Connection closed before any audio chunks were received"),
-            None,
-            Some(&peer),
-            current_stream.as_ref(),
-            audio_chunk_count,
-            received_encoded_sha256,
-            received_pcm_sha256,
-            received_hasher.sample_count,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            0,
-            None,
-            0,
-        ),
-        Ok(Ok(())) => build_summary(
-            args,
-            "ok",
-            None,
-            None,
-            Some(&peer),
-            current_stream.as_ref(),
-            audio_chunk_count,
-            received_encoded_sha256,
-            received_pcm_sha256,
-            received_hasher.sample_count,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            0,
-            None,
-            0,
-        ),
+async fn connect_or_accept(args: &Args) -> Result<ProtocolClient, String> {
+    let builder = build_protocol_client_builder(args);
+    let timeout = Duration::from_secs_f64(args.timeout_seconds);
+    if args.initiator_role == "client" {
+        write_json(&args.ready, &build_ready(args, None))?;
+        let url = wait_for_server_url(&args.registry, &args.server_name, args.timeout_seconds)
+            .await?;
+        return builder
+            .connect(&url)
+            .await
+            .map_err(|err| format!("Failed to connect to {url}: {err}"));
+    }
+    let listener = builder
+        .listen(&format!("127.0.0.1:{}", args.port))
+        .await
+        .map_err(|err| err.to_string())?
+        .path(args.path.clone());
+    let url = format!("ws://127.0.0.1:{}{}", args.port, args.path);
+    register_endpoint(&args.registry, &args.client_name, &url)?;
+    write_json(&args.ready, &build_ready(args, Some(&url)))?;
+    match tokio::time::timeout(timeout, listener.accept()).await {
+        Err(_) => Err("Timed out waiting for server connection".to_string()),
+        Ok(Err(err)) => Err(err.to_string()),
+        Ok(Ok((client, _))) => Ok(client),
     }
 }
 
 async fn run(args: Args) -> Result<(), String> {
-    // The outbound paths drive a player session only, so these roles would
-    // report a missing audio stream instead of what their scenario asks for.
-    let lacks_outbound_path = is_metadata_scenario(&args.scenario_id)
-        || is_controller_scenario(&args.scenario_id)
-        || is_artwork_scenario(&args.scenario_id);
-    let summary = if args.initiator_role == "client" && lacks_outbound_path {
+    let summary = if is_chunk_framing_scenario(&args.scenario_id) {
         write_json(&args.ready, &serde_json::json!({"status": "error"}))?;
         build_error_summary(
             &args,
-            &format!(
-                "Harness gap, not a protocol result: the sendspin-rs client adapter has no \
-                 client-initiated path for scenario {}",
-                args.scenario_id
-            ),
+            "Harness gap, not a protocol result: the sendspin-rs library does not expose raw audio frames",
         )
-    } else if args.initiator_role == "client" {
-        write_json(&args.ready, &build_ready(&args, None))?;
-        match wait_for_server_url(&args.registry, &args.server_name, args.timeout_seconds).await {
-            Ok(server_url) => run_outbound_protocol_client(&args, &server_url).await,
-            Err(reason) => build_error_summary(&args, &reason),
-        }
     } else {
-        let bind_addr = format!("127.0.0.1:{}", args.port);
-        let url = format!("ws://127.0.0.1:{}{}", args.port, args.path);
-        match TcpListener::bind(&bind_addr).await {
-            Ok(listener) => {
-                register_endpoint(&args.registry, &args.client_name, &url)?;
-                write_json(&args.ready, &build_ready(&args, Some(&url)))?;
-                match tokio::time::timeout(
-                    Duration::from_secs_f64(args.timeout_seconds),
-                    listener.accept(),
-                )
-                .await
-                {
-                    Err(_) => build_error_summary(&args, "Timed out waiting for server connection"),
-                    Ok(Err(err)) => build_error_summary(&args, &err.to_string()),
-                    Ok(Ok((stream, _))) => match accept_async(stream).await {
-                        Ok(ws_stream) => run_connected_session(&args, ws_stream).await,
-                        Err(err) => build_error_summary(&args, &err.to_string()),
-                    },
-                }
-            }
-            Err(err) => build_error_summary(&args, &err.to_string()),
+        match connect_or_accept(&args).await {
+            Ok(client) => run_session(&args, client).await,
+            Err(reason) => build_error_summary(&args, &reason),
         }
     };
 
