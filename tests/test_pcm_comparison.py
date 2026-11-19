@@ -79,10 +79,37 @@ class PcmComparisonTests(unittest.TestCase):
     def test_resampled_audio_cannot_be_compared_to_the_source_hash(self) -> None:
         server = _server_summary(sample_rate=8000, channels=1)
         client = _client_summary(received_pcm_sha256=OTHER_HASH)
-        client["stream"] = {"codec": "pcm", "sample_rate": 48000, "channels": 2, "bit_depth": 16}
+        server["stream"] = client["stream"] = {
+            "codec": "pcm", "sample_rate": 48000, "channels": 2, "bit_depth": 16,
+        }
         matches, reason = self._compare(server, client)
         self.assertFalse(matches)
         self.assertIsInstance(reason, UnverifiableReason)
+
+    def test_client_format_alone_cannot_excuse_a_hash_mismatch(self) -> None:
+        server = _server_summary(sample_rate=8000, channels=1)
+        client = _client_summary(received_pcm_sha256=OTHER_HASH)
+        client["stream"] = {"codec": "pcm", "sample_rate": 48000, "channels": 2, "bit_depth": 16}
+        matches, reason = self._compare(server, client)
+        self.assertFalse(matches)
+        self.assertNotIsInstance(reason, UnverifiableReason)
+        self.assertIn("PCM hash mismatch", reason)
+
+    def test_peer_format_disagreement_fails_even_when_both_formats_were_advertised(self) -> None:
+        source_format = {"codec": "pcm", "sample_rate": 8000, "channels": 1, "bit_depth": 16}
+        resampled_format = {**source_format, "sample_rate": 48000, "channels": 2}
+        for sent, received in ((source_format, resampled_format), (resampled_format, source_format)):
+            with self.subTest(sent=sent, received=received):
+                server = _server_summary(sample_rate=8000, channels=1)
+                client = _client_summary(received_pcm_sha256=OTHER_HASH)
+                server["stream"], client["stream"] = sent, received
+                server["peer_hello"] = {"type": "client/hello", "payload": {
+                    "player@v1_support": {"supported_formats": [sent, received]},
+                }}
+                matches, reason = self._compare(server, client)
+                self.assertFalse(matches)
+                self.assertNotIsInstance(reason, UnverifiableReason)
+                self.assertIn("PCM stream format mismatch", reason)
 
     def test_no_audio_is_a_failure_even_when_the_format_would_need_resampling(self) -> None:
         client = _client_summary(audio_chunk_count=0, received_pcm_sha256=None)

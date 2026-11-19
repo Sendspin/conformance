@@ -205,7 +205,13 @@ def _unobserved_client_verdict(client_audio: dict[str, Any], sent: list[Frame]) 
     shows nothing about any one frame and passes nothing.
     """
     sent_audio = sum(frame.payload_byte_count or 0 for frame in sent)
-    delivered = _count(client_audio.get("received_encoded_byte_count"))
+    reported_count = client_audio.get("received_encoded_byte_count")
+    delivered = _count(reported_count)
+    if reported_count is not None and delivered is None:
+        return (
+            f"{HARNESS_GAP}the client adapter reported an invalid "
+            "received_encoded_byte_count; expected a nonnegative integer or null"
+        )
     if delivered is not None and delivered != sent_audio:
         return (
             f"Client delivered {delivered} bytes of audio from {len(sent)} chunks that "

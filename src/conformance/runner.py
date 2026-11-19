@@ -601,7 +601,17 @@ def _compare_audio_summaries(
     received_hash = client_audio["received_pcm_sha256"]
     if not client_audio["audio_chunk_count"]:
         return False, "Client summary shows zero audio chunks"
-    stream = client_summary.get("stream")
+    stream = server_summary.get("stream")
+    received_stream = client_summary.get("stream")
+    if (
+        isinstance(stream, dict)
+        and isinstance(received_stream, dict)
+        and not _formats_equal(stream, received_stream)
+    ):
+        return False, (
+            f"PCM stream format mismatch: server={_format_label(stream)} "
+            f"client={_format_label(received_stream)}"
+        )
     if isinstance(stream, dict) and any(
         type(server_audio.get(key)) is int
         and type(stream.get(key)) is int

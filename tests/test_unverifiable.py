@@ -62,6 +62,23 @@ class UnverifiableComparisonTest(unittest.TestCase):
         self.assertFalse(matches)
         self.assertNotIsInstance(reason, UnverifiableReason)
 
+    def test_malformed_audio_total_still_fails_without_frames(self) -> None:
+        for count in (-1, "400", True, 400.0, {}, []):
+            with self.subTest(count=count):
+                client = _client_summary(
+                    [25], observes_frames=False, received_encoded_byte_count=count
+                )
+                matches, reason = self.compare(client=client)
+                self.assertFalse(matches)
+                self.assertNotIsInstance(reason, UnverifiableReason)
+                self.assertIn("invalid received_encoded_byte_count", reason)
+
+    def test_unavailable_audio_total_remains_unverifiable_without_frames(self) -> None:
+        client = _client_summary([25], observes_frames=False, received_encoded_byte_count=None)
+        matches, reason = self.compare(client=client)
+        self.assertFalse(matches)
+        self.assertIsInstance(reason, UnverifiableReason)
+
     def test_other_peer_protocol_failure_survives_unavailable_evidence(self) -> None:
         reason = protocol_evidence_failure(
             {"protocol": None},
