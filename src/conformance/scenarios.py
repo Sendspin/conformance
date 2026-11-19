@@ -18,7 +18,7 @@ CLIENT_INITIATED_PCM = ScenarioSpec(
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="audio-pcm",
-    scenario_revision=6,
+    scenario_revision=7,
 )
 
 
@@ -35,7 +35,7 @@ SERVER_INITIATED_PCM = ScenarioSpec(
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="audio-pcm",
-    scenario_revision=6,
+    scenario_revision=7,
 )
 
 
@@ -53,7 +53,7 @@ SERVER_INITIATED_PROTOCOL_BASELINE = ScenarioSpec(
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="protocol",
-    scenario_revision=5,
+    scenario_revision=6,
     protocol_assertions=("CORE-001", "CORE-002", "CORE-003", "CORE-004", "PLAYER-001"),
 )
 
@@ -75,7 +75,7 @@ SERVER_INITIATED_FLAC = ScenarioSpec(
     preferred_codec="flac",
     required_role_families=("player",),
     verification_mode="audio-encoded-bytes",
-    scenario_revision=6,
+    scenario_revision=7,
 )
 
 
@@ -96,7 +96,7 @@ SERVER_INITIATED_OPUS = ScenarioSpec(
     preferred_codec="opus",
     required_role_families=("player",),
     verification_mode="audio-encoded-bytes",
-    scenario_revision=6,
+    scenario_revision=7,
     verifies_format_priority=True,
 )
 
@@ -142,7 +142,7 @@ SERVER_INITIATED_METADATA = ScenarioSpec(
     preferred_codec="none",
     required_role_families=("metadata",),
     verification_mode="metadata",
-    scenario_revision=5,
+    scenario_revision=6,
     extra_cli_args=METADATA_EXTRA_CLI_ARGS,
 )
 
@@ -159,7 +159,7 @@ SERVER_INITIATED_CONTROLLER = ScenarioSpec(
     preferred_codec="none",
     required_role_families=("controller",),
     verification_mode="controller",
-    scenario_revision=5,
+    scenario_revision=6,
     extra_cli_args=CONTROLLER_EXTRA_CLI_ARGS,
 )
 
@@ -176,7 +176,7 @@ SERVER_INITIATED_ARTWORK = ScenarioSpec(
     preferred_codec="none",
     required_role_families=("artwork",),
     verification_mode="artwork",
-    scenario_revision=5,
+    scenario_revision=6,
     extra_cli_args=ARTWORK_EXTRA_CLI_ARGS,
 )
 
@@ -198,7 +198,7 @@ SERVER_INITIATED_PCM_24BIT = ScenarioSpec(
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="audio-pcm",
-    scenario_revision=7,
+    scenario_revision=8,
     verifies_stream_bit_depth=24,
 )
 
@@ -217,7 +217,7 @@ CLIENT_INITIATED_STATE_FORMAT_PCM = ScenarioSpec(
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="format-preference",
-    scenario_revision=5,
+    scenario_revision=6,
 )
 
 
@@ -235,7 +235,7 @@ CLIENT_INITIATED_STATE_FORMAT_FLAC = ScenarioSpec(
     preferred_codec="flac",
     required_role_families=("player",),
     verification_mode="format-preference",
-    scenario_revision=5,
+    scenario_revision=6,
 )
 
 
@@ -253,7 +253,7 @@ CLIENT_INITIATED_METADATA = ScenarioSpec(
     preferred_codec="none",
     required_role_families=("metadata",),
     verification_mode="metadata",
-    scenario_revision=1,
+    scenario_revision=2,
     extra_cli_args=METADATA_EXTRA_CLI_ARGS,
 )
 
@@ -271,7 +271,7 @@ CLIENT_INITIATED_CONTROLLER = ScenarioSpec(
     preferred_codec="none",
     required_role_families=("controller",),
     verification_mode="controller",
-    scenario_revision=1,
+    scenario_revision=2,
     extra_cli_args=CONTROLLER_EXTRA_CLI_ARGS,
 )
 
@@ -289,7 +289,7 @@ CLIENT_INITIATED_ARTWORK = ScenarioSpec(
     preferred_codec="none",
     required_role_families=("artwork",),
     verification_mode="artwork",
-    scenario_revision=1,
+    scenario_revision=2,
     extra_cli_args=ARTWORK_EXTRA_CLI_ARGS,
 )
 
@@ -308,7 +308,7 @@ SERVER_INITIATED_LEGACY_UNENCRYPTED = ScenarioSpec(
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="audio-pcm",
-    scenario_revision=6,
+    scenario_revision=7,
     requires_legacy_unencrypted=True,
 )
 
@@ -331,7 +331,7 @@ SERVER_INITIATED_AUDIO_CHUNK_FRAMING = ScenarioSpec(
     preferred_codec="pcm",
     required_role_families=("player",),
     verification_mode="audio-chunk-framing",
-    scenario_revision=4,
+    scenario_revision=5,
 )
 
 

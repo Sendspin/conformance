@@ -239,6 +239,11 @@ HEAD_ASSETS = """
         color: rgb(var(--retro-bark));
       }
 
+      .status-unverifiable {
+        @apply border-sky-800/20 bg-sky-100/70;
+        color: rgb(var(--retro-bark));
+      }
+
       .status-unsupported {
         @apply border-stone-500/20 bg-stone-300/70;
         color: rgb(var(--retro-bark));
@@ -268,6 +273,11 @@ HEAD_ASSETS = """
 
       .cell-skipped {
         @apply border-stone-500/15 bg-stone-100/85 hover:bg-stone-100;
+        color: rgb(var(--retro-bark));
+      }
+
+      .cell-unverifiable {
+        @apply border-sky-800/20 bg-sky-100/70 hover:bg-sky-200/70;
         color: rgb(var(--retro-bark));
       }
 
@@ -492,6 +502,7 @@ STATUS_LABELS = {
     "failed": "Failed",
     "skipped": "Skipped",
     "unsupported": "Unsupported",
+    "unverifiable": "Unverifiable",
 }
 
 STATUS_CLASSES = {
@@ -499,6 +510,7 @@ STATUS_CLASSES = {
     "failed": "status-failed",
     "skipped": "status-skipped",
     "unsupported": "status-unsupported",
+    "unverifiable": "status-unverifiable",
 }
 
 CELL_CLASSES = {
@@ -506,6 +518,7 @@ CELL_CLASSES = {
     "failed": "cell-failed",
     "skipped": "cell-skipped",
     "unsupported": "cell-unsupported",
+    "unverifiable": "cell-unverifiable",
 }
 
 CLAIM_PILL_EXERCISED = "status-pill border-amber-800/20 bg-amber-100/70 text-retro-bark"
@@ -1083,6 +1096,8 @@ def _summary_cards(
     items = [(total_label, total_value), ("Passed", counts.get("passed", 0))]
     if counts.get("unsupported", 0):
         items.append(("Unsupported", counts["unsupported"]))
+    if counts.get("unverifiable", 0):
+        items.append(("Unverifiable", counts["unverifiable"]))
     if counts.get("failed", 0) or not counts.get("unsupported", 0):
         items.append(("Failed", counts.get("failed", 0)))
     if counts.get("skipped", 0):
@@ -1106,6 +1121,10 @@ def _status_pill_row(counts: Counter[str]) -> str:
     if counts.get("unsupported", 0):
         pills.append(
             f"<span class='status-pill {_status_classes('unsupported')}'>{counts.get('unsupported', 0)} unsupported</span>"
+        )
+    if counts.get("unverifiable", 0):
+        pills.append(
+            f"<span class='status-pill {_status_classes('unverifiable')}'>{counts.get('unverifiable', 0)} unverifiable</span>"
         )
     if counts.get("failed", 0):
         pills.append(
@@ -1892,6 +1911,13 @@ def _render_scenario_page(
             "<div class='keyval-row'>"
             "<span class='text-sm muted-copy'>Unsupported</span>"
             f"<span class='text-sm font-semibold'>{counts.get('unsupported', 0)}</span>"
+            "</div>"
+        )
+    if counts.get("unverifiable", 0):
+        scenario_stat_rows.append(
+            "<div class='keyval-row'>"
+            "<span class='text-sm muted-copy'>Unverifiable</span>"
+            f"<span class='text-sm font-semibold'>{counts.get('unverifiable', 0)}</span>"
             "</div>"
         )
     if counts.get("failed", 0):

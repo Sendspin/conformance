@@ -26,7 +26,7 @@ SOURCE_HASH = "a" * 64
 # Every server summary carries one, and a case whose summary lacks it never passes.
 GROUP_UPDATE = {
     "type": "group/update",
-    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+    "payload": {"playback_state": "stopped", "group_id": "g" * 43, "group_name": "Kitchen"},
 }
 
 # What a server that held stream/start until the client reported available records.

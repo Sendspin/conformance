@@ -33,7 +33,7 @@ DROPPED_SAMPLES = 1_152
 # Every server summary carries one, and a case whose summary lacks it never passes.
 GROUP_UPDATE = {
     "type": "group/update",
-    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+    "payload": {"playback_state": "stopped", "group_id": "g" * 43, "group_name": "Kitchen"},
 }
 
 

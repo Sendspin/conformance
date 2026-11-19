@@ -11,6 +11,7 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
+from conformance.models import UnverifiableReason
 from conformance.runner import _compare_summaries
 from conformance.scenarios import SCENARIOS, require_scenario
 
@@ -24,7 +25,7 @@ SAMPLE_COUNT = FRAME_COUNT * CHANNELS
 # Every server summary carries one, and a case whose summary lacks it never passes.
 GROUP_UPDATE = {
     "type": "group/update",
-    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+    "payload": {"playback_state": "stopped", "group_id": "g" * 43, "group_name": "Kitchen"},
 }
 
 
@@ -68,12 +69,72 @@ def _client_summary(**overrides: Any) -> dict[str, Any]:
 
 
 class PcmComparisonTests(unittest.TestCase):
-    """An audio-pcm case passes on an exact hash match and on nothing else."""
+    """An audio-pcm case distinguishes mismatches from unavailable evidence."""
 
     def test_exact_match_passes(self) -> None:
         matches, reason = self._compare(_server_summary(), _client_summary())
         self.assertTrue(matches, reason)
         self.assertEqual(reason, "PCM hashes match exactly")
+
+    def test_resampled_audio_cannot_be_compared_to_the_source_hash(self) -> None:
+        server = _server_summary(sample_rate=8000, channels=1)
+        client = _client_summary(received_pcm_sha256=OTHER_HASH)
+        server["stream"] = client["stream"] = {
+            "codec": "pcm", "sample_rate": 48000, "channels": 2, "bit_depth": 16,
+        }
+        matches, reason = self._compare(server, client)
+        self.assertFalse(matches)
+        self.assertIsInstance(reason, UnverifiableReason)
+
+    def test_client_format_alone_cannot_excuse_a_hash_mismatch(self) -> None:
+        server = _server_summary(sample_rate=8000, channels=1)
+        client = _client_summary(received_pcm_sha256=OTHER_HASH)
+        client["stream"] = {"codec": "pcm", "sample_rate": 48000, "channels": 2, "bit_depth": 16}
+        matches, reason = self._compare(server, client)
+        self.assertFalse(matches)
+        self.assertNotIsInstance(reason, UnverifiableReason)
+        self.assertIn("PCM hash mismatch", reason)
+
+    def test_peer_format_disagreement_fails_even_when_both_formats_were_advertised(self) -> None:
+        source_format = {"codec": "pcm", "sample_rate": 8000, "channels": 1, "bit_depth": 16}
+        resampled_format = {**source_format, "sample_rate": 48000, "channels": 2}
+        for sent, received in ((source_format, resampled_format), (resampled_format, source_format)):
+            with self.subTest(sent=sent, received=received):
+                server = _server_summary(sample_rate=8000, channels=1)
+                client = _client_summary(received_pcm_sha256=OTHER_HASH)
+                server["stream"], client["stream"] = sent, received
+                server["peer_hello"] = {"type": "client/hello", "payload": {
+                    "player@v1_support": {"supported_formats": [sent, received]},
+                }}
+                matches, reason = self._compare(server, client)
+                self.assertFalse(matches)
+                self.assertNotIsInstance(reason, UnverifiableReason)
+                self.assertIn("PCM stream format mismatch", reason)
+
+    def test_no_audio_is_a_failure_even_when_the_format_would_need_resampling(self) -> None:
+        client = _client_summary(audio_chunk_count=0, received_pcm_sha256=None)
+        client["stream"] = {"sample_rate": 48000, "channels": 2}
+        matches, reason = self._compare(_server_summary(sample_rate=8000, channels=1), client)
+        self.assertFalse(matches)
+        self.assertNotIsInstance(reason, UnverifiableReason)
+
+    def test_received_chunks_without_decoded_pcm_are_unverifiable(self) -> None:
+        matches, reason = self._compare(_server_summary(), _client_summary(received_pcm_sha256=None))
+        self.assertFalse(matches)
+        self.assertIsInstance(reason, UnverifiableReason)
+
+    def test_wrong_bit_depth_still_fails_when_audio_is_unverifiable(self) -> None:
+        server = _server_summary(sample_rate=8000, channels=1)
+        client = _client_summary(received_pcm_sha256=None)
+        server["stream"] = client["stream"] = {
+            "codec": "pcm", "sample_rate": 48000, "channels": 2, "bit_depth": 16,
+        }
+        matches, reason = _compare_summaries(
+            require_scenario("server-initiated-pcm-24bit"), server, client
+        )
+        self.assertFalse(matches)
+        self.assertNotIsInstance(reason, UnverifiableReason)
+        self.assertIn("24", reason)
 
     def test_truncated_stream_fails_and_reports_the_shortfall(self) -> None:
         """Receiving only a leading portion of the clip is not conformance."""

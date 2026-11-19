@@ -20,6 +20,21 @@ Current checked-in adapters:
 
 Current placeholders in the matrix are modeled in `src/conformance/implementations.py` and fail immediately with a summary explaining why the role is unavailable for a scenario.
 
+## Unverifiable results
+
+Run the connection and scenario even when the SDK cannot expose all required
+evidence. Keep `status: "ok"` for a completed adapter run. Use `null` for evidence
+the SDK cannot expose: decoded `audio.received_pcm_sha256`, raw
+`audio.received_chunk_frames`, or the baseline `protocol` block. Do not fabricate
+evidence or skip the connection. Missing fields and malformed evidence remain
+harness failures.
+
+The runner can report `status: "unverifiable"` after both adapters finish. It still
+checks the available protocol evidence. An observed violation, an adapter error
+or a nonzero exit fails the case. PCM is also unverifiable when the negotiated
+sample rate or channel count differs from the source, because a source hash
+cannot verify resampled audio. Zero received audio chunks still fail.
+
 ## Initial activation
 
 Every server adapter MUST report an `activation` field in its summary: the first
@@ -43,7 +58,9 @@ one to follow. Never reconstruct an entry from adapter arguments or SDK state.
 
 The matrix draws a verdict from this field on every case: a case fails when the list is
 empty, or when in any entry `playback_state` is not `playing` or `stopped`, or `group_id`
-or `group_name` is missing or not a string. How soon the first message followed the
+or `group_name` is missing or not a string. A `group_id` that is not 43 base64url
+characters also fails: the spec requires the client to close the connection.
+How soon the first message followed the
 `server/activate` is not judged: the spec says "promptly" and gives no bound, so one sent
 at any point in the case counts. Whether a change to a field produced a further message is
 not judged either. A summary with no `group_updates` list fails the case as a harness gap,
@@ -355,8 +372,8 @@ The client's `audio` block adds:
 **Report `null` for frames the adapter cannot see.** An SDK that hands the adapter
 parsed chunks has already consumed the header, and nothing the adapter holds
 afterwards is a frame: not the chunk's timestamp, not a `send_ahead` the SDK exposes,
-not a size rebuilt by adding a header length back on. Such a case fails as a harness
-gap, and the total never passes it: equal totals say nothing about any one frame. A
+not a size rebuilt by adding a header length back on. Such a case is unverifiable
+unless another check fails. Equal totals say nothing about any one frame. A
 client reporting `null` still reports `received_encoded_byte_count` where it can,
 because a total that differs from the audio the server's frames carried does show a
 misread, and that is failed as the client's fault.

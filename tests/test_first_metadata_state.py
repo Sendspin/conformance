@@ -43,7 +43,7 @@ SCHEDULED_STAMP_US = SENT_BOUND_US + 3_000_000
 # Every server summary carries one, and a case whose summary lacks it never passes.
 GROUP_UPDATE = {
     "type": "group/update",
-    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+    "payload": {"playback_state": "stopped", "group_id": "g" * 43, "group_name": "Kitchen"},
 }
 
 

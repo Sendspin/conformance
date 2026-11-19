@@ -10,10 +10,9 @@ Adapters do not report a header. They report each audio frame as it crossed the
 transport, as its size and its leading bytes, beside the size of the audio that
 same frame carried, counted where the adapter held the audio on its own. The
 header of a frame is whatever it carries beyond that audio, so every frame is
-judged by itself and none by an average. An adapter that cannot see a raw
-frame, or cannot tell which audio a frame carried, reports that it cannot, and
-the case fails naming a harness gap rather than a fault in either
-implementation.
+judged by itself and none by an average. A client SDK that cannot expose raw
+frames reports null. Its case is unverifiable unless other evidence shows a
+failure. Missing or malformed records remain harness failures.
 
 Three things the frames show are deliberately left unjudged:
 
@@ -34,6 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .declared_formats import normalized_format
+from .models import UnverifiableReason
 
 HEADER_BYTES = 13
 AUDIO_CHUNK_TYPE = 4
@@ -141,7 +141,10 @@ def chunk_framing_verdict(
         return False, "Client summary is missing an 'audio' section"
     received = transported_frames(client_audio.get("received_chunk_frames"))
     if received is None:
-        return False, _unobserved_client_verdict(client_audio, sent)
+        reason = _unobserved_client_verdict(client_audio, sent)
+        if "received_chunk_frames" not in client_audio or client_audio["received_chunk_frames"] is not None:
+            return False, str(reason)
+        return False, reason
     if len(received) != len(sent):
         return False, (
             f"Client received {len(received)} of the {len(sent)} audio chunk frames the "
@@ -202,14 +205,20 @@ def _unobserved_client_verdict(client_audio: dict[str, Any], sent: list[Frame]) 
     shows nothing about any one frame and passes nothing.
     """
     sent_audio = sum(frame.payload_byte_count or 0 for frame in sent)
-    delivered = _count(client_audio.get("received_encoded_byte_count"))
+    reported_count = client_audio.get("received_encoded_byte_count")
+    delivered = _count(reported_count)
+    if reported_count is not None and delivered is None:
+        return (
+            f"{HARNESS_GAP}the client adapter reported an invalid "
+            "received_encoded_byte_count; expected a nonnegative integer or null"
+        )
     if delivered is not None and delivered != sent_audio:
         return (
             f"Client delivered {delivered} bytes of audio from {len(sent)} chunks that "
             f"carried {sent_audio} behind a {HEADER_BYTES}-byte header each, so it did not "
             f"read {HEADER_BYTES} bytes off every one"
         )
-    return (
+    return UnverifiableReason(
         f"{HARNESS_GAP}the client adapter does not observe raw audio chunk frames, so "
         f"the header the client read off each one cannot be judged; the server sent "
         f"{HEADER_BYTES} bytes on every chunk"

@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { register } from "node:module";
+import { pathToFileURL } from "node:url";
 import { WebSocket as WsWebSocket, WebSocketServer } from "ws";
 
 // SendspinCore uses the platform WebSocket class for outbound connections
@@ -28,10 +29,8 @@ if (typeof globalThis.WebSocket === "undefined") {
 // the SDK so Node can consume it without a separate bundling step.
 register(new URL("./sdk-loader.mjs", import.meta.url));
 
-const sdkModuleUrl = new URL(
-  "../../repos/sendspin-js/dist/index.js",
-  import.meta.url,
-);
+const sdkPath = parseArgs(process.argv.slice(2))["sdk-path"];
+const sdkModuleUrl = pathToFileURL(path.join(sdkPath, "dist/index.js"));
 const { SendspinCore } = await import(sdkModuleUrl.href);
 
 const IMPLEMENTATION = "sendspin-js";
@@ -40,6 +39,7 @@ const PLAYER_SCENARIOS = new Set([
   "server-initiated-pcm",
   "server-initiated-legacy-unencrypted",
   "server-initiated-audio-chunk-framing",
+  "server-initiated-protocol-baseline-v1",
 ]);
 const METADATA_SCENARIOS = new Set([
   "client-initiated-metadata",
@@ -317,6 +317,9 @@ function buildSuccessSummary(args, state) {
       summary.audio.received_encoded_byte_count = null;
       summary.audio.received_chunk_frames = null;
     }
+    if (args["scenario-id"] === "server-initiated-protocol-baseline-v1") {
+      summary.protocol = null;
+    }
   }
   return summary;
 }
@@ -410,6 +413,9 @@ async function main() {
     const failure = sessionFailure(state);
     if (failure !== null) {
       throw new Error(failure);
+    }
+    if (group === "player" && state.audioChunkCount === 0) {
+      throw new Error("SendspinCore received no decoded audio chunks");
     }
     const summary = buildSuccessSummary(args, state);
     writeJson(args.summary, summary);

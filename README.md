@@ -2,6 +2,17 @@
 
 Capability-aware conformance harness for local Sendspin implementations.
 
+A completed case can be `unverifiable` when its SDK cannot expose the required
+evidence, or when resampling makes the source PCM hash unsuitable for comparison.
+Both adapters still run. Connection errors, nonzero exits and observed protocol
+violations remain failures. The report counts unverifiable cases separately from
+passed, failed and unsupported cases.
+
+The JavaScript adapter builds the selected sendspin-js checkout with its Yarn
+lockfile and imports that same checkout. CI clones the latest default branch on
+each run. Update existing local checkouts before running the matrix; their exact
+revisions appear in the report.
+
 Current scenarios:
 
 - `client-initiated-pcm` (Client initiates connection and client wants PCM): start the server first, let the client discover/connect to it, advertise PCM as the only supported audio format, and compare canonical PCM hashes
@@ -37,7 +48,7 @@ The `client-initiated-state-format-*` scenarios have no capability flag of their
 
 The `client-initiated-metadata`, `client-initiated-artwork` and `client-initiated-controller` scenarios have no capability flag of their own either: RC1 requires every server to support client-initiated connections, whichever roles the client brings. The `aiosendspin`, `sendspin-dotnet`, `SendspinKit` and `sendspin-cpp` client adapters drive all three over the outbound path they use for `client-initiated-pcm`. The `sendspin-js` client adapter drives the metadata and controller scenarios the same way; it declares no `artwork` role family, so the harness marks its `client-initiated-artwork` cases unsupported before launching anything. The `sendspin-rs` client adapter has an outbound path for player sessions only, so its cases fail as a harness gap rather than being left out.
 
-The `server-initiated-audio-chunk-framing` scenario has no capability flag of its own either. A client adapter that is handed parsed chunks and never sees a raw frame reports that, and its case fails as a harness gap rather than being left out. Only the `aiosendspin` adapters, the `sendspin-server-cpp` server and the `sendspin-rs` and `sendspin-cpp` clients observe raw frames today.
+The `server-initiated-audio-chunk-framing` scenario has no capability flag of its own either. A client adapter that receives parsed chunks and cannot observe raw frames still runs. Its case is unverifiable unless the available evidence shows a failure. Only the `aiosendspin` adapters, the `sendspin-server-cpp` server and the `sendspin-rs` and `sendspin-cpp` clients observe raw frames today.
 
 An implementation without a client role gets no client column, and one without a server role gets no server row. Server rows are also left out per scenario, so the matrix only shows server rows that can actually run it. A client that implements the role but cannot run one scenario keeps its column: its case fails fast through a placeholder adapter and reads as unsupported.
 
@@ -49,8 +60,8 @@ protocol test and is pinned to Sendspin spec revision
 `8c9577ea8719ad082d051ec13cc73ef15ed68948`. That pin scopes this scenario's assertions
 only. It is not the revision the matrix is audited against: the verdicts applied to every
 case are judged against the spec checkout each run records in `repositories.json` and
-shows on the report overview. The scenario intentionally fails until an adapter
-can provide the required ordered protocol evidence described in
+shows on the report overview. An adapter that cannot expose ordered protocol evidence reports it as unavailable.
+The case still runs and checks the other peer's evidence. The contract is described in
 [`adapters/README.md`](adapters/README.md). The current PCM, FLAC, OPUS, artwork,
 metadata, and controller scenarios remain diagnostic interoperability checks during
 this migration: a matching hash or normalized snapshot is evidence that two adapters
