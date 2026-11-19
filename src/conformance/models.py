@@ -7,7 +7,7 @@ from typing import Literal
 
 
 AdapterKind = Literal["python", "dotnet", "node", "cargo", "swift", "go", "cmake", "placeholder", "none"]
-CaseStatus = Literal["passed", "failed", "skipped"]
+CaseStatus = Literal["passed", "failed", "skipped", "unverifiable"]
 InitiatorRole = Literal["server", "client"]
 RoleName = Literal["server", "client"]
 RoleFamily = Literal["player", "metadata", "controller", "artwork"]
@@ -26,6 +26,10 @@ VerificationMode = Literal[
 # comparing two formats must agree on this set, so it lives here rather than in
 # whichever module happens to compare them.
 AUDIO_FORMAT_FIELDS: tuple[str, ...] = ("codec", "sample_rate", "bit_depth", "channels")
+
+
+class UnverifiableReason(str):
+    """Evidence the SDK cannot expose, distinct from an observed failure."""
 
 
 @dataclass(frozen=True)

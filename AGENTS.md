@@ -117,6 +117,15 @@ If you change how repositories are resolved, merged, or reported, update both
 
 ### Summary contract
 
+`unverifiable` is a final case status, never a reason to skip execution. Run both
+adapters and check the available evidence. Use it only when an SDK cannot expose
+decoded PCM, raw client audio frames or baseline protocol evidence, or when
+resampling prevents comparison against the source PCM hash. Adapters report
+`status: "ok"` and explicit `null` for unavailable evidence. Missing fields and
+malformed evidence remain harness failures. Connection errors, nonzero exits and
+observed protocol violations still fail. The site counts unverifiable cases
+separately; regression detection treats them as not passed.
+
 Successful adapters should print a JSON summary and exit `0`.
 
 Important fields to preserve where available:
@@ -142,7 +151,7 @@ Important fields to preserve where available:
 
 `group_updates` should contain every `group/update` the server sent after that first `server/activate`, in order, each as it went on the wire and in the same `{type, payload}` shape. It is an empty list only when none followed, and is never reconstructed from adapter arguments or SDK state.
 
-`group_update_violation` in `src/conformance/protocol.py` judges this field on every case too. An empty list fails the case, and so does any recorded `group/update` whose `playback_state` is not `playing` or `stopped`, or whose `group_id` or `group_name` is missing or not a string. Unlike `activation`, a summary without the field also fails the case, as a harness gap. The difference is deliberate, so do not align the two. Every server adapter in the tree records `group_updates`, so a summary without it comes from a broken adapter, never from an implementation that predates the field, and failing closed keeps an adapter that cannot observe the messages from reading as a server that sent them. How soon the first message followed is not judged, because the spec says "promptly" and gives no bound, so one sent at any point in the case satisfies it.
+`group_update_violation` in `src/conformance/protocol.py` judges this field on every case too. An empty list fails the case, and so does any recorded `group/update` whose `playback_state` is not `playing` or `stopped`, or whose `group_id` or `group_name` is missing or not a string. The group ID must also contain exactly 43 base64url characters. Unlike `activation`, a summary without the field also fails the case, as a harness gap. The difference is deliberate, so do not align the two. Every server adapter in the tree records `group_updates`, so a summary without it comes from a broken adapter, never from an implementation that predates the field, and failing closed keeps an adapter that cannot observe the messages from reading as a server that sent them. How soon the first message followed is not judged, because the spec says "promptly" and gives no bound, so one sent at any point in the case satisfies it.
 
 Every recorded `group/update` is judged for its fields. The same spec sentence also requires one "whenever any field listed below changes", and nothing in the matrix asserts that a change produced one.
 

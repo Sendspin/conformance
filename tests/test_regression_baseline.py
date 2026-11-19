@@ -129,6 +129,11 @@ class DetectRegressionsTest(unittest.TestCase):
             1,
         )
 
+    def test_unverifiable_does_not_preserve_a_previous_pass(self) -> None:
+        regressions = detect_regressions([_row(status="passed")], [_row(status="unverifiable")])
+        self.assertEqual(len(regressions), 1)
+        self.assertEqual(regressions[0]["status"], "unverifiable")
+
     def test_changed_revision_suppresses_the_regression(self) -> None:
         self.assertEqual(
             detect_regressions(

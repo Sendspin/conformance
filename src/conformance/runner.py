@@ -30,7 +30,7 @@ from .implementations import (
     resolve_repo_path,
 )
 from .io import read_json, write_json
-from .models import AUDIO_FORMAT_FIELDS, CaseResult, RoleName, ScenarioSpec
+from .models import AUDIO_FORMAT_FIELDS, CaseResult, RoleName, ScenarioSpec, UnverifiableReason
 from .paths import repo_root
 from .process import close_process_log, collect_process, wait_for_exit, wait_for_file
 from .protocol import (
@@ -270,6 +270,7 @@ def _build_role_command(
             summary=str(summary),
             ready=str(ready),
             registry=str(registry),
+            sdk_path=str(resolve_repo_path(spec.repo_dirname)),
             **extra_args,
         )
     if role_spec.adapter_kind == "cargo":
@@ -600,6 +601,22 @@ def _compare_audio_summaries(
     received_hash = client_audio["received_pcm_sha256"]
     if not client_audio["audio_chunk_count"]:
         return False, "Client summary shows zero audio chunks"
+    stream = client_summary.get("stream")
+    if isinstance(stream, dict) and any(
+        type(server_audio.get(key)) is int
+        and type(stream.get(key)) is int
+        and server_audio[key] != stream[key]
+        for key in ("sample_rate", "channels")
+    ):
+        return False, UnverifiableReason(
+            "Audio was received, but the negotiated sample rate or channel count differs "
+            "from the source. The source PCM hash cannot verify resampled audio."
+        )
+    if received_hash is None:
+        return False, UnverifiableReason(
+            "Audio chunks were received, but the client SDK did not expose decoded PCM "
+            "for the audio hash check."
+        )
     if source_hash == received_hash:
         return True, "PCM hashes match exactly"
 
@@ -1171,11 +1188,17 @@ def _compare_summaries(
     server_summary: dict[str, Any],
     client_summary: dict[str, Any],
 ) -> tuple[bool, str]:
+    # A recorded group/update can explain a disconnect before the scenario
+    # produced its own evidence, such as a client rejecting the group ID.
+    if server_summary.get("group_updates"):
+        violation = group_update_violation(server_summary)
+        if violation is not None:
+            return False, violation
     reported = _adapter_reported_failures({"server": server_summary, "client": client_summary})
     if reported is not None:
         return False, reported
     matches, reason = _dispatch_comparison(scenario, server_summary, client_summary)
-    if not matches:
+    if not matches and not isinstance(reason, UnverifiableReason):
         return matches, reason
     # RC1 opens every connection with the server's initial server/activate,
     # whatever the scenario goes on to exercise, so this applies to all of them.
@@ -1227,7 +1250,9 @@ def _dispatch_comparison(
         return True, f"Passed {len(scenario.protocol_assertions)} protocol assertions"
     if scenario.verification_mode == "audio-pcm":
         matches, reason = _compare_audio_summaries(server_summary, client_summary)
-        if matches and scenario.verifies_stream_bit_depth is not None:
+        if (
+            matches or isinstance(reason, UnverifiableReason)
+        ) and scenario.verifies_stream_bit_depth is not None:
             violation = stream_bit_depth_violation(
                 server_summary,
                 client_summary,
@@ -1585,12 +1610,15 @@ async def run_case(
     except Exception as err:  # noqa: BLE001 - never let one bad case crash the whole matrix run
         matches = False
         comparison_reason = f"Comparison raised {err.__class__.__name__}: {err}"
-    if not matches:
+    if not matches and not isinstance(comparison_reason, UnverifiableReason):
         status = "failed"
         reason = comparison_reason
     elif server_process.returncode != 0 or client_process is None or client_process.returncode != 0:
         status = "failed"
         reason = "One or more adapters exited non-zero"
+    elif not matches:
+        status = "unverifiable"
+        reason = comparison_reason
     else:
         status = "passed"
         reason = comparison_reason

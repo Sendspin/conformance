@@ -24,7 +24,7 @@ ACTIVATE = {
     "type": "server/activate",
     "payload": {"activities": ["playback"], "active_roles": ["player@v1"]},
 }
-GROUP = {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"}
+GROUP = {"playback_state": "stopped", "group_id": "g" * 43, "group_name": "Kitchen"}
 
 
 # What a server that held stream/start until the client reported available records.
@@ -70,6 +70,16 @@ class GroupUpdateViolationTest(unittest.TestCase):
         self.assertIsNotNone(violation)
         self.assertTrue(violation.startswith("Server sent no group/update"))
         self.assertIn("RC1", violation)
+
+    def test_invalid_group_identifiers_explain_the_required_disconnect(self) -> None:
+        for group_id in ("1", "", "a" * 42, "a" * 44, "a" * 42 + "=", "a" * 42 + "+"):
+            with self.subTest(group_id=group_id):
+                violation = _violation(_group_update(**{**GROUP, "group_id": group_id}))
+                self.assertIn("43 base64url characters", violation)
+                self.assertIn("MUST close", violation)
+
+    def test_base64url_alphabet_is_accepted(self) -> None:
+        self.assertIsNone(_violation(_group_update(**{**GROUP, "group_id": "A0_-" * 10 + "abc"})))
 
     def test_conformant_group_updates_are_not_reported(self) -> None:
         for group_update in (

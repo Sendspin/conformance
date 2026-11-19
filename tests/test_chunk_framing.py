@@ -31,7 +31,7 @@ BYTES_PER_MS = 16
 # Every server summary carries one, and a case whose summary lacks it never passes.
 GROUP_UPDATE = {
     "type": "group/update",
-    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+    "payload": {"playback_state": "stopped", "group_id": "g" * 43, "group_name": "Kitchen"},
 }
 
 
@@ -437,9 +437,9 @@ class FrameEvidenceTest(unittest.TestCase):
 class ScenarioTest(unittest.TestCase):
     """The scenario is its own baseline key and its rule reaches no other scenario."""
 
-    def test_scenario_is_at_revision_four(self) -> None:
+    def test_scenario_revision(self) -> None:
         scenario = require_scenario(SCENARIO_ID)
-        self.assertEqual(scenario.scenario_revision, 4)
+        self.assertEqual(scenario.scenario_revision, 5)
         self.assertEqual(scenario.verification_mode, "audio-chunk-framing")
         self.assertEqual(scenario.preferred_codec, "pcm")
 

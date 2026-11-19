@@ -168,7 +168,12 @@ def _node_build_result() -> BuildResult:
             "detail": "npm executable is not available",
         }
 
-    install = _run_command([npm, "install"], cwd=sendspin_js_repo)
+    # Use the SDK's Yarn lockfile, as its own CI does. npm resolves a different
+    # peer dependency graph and can crash while importing this lockfile.
+    install = _run_command(
+        [npm, "exec", "--yes", "--package=yarn@1.22.22", "--", "yarn", "install", "--frozen-lockfile"],
+        cwd=sendspin_js_repo,
+    )
     if install.returncode != 0:
         return {
             "adapter": "sendspin-js-adapters",

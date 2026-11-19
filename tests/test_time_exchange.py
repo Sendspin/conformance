@@ -30,7 +30,7 @@ ACTIVATE = {
 }
 GROUP_UPDATE = {
     "type": "group/update",
-    "payload": {"playback_state": "stopped", "group_id": "group-1", "group_name": "Kitchen"},
+    "payload": {"playback_state": "stopped", "group_id": "g" * 43, "group_name": "Kitchen"},
 }
 AVAILABILITY_TRACE = [
     {"type": "client/state", "available": True},

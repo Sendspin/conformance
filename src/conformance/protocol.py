@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
 from .chunk_framing import HARNESS_GAP
+from .models import UnverifiableReason
 
 
 # The revision the protocol-baseline assertions below cite, and the one an
@@ -87,8 +89,15 @@ def protocol_evidence_failure(
     if unknown:
         return f"Scenario references unknown protocol assertion(s): {', '.join(unknown)}"
 
+    unavailable = None
     for role, summary in (("server", server_summary), ("client", client_summary)):
         protocol = summary.get("protocol")
+        if "protocol" in summary and protocol is None:
+            unavailable = UnverifiableReason(
+                f"{role.capitalize()} SDK does not expose the ordered protocol evidence "
+                "needed for the baseline assertions"
+            )
+            continue
         if not isinstance(protocol, dict):
             return f"{role.capitalize()} summary is missing required protocol evidence"
         if protocol.get("spec_revision") != SPEC_REVISION:
@@ -110,7 +119,7 @@ def protocol_evidence_failure(
             events = result.get("events")
             if not isinstance(events, list) or not events:
                 return f"{role.capitalize()} {assertion_id} has no trace events"
-    return None
+    return unavailable
 
 
 def activation_violation(server_summary: dict[str, Any]) -> str | None:
@@ -234,6 +243,12 @@ def _group_update_defects(payload: Any) -> list[str]:
             defects.append(
                 f"declared {name} {json.dumps(payload[name])}, where RC1 requires a string"
             )
+    group_id = payload.get("group_id")
+    if isinstance(group_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", group_id) is None:
+        defects.append(
+            f"declared group_id {json.dumps(group_id)}, where RC1 requires 43 base64url "
+            "characters; the client MUST close the connection"
+        )
     return defects
 
 
