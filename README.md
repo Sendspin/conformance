@@ -18,7 +18,7 @@ uvx --from git+https://github.com/Sendspin/conformance sendspin-validate
 
 The validator is a strict Sendspin server. Your app either connects to it, or it
 connects to your app, and it checks every frame your app sends. It then walks you
-through the pairing and reconnection suites, prompting you at each step.
+through the unpaired, pairing and post-pairing suites, prompting you at each step.
 
 Useful flags:
 
@@ -42,7 +42,8 @@ each cell is one server→client case:
 - `unsupported`: the implementation does not support this scenario or role, so the
   case is not a test of it.
 - `unverifiable`: the case ran without an observed failure, but an SDK could not
-  expose the evidence needed to judge it.
+  expose the evidence needed to judge it, or resampling ruled out comparing against
+  the source PCM hash.
 
 Each scenario, case and implementation has its own page with the logs and artifacts
 behind the verdict. The scenario list lives in
@@ -53,13 +54,13 @@ coverage in [`src/conformance/implementations.py`](src/conformance/implementatio
 
 Prerequisites:
 
-- [uv](https://docs.astral.sh/uv/) (required)
+- [uv](https://docs.astral.sh/uv/), Python 3.12 or newer, and `git` (required)
 - one toolchain per adapter you want built: `cargo` (sendspin-rs), `dotnet`
   (sendspin-dotnet), `swift` on macOS (SendspinKit), `cmake` and a C++ compiler
   (sendspin-cpp, sendspin-server-cpp), `node` and `npm` (sendspin-js)
 
-A missing toolchain does not stop the run: that adapter's build is reported as
-failed, and its cases fail with the reason.
+A missing toolchain does not stop `scripts/run_all.py`: that adapter's build is
+reported as failed, and its cases fail with the reason.
 
 ```bash
 python scripts/setup_workspace.py --clone

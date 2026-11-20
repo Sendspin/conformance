@@ -80,7 +80,7 @@ The report output layout is fixed:
 
 - `results/data/`
 - `results/index.html`
-- `results/implementations/*.html`
+- `results/implementations/*.html` (one per implementation, for linkable filtered overviews)
 - `results/scenarios/*.html`
 - `results/cases/*.html`
 
@@ -233,26 +233,26 @@ remote, so any such list goes stale on the next merge.
 
 ## Scenarios and coverage
 
-`src/conformance/scenarios.py` is the source of truth for the scenario list and order, and `src/conformance/implementations.py` for coverage. Keep this section in step with them when either changes.
+`src/conformance/scenarios.py` is the source of truth for the scenario list and order (listed below in that order), and `src/conformance/implementations.py` for coverage. Keep this section in step with them when either changes.
 
 ### Current scenarios
 
 - `client-initiated-pcm` (Client initiates connection and client wants PCM): start the server first, let the client discover/connect to it, advertise PCM as the only supported audio format, and compare canonical PCM hashes
 - `server-initiated-pcm` (Server initiates connection and client wants PCM): start the server first, let the client advertise a listener and PCM as its only supported audio format, let the server connect in, and compare canonical PCM hashes
 - `server-initiated-protocol-baseline-v1` (Server initiates a protocol baseline session): validates a spec-revision-pinned protocol trace for handshake order, activation, initial state, stream negotiation, and player chunk framing; it does not assess decoded or rendered audio
-- `server-initiated-metadata` (Server initiates connection and client wants Metadata): start the server first, let the client advertise a listener, let the server connect in, receive a metadata snapshot, and compare normalized metadata fields
-- `server-initiated-artwork` (Server initiates connection and client wants Artwork): start the server first, let the client advertise a listener, let the server connect in, receive album artwork bytes, and compare the encoded image hash
-- `server-initiated-controller` (Server initiates connection and client wants Controller): start the server first, let the client advertise a listener, let the server connect in, observe controller state, send a control command, and verify the server recorded it
 - `server-initiated-flac` (Server initiates connection and client wants FLAC): start the server first with PCM audio decoded from `almost_silent.flac`, let the client advertise a listener and FLAC as its only supported audio format, let the server connect in, encode the PCM to FLAC using the SDK, stream it to the client, and compare the transported FLAC bytes; where the client reports the audio it decoded and the stream kept the source's sample rate and channel count, also compare its canonical PCM hash against the source clip, so an intact but incomplete stream fails
 - `server-initiated-opus` (Server initiates connection and client prefers OPUS): start the server first with PCM audio decoded from `almost_silent.flac`, let the client advertise a listener and list OPUS first in its supported audio formats, followed by the PCM or FLAC entry every player must list, let the server connect in, and verify that it honoured that priority by encoding the PCM to OPUS using the SDK and streaming it to the client; compare the declared list, the negotiated format and the transported OPUS bytes. OPUS is lossy, so decoded audio is not compared against the source clip
+- `server-initiated-metadata` (Server initiates connection and client wants Metadata): start the server first, let the client advertise a listener, let the server connect in, receive a metadata snapshot, and compare normalized metadata fields
+- `server-initiated-controller` (Server initiates connection and client wants Controller): start the server first, let the client advertise a listener, let the server connect in, observe controller state, send a control command, and verify the server recorded it
+- `server-initiated-artwork` (Server initiates connection and client wants Artwork): start the server first, let the client advertise a listener, let the server connect in, receive album artwork bytes, and compare the encoded image hash
 - `server-initiated-pcm-24bit` (Server initiates connection and client wants 24-bit PCM): start the server first, let the client advertise a listener and 24-bit PCM as its only supported audio format, let the server connect in, negotiate the 24-bit packed wire format, stream it to the client, compare canonical PCM hashes, and verify that the negotiated stream was 24-bit — a client SDK with no 24-bit decode path misreads the bytes and produces a hash mismatch, and a pair that streamed another depth has not tested the 24-bit path
 - `client-initiated-state-format-pcm` (Client changes its preferred PCM bit depth via `client/state`): start the server first, let the client connect advertising two PCM formats (24-bit then 16-bit), let the server stream the higher-priority 24-bit format, have the client send a `client/state` whose player `format` prefers the 16-bit entry, and verify the server received that preference in `client/state` and the client observed a new `stream/start` in the 16-bit format
 - `client-initiated-state-format-flac` (Client changes its preferred format from PCM to FLAC via `client/state`): start the server first, let the client connect advertising PCM then FLAC, let the server stream the higher-priority PCM format, have the client send a `client/state` whose player `format` prefers the FLAC entry, and verify the server received that preference in `client/state` and the client observed a new `stream/start` in the FLAC format
 - `client-initiated-metadata` (Client initiates connection and client wants Metadata): start the server first, let the client discover/connect to it, receive a metadata snapshot, and compare normalized metadata fields
-- `client-initiated-artwork` (Client initiates connection and client wants Artwork): start the server first, let the client discover/connect to it, receive album artwork bytes, and compare the encoded image hash
 - `client-initiated-controller` (Client initiates connection and client wants Controller): start the server first, let the client discover/connect to it, observe controller state, send a control command, and verify the server recorded it
-- `server-initiated-audio-chunk-framing` (Server initiates connection and frames PCM audio chunks): start the server first, let the client advertise a listener and PCM as its only supported audio format, let the server connect in and stream, and have both adapters record each audio frame as it crossed the transport; verify that every frame is message type 4 behind the 13-byte header (type, int64 timestamp, uint32 `send_ahead`), that the client read the same 13 bytes off each one, and that no chunk lasted longer than 150 ms or, the final chunk aside, less than 15 ms. The audio itself is not compared, and `send_ahead` saturation is not judged because no adapter can observe when a frame was transmitted
+- `client-initiated-artwork` (Client initiates connection and client wants Artwork): start the server first, let the client discover/connect to it, receive album artwork bytes, and compare the encoded image hash
 - `server-initiated-legacy-unencrypted` (Server initiates connection over the legacy unencrypted transition mode): start the server first, then the client; the server uses aiosendspin's `allow_unencrypted` mode to test clients that do not yet support the required Noise handshake. This mode is outside the spec and sends traffic without encryption, and the scenario can be removed once every tracked implementation supports the Noise handshake
+- `server-initiated-audio-chunk-framing` (Server initiates connection and frames PCM audio chunks): start the server first, let the client advertise a listener and PCM as its only supported audio format, let the server connect in and stream, and have both adapters record each audio frame as it crossed the transport; verify that every frame is message type 4 behind the 13-byte header (type, int64 timestamp, uint32 `send_ahead`), that the client read the same 13 bytes off each one, and that no chunk lasted longer than 150 ms or, the final chunk aside, less than 15 ms. The audio itself is not compared, and `send_ahead` saturation is not judged because no adapter can observe when a frame was transmitted
 
 ### Current coverage
 
@@ -424,6 +424,12 @@ python scripts/setup_workspace.py --clone
 ```
 
 `uv.lock` is committed. CI and `scripts/setup_workspace.py` install with `uv sync --locked`, which fails when the lock no longer matches `pyproject.toml`. Run `uv lock` after editing dependencies and commit the result. Run `uv lock --upgrade` to refresh every pin.
+
+To use an implementation checkout outside `repos/`, set `CONFORMANCE_REPO_<NAME>` to
+its absolute path, with the repository name upper-cased and `-` written as `_` (for
+example `CONFORMANCE_REPO_SENDSPIN_CLI`). A non-empty value must point at an existing
+path: the harness stops at startup rather than fall back to `repos/<name>`. An empty
+value counts as unset.
 
 Build adapters:
 
