@@ -10,7 +10,15 @@ The latest matrix is live at <https://sendspin.github.io/conformance/>.
 
 ## Validate your client app
 
-The only prerequisite is [uv](https://docs.astral.sh/uv/):
+Install it on Linux or macOS, then run `sendspin-validate`:
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/Sendspin/conformance/main/scripts/install-sendspin-validate.sh | sh
+```
+
+The installer needs only `curl` (or `wget`): it installs [uv](https://docs.astral.sh/uv/)
+when it is missing, and uv fetches Python. Already have uv? Run it once without
+installing:
 
 ```sh
 uvx --from git+https://github.com/Sendspin/conformance sendspin-validate

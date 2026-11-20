@@ -187,7 +187,7 @@ Build/setup failures are different: those can still be real workflow failures.
 
 Two workflows run on pull requests and pushes to `main`:
 
-- `publish.yml` builds every implementation, runs the full matrix on macOS and publishes Pages. Only changes that can alter the matrix or the site start it: `src/conformance/**`, `adapters/**`, `scripts/**`, `pyproject.toml`, `uv.lock` and the workflow itself. The client validator (`src/conformance/validator/**`), its vendored aiosendspin (`src/conformance/_vendor/**`) and `scripts/vendor_aiosendspin.py` are excluded, because the matrix never runs them. Changes to `tests/`, docs or other workflows do not start it either. The nightly schedule and manual dispatch always run it.
+- `publish.yml` builds every implementation, runs the full matrix on macOS and publishes Pages. Only changes that can alter the matrix or the site start it: `src/conformance/**`, `adapters/**`, `scripts/**`, `pyproject.toml`, `uv.lock` and the workflow itself. The client validator (`src/conformance/validator/**`), its vendored aiosendspin (`src/conformance/_vendor/**`), `scripts/vendor_aiosendspin.py`, `scripts/install-sendspin-validate.sh` and `scripts/sendspin-validate-constraints.txt` are excluded, because the matrix never runs them. Changes to `tests/`, docs or other workflows do not start it either. The nightly schedule and manual dispatch always run it.
 - `ci.yml` runs `scripts/vendor_aiosendspin.py --check` and `tests/` on Linux whenever `src/`, `tests/`, `scripts/`, `patches/`, `pyproject.toml`, `uv.lock` or the workflow itself changes. Checks that need no implementation clones or macOS toolchains belong here.
 
 A new path the matrix depends on must be added to `publish.yml`'s path filters, or changes to it will merge without a matrix run.
@@ -302,8 +302,20 @@ interoperated, not proof that either followed the specification.
 `sendspin-validate` checks a Sendspin client app on its own, without an adapter. It
 is a strict Sendspin server, built on a bundled copy of aiosendspin, that your app
 connects to. It records every frame, checks what the client sends against spec
-`1.0.0-rc1`, and writes a report. The only prerequisite is
-[uv](https://docs.astral.sh/uv/):
+`1.0.0-rc1`, and writes a report. Install it on Linux or macOS with:
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/Sendspin/conformance/main/scripts/install-sendspin-validate.sh | sh
+```
+
+then run `sendspin-validate`. The installer needs nothing but `curl` (or `wget`): it
+installs [uv](https://docs.astral.sh/uv/) when it is missing, and uv fetches Python. It
+downloads the source as a GitHub tarball, so the machine needs neither git nor the
+Xcode command line tools. `uvx` and `uv tool install` ignore `uv.lock`, so the
+installer pins dependencies with `scripts/sendspin-validate-constraints.txt`, which
+records the versions `uv.lock` holds. Run the installer again to update, or set
+`SENDSPIN_VALIDATE_REF` to install a branch, tag or commit. With uv already installed,
+you can also run it once without installing:
 
 ```sh
 uvx --from git+https://github.com/Sendspin/conformance sendspin-validate
@@ -407,6 +419,7 @@ check is `FAIL` or `TOOL_ERROR`.
 - `scripts/run_all.py`: build + run + report orchestration
 - `scripts/merge_results.py`: merge multiple host result sets into one report
 - `scripts/vendor_aiosendspin.py`: rebuild `src/conformance/_vendor/` at an upstream ref, or `--check` it against the recorded commit
+- `scripts/install-sendspin-validate.sh`: the `curl … | sh` installer for `sendspin-validate`, which pins its dependencies with `scripts/sendspin-validate-constraints.txt`
 
 ### CI
 
@@ -423,7 +436,7 @@ python scripts/setup_workspace.py --clone
 . .venv/bin/activate
 ```
 
-`uv.lock` is committed. CI and `scripts/setup_workspace.py` install with `uv sync --locked`, which fails when the lock no longer matches `pyproject.toml`. Run `uv lock` after editing dependencies and commit the result. Run `uv lock --upgrade` to refresh every pin.
+`uv.lock` is committed. CI and `scripts/setup_workspace.py` install with `uv sync --locked`, which fails when the lock no longer matches `pyproject.toml`. Run `uv lock` after editing dependencies and commit the result. Run `uv lock --upgrade` to refresh every pin. After either, regenerate `scripts/sendspin-validate-constraints.txt` with the command in its header; a test fails until it matches `uv.lock`.
 
 To use an implementation checkout outside `repos/`, set `CONFORMANCE_REPO_<NAME>` to
 its absolute path, with the repository name upper-cased and `-` written as `_` (for
