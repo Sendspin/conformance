@@ -82,7 +82,7 @@ var summary = new Dictionary<string, object?>
     ["peer_hello"] = peerHello,
 };
 
-if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "server-initiated-flac" or "server-initiated-pcm-24bit")
+if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "server-initiated-flac" or "server-initiated-opus" or "server-initiated-pcm-24bit")
 {
     summary["stream"] = playerStream;
     summary["audio"] = pipeline.Snapshot();
@@ -259,7 +259,7 @@ SendspinClientOptions BuildClientOptions() =>
 
 void CaptureStreamStart(StreamStartPayload payload)
 {
-    if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "server-initiated-flac" or "server-initiated-pcm-24bit"
+    if (options.ScenarioId is "client-initiated-pcm" or "server-initiated-pcm" or "server-initiated-flac" or "server-initiated-opus" or "server-initiated-pcm-24bit"
             or "server-initiated-audio-chunk-framing"
         && payload.Format is not null)
     {
@@ -405,18 +405,27 @@ static ClientCapabilities BuildCapabilities(CliOptions options)
     // The 24-bit scenario offers 24-bit as its only depth, so the server has no
     // 16-bit entry to stream and the SDK's 24-bit decode path is the one that runs.
     var pcmBitDepth = options.ScenarioId == "server-initiated-pcm-24bit" ? 24 : 16;
-    var audioFormats = options.PreferredCodec.Equals("pcm", StringComparison.OrdinalIgnoreCase)
-        ? new List<AudioFormat>
+    var audioFormats = options.PreferredCodec.ToLowerInvariant() switch
+    {
+        "pcm" => new List<AudioFormat>
         {
             new() { Codec = "pcm", SampleRate = 8000, Channels = 1, BitDepth = pcmBitDepth },
-        }
-        : new List<AudioFormat>
+        },
+        // Every player has to list flac or pcm; opus stays first so the server's
+        // priority choice is what the case exercises.
+        "opus" => new List<AudioFormat>
+        {
+            new() { Codec = "opus", SampleRate = 8000, Channels = 1, BitDepth = 16 },
+            new() { Codec = "pcm", SampleRate = 8000, Channels = 1, BitDepth = 16 },
+        },
+        _ => new List<AudioFormat>
         {
             new() { Codec = "flac", SampleRate = 8000, Channels = 1, BitDepth = 16 },
             new() { Codec = "pcm", SampleRate = 8000, Channels = 1, BitDepth = 16 },
             new() { Codec = "flac", SampleRate = 44100, Channels = 2, BitDepth = 16 },
             new() { Codec = "pcm", SampleRate = 44100, Channels = 2, BitDepth = 16 },
-        };
+        },
+    };
 
     var roles = options.ScenarioId switch
     {
