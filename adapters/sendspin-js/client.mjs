@@ -37,6 +37,7 @@ const IMPLEMENTATION = "sendspin-js";
 const PLAYER_SCENARIOS = new Set([
   "client-initiated-pcm",
   "server-initiated-pcm",
+  "server-initiated-opus",
   "server-initiated-legacy-unencrypted",
   "server-initiated-audio-chunk-framing",
   "server-initiated-protocol-baseline-v1",
@@ -139,6 +140,8 @@ class AdapterState {
     this.audioChunkCount = 0;
     this.pcmHasher = crypto.createHash("sha256");
     this.pcmSampleCount = 0;
+    this.encodedHasher = crypto.createHash("sha256");
+    this.encodedByteCount = 0;
     this.metadataUpdateCount = 0;
     this.lastMetadataFingerprint = null;
     this.receivedMetadata = null;
@@ -200,7 +203,8 @@ function buildCore({ args, webSocket, state }) {
   const core = new SendspinCore({
     playerId: args["client-id"],
     clientName: args["client-name"],
-    codecs: ["pcm"],
+    // SendspinCore appends the flac or pcm entry every player has to list.
+    codecs: [args["preferred-codec"] === "opus" ? "opus" : "pcm"],
     webSocket,
     onStateChange: ({ serverState }) => {
       if (serverState.metadata) {
@@ -306,7 +310,8 @@ function buildSuccessSummary(args, state) {
     summary.stream = state.streamFormat;
     summary.audio = {
       audio_chunk_count: state.audioChunkCount,
-      received_encoded_sha256: null,
+      received_encoded_sha256:
+        state.encodedByteCount > 0 ? state.encodedHasher.digest("hex") : null,
       received_pcm_sha256:
         state.pcmSampleCount > 0 ? state.pcmHasher.digest("hex") : null,
       received_sample_count: state.pcmSampleCount,
@@ -400,6 +405,13 @@ async function main() {
   const timeoutSeconds = Number(args["timeout-seconds"] ?? "30");
 
   try {
+    if (args["preferred-codec"] === "opus") {
+      const { installOpusWebCodecs } = await import("./webcodecs-opus.mjs");
+      installOpusWebCodecs((data) => {
+        state.encodedHasher.update(data);
+        state.encodedByteCount += data.byteLength;
+      });
+    }
     if (group === null) {
       throw new Error(
         `sendspin-js adapter does not support scenario ${args["scenario-id"]} through the public SDK.`,

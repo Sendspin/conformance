@@ -107,6 +107,7 @@ IMPLEMENTATIONS: dict[str, ImplementationSpec] = {
             entrypoint="adapters/sendspin-js/client.mjs",
             supports_server_initiated=True,
             supports_client_initiated=True,
+            supports_opus=True,
             supports_legacy_unencrypted=True,
             supported_role_families=("player", "metadata", "controller"),
         ),
